@@ -1,0 +1,39 @@
+{
+  "name": "distrotrack-10",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^26.2.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.0.5",
+    "tailwindcss": "^4.3.3",
+    "typescript": "~6.0.2",
+    "vite": "^8.2.0"
+  },
+  "dependencies": {
+    "@hookform/resolvers": "^5.7.1",
+    "@supabase/supabase-js": "^2.112.2",
+    "@tanstack/react-query": "^5.101.4",
+    "@types/three": "^0.185.4",
+    "date-fns": "^4.4.0",
+    "lucide-react": "^1.31.0",
+    "pdfjs-dist": "^6.2.108",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-hook-form": "^7.85.0",
+    "react-qr-code": "^2.2.0",
+    "react-router-dom": "^7.18.2",
+    "sonner": "^2.0.8",
+    "three": "^0.185.1",
+    "xlsx": "^0.18.5",
+    "zod": "^3.25.76"
+  }
+}

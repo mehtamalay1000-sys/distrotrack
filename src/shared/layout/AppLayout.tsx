@@ -1,0 +1,151 @@
+import { useState } from 'react';
+import { Outlet, NavLink, useNavigate } from 'react-router-dom';
+import { useAuth } from '@/app/AuthProvider';
+import { useTheme } from '@/shared/theme/ThemeProvider';
+import {
+  LayoutDashboard, Users, MapPin, Building2, Package, ClipboardList,
+  Truck, CreditCard, Receipt, BarChart3, FileUp, Menu, X, LogOut, ChevronDown,
+  Sun, Moon, Database
+} from 'lucide-react';
+
+const navItems = [
+  { to: '/', label: 'Dashboard', icon: LayoutDashboard },
+  { to: '/workers', label: 'Workers', icon: Users },
+  { to: '/routes', label: 'Routes', icon: MapPin },
+  { to: '/parties', label: 'Parties', icon: Building2 },
+  { to: '/products', label: 'Products', icon: Package },
+  { to: '/picklists', label: 'Picklists', icon: ClipboardList },
+  { to: '/deliveries', label: 'Deliveries', icon: Truck },
+  { to: '/payments', label: 'Payments', icon: CreditCard },
+  { to: '/expenses', label: 'Expenses', icon: Receipt },
+  { to: '/reports', label: 'Reports', icon: BarChart3 },
+  { to: '/import', label: 'SAP Import', icon: FileUp },
+  { to: '/master-data', label: 'Master Data', icon: Database },
+];
+
+export function AppLayout() {
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const { profile, signOut } = useAuth();
+  const { theme, toggleTheme } = useTheme();
+  const navigate = useNavigate();
+
+  const handleSignOut = async () => {
+    await signOut();
+    navigate('/login');
+  };
+
+  return (
+    <div className="min-h-screen flex bg-surface-50 dark:bg-surface-900 text-surface-900 dark:text-surface-100 transition-colors">
+      {/* Sidebar */}
+      <aside className={`
+        fixed inset-y-0 left-0 z-40 w-56 bg-white dark:bg-surface-900 border-r border-surface-200 dark:border-surface-800 flex flex-col
+        transform transition-transform duration-200 ease-in-out
+        lg:translate-x-0 lg:static lg:z-0
+        ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
+      `}>
+        {/* Logo */}
+        <div className="h-14 flex items-center px-4 border-b border-surface-200 dark:border-surface-800">
+          <div className="flex items-center gap-2">
+            <div className="h-7 w-7 rounded-lg bg-primary-600 flex items-center justify-center">
+              <Package className="h-4 w-4 text-white" />
+            </div>
+            <span className="font-semibold text-surface-900 dark:text-white text-sm">DistroTrack</span>
+          </div>
+          <button onClick={() => setSidebarOpen(false)} className="ml-auto lg:hidden p-1 text-surface-400 hover:text-surface-600 dark:hover:text-surface-300">
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        {/* Nav */}
+        <nav className="flex-1 py-3 px-2 space-y-0.5 overflow-y-auto">
+          {navItems.map((item) => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              end={item.to === '/'}
+              onClick={() => setSidebarOpen(false)}
+              className={({ isActive }) => `
+                flex items-center gap-2.5 px-3 py-2 text-sm rounded-lg transition-colors
+                ${isActive
+                  ? 'bg-primary-50 dark:bg-primary-950/60 text-primary-700 dark:text-primary-300 font-medium'
+                  : 'text-surface-600 dark:text-surface-400 hover:bg-surface-50 dark:hover:bg-surface-800 hover:text-surface-900 dark:hover:text-surface-100'}
+              `}
+            >
+              <item.icon className="h-4 w-4 flex-shrink-0" />
+              {item.label}
+            </NavLink>
+          ))}
+        </nav>
+
+        {/* Profile */}
+        <div className="border-t border-surface-200 dark:border-surface-800 p-2 relative">
+          <button
+            onClick={() => setProfileOpen(!profileOpen)}
+            className="w-full flex items-center gap-2 px-3 py-2 text-sm rounded-lg hover:bg-surface-50 dark:hover:bg-surface-800 transition-colors"
+          >
+            <div className="h-7 w-7 rounded-full bg-primary-100 dark:bg-primary-900 flex items-center justify-center text-xs font-medium text-primary-700 dark:text-primary-300">
+              {(profile?.full_name || profile?.email || 'U').charAt(0).toUpperCase()}
+            </div>
+            <div className="flex-1 text-left min-w-0">
+              <p className="text-sm font-medium text-surface-900 dark:text-surface-100 truncate">
+                {profile?.full_name || 'User'}
+              </p>
+              <p className="text-xs text-surface-500 dark:text-surface-400 truncate">{profile?.email || 'user@distrotrack.com'}</p>
+            </div>
+            <ChevronDown className="h-3.5 w-3.5 text-surface-400" />
+          </button>
+          {profileOpen && (
+            <div className="absolute bottom-full left-2 right-2 mb-1 bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-lg shadow-lg py-1">
+              <button
+                onClick={handleSignOut}
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm text-surface-600 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-700"
+              >
+                <LogOut className="h-4 w-4" />
+                Sign out
+              </button>
+            </div>
+          )}
+        </div>
+      </aside>
+
+      {/* Mobile overlay */}
+      {sidebarOpen && (
+        <div className="fixed inset-0 z-30 bg-black/20 lg:hidden" onClick={() => setSidebarOpen(false)} />
+      )}
+
+      {/* Main content */}
+      <div className="flex-1 flex flex-col min-w-0">
+        {/* Header */}
+        <header className="h-14 bg-white dark:bg-surface-900 border-b border-surface-200 dark:border-surface-800 flex items-center px-4 lg:px-6 sticky top-0 z-20">
+          <button onClick={() => setSidebarOpen(true)} className="lg:hidden mr-3 p-1 text-surface-500 hover:text-surface-700 dark:hover:text-surface-300">
+            <Menu className="h-5 w-5" />
+          </button>
+          <div className="flex-1" />
+          <button
+            onClick={toggleTheme}
+            className="p-2 rounded-lg text-surface-500 dark:text-surface-400 hover:bg-surface-100 dark:hover:bg-surface-800 hover:text-surface-900 dark:hover:text-surface-100 transition-colors flex items-center gap-2 text-xs font-medium"
+            title="Toggle theme"
+          >
+            {theme === 'dark' ? (
+              <>
+                <Sun className="h-4 w-4 text-amber-400" />
+                <span className="hidden sm:inline">Light Mode</span>
+              </>
+            ) : (
+              <>
+                <Moon className="h-4 w-4 text-slate-600" />
+                <span className="hidden sm:inline">Dark Mode</span>
+              </>
+            )}
+          </button>
+        </header>
+
+        {/* Page content */}
+        <main className="flex-1 p-4 lg:p-6">
+          <Outlet />
+        </main>
+      </div>
+    </div>
+  );
+}
