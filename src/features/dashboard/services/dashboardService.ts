@@ -14,10 +14,26 @@ export interface DashboardStats {
   completedDeliveriesCount: number;
   totalExpensesToday: number;
   activeWorkersCount: number;
+  // Monthly stats
+  monthlySales: number;
+  monthlyCollections: number;
+  monthlyUdhari: number;
+  monthlyCash: number;
+  monthlyCheque: number;
 }
 
 export async function getDashboardStats(): Promise<DashboardStats> {
-  const todayStr = new Date().toISOString().split('T')[0];
+  const now = new Date();
+  const todayStr = now.toISOString().split('T')[0];
+  const currentYear = now.getFullYear();
+  const currentMonth = now.getMonth(); // 0-indexed
+
+  /** Check if a date string falls in the current month */
+  function isCurrentMonth(dateStr: string | null | undefined): boolean {
+    if (!dateStr) return false;
+    const d = new Date(dateStr);
+    return d.getFullYear() === currentYear && d.getMonth() === currentMonth;
+  }
 
   try {
     const [picklists, deliveries, payments, expenses, parties, workers] = await Promise.all([
@@ -28,6 +44,8 @@ export async function getDashboardStats(): Promise<DashboardStats> {
       getParties().catch(() => []),
       getWorkers().catch(() => []),
     ]);
+
+    // ── Daily Stats (use today's date) ─────────────────────────────────
 
     const todaySales = picklists
       .filter((p) => p.date === todayStr || p.created_at?.startsWith(todayStr))
@@ -70,6 +88,32 @@ export async function getDashboardStats(): Promise<DashboardStats> {
       // fallback
     }
 
+    // ── Monthly Stats ──────────────────────────────────────────────────
+
+    const monthlySales = picklists
+      .filter((p) => isCurrentMonth(p.date) || isCurrentMonth(p.created_at))
+      .reduce((sum, p) => sum + Number(p.total_amount || 0), 0);
+
+    const monthlyPayments = payments.filter(
+      (p) => isCurrentMonth(p.payment_date) || isCurrentMonth(p.created_at)
+    );
+
+    const monthlyCollections = monthlyPayments
+      .filter((p) => p.payment_mode !== 'credit')
+      .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+    const monthlyUdhari = monthlyPayments
+      .filter((p) => p.payment_mode === 'credit')
+      .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+    const monthlyCash = monthlyPayments
+      .filter((p) => p.payment_mode === 'cash')
+      .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+    const monthlyCheque = monthlyPayments
+      .filter((p) => p.payment_mode === 'cheque')
+      .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
     return {
       todaySales,
       todayCollections,
@@ -78,6 +122,11 @@ export async function getDashboardStats(): Promise<DashboardStats> {
       completedDeliveriesCount,
       totalExpensesToday,
       activeWorkersCount,
+      monthlySales,
+      monthlyCollections,
+      monthlyUdhari,
+      monthlyCash,
+      monthlyCheque,
     };
   } catch (err) {
     console.error('Error computing dashboard stats:', err);
@@ -89,6 +138,11 @@ export async function getDashboardStats(): Promise<DashboardStats> {
       completedDeliveriesCount: 0,
       totalExpensesToday: 0,
       activeWorkersCount: 0,
+      monthlySales: 0,
+      monthlyCollections: 0,
+      monthlyUdhari: 0,
+      monthlyCash: 0,
+      monthlyCheque: 0,
     };
   }
 }

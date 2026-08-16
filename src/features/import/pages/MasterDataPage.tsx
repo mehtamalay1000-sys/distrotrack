@@ -497,10 +497,10 @@ export function MasterDataPage() {
               Upload Another File
             </Button>
             <div className="flex gap-2">
-              <Button variant="ghost" onClick={() => window.location.href = '/parties'} icon={<Users className="h-4 w-4" />}>
+              <Button variant="ghost" onClick={() => window.location.href = '/admin/parties'} icon={<Users className="h-4 w-4" />}>
                 View Parties
               </Button>
-              <Button variant="ghost" onClick={() => window.location.href = '/products'} icon={<Package className="h-4 w-4" />}>
+              <Button variant="ghost" onClick={() => window.location.href = '/admin/products'} icon={<Package className="h-4 w-4" />}>
                 View Products
               </Button>
             </div>

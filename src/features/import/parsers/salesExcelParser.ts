@@ -34,16 +34,29 @@ const COLUMN_ALIASES: Record<string, string[]> = {
 
 /**
  * Finds a matching column key from the header row.
- * Attempts case-insensitive partial matching against known aliases.
+ * Prefers exact matches over partial (includes) matches to avoid
+ * ambiguous columns like "Invoice Type Description" stealing the
+ * match from the actual "Description" column.
  */
 function findColumnIndex(headers: string[], aliasKey: string): number {
   const aliases = COLUMN_ALIASES[aliasKey] || [];
+
+  // Pass 1: exact match (highest priority)
   for (let i = 0; i < headers.length; i++) {
     const h = (headers[i] || '').toString().toLowerCase().trim();
     for (const alias of aliases) {
-      if (h === alias || h.includes(alias)) return i;
+      if (h === alias) return i;
     }
   }
+
+  // Pass 2: partial includes match (fallback)
+  for (let i = 0; i < headers.length; i++) {
+    const h = (headers[i] || '').toString().toLowerCase().trim();
+    for (const alias of aliases) {
+      if (h.includes(alias)) return i;
+    }
+  }
+
   return -1;
 }
 

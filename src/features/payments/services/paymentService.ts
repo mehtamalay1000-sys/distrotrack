@@ -178,6 +178,7 @@ export async function deletePayment(id: string): Promise<void> {
   try {
     await supabase.from('payments').delete().eq('id', id);
   } catch {
-    // fallback
+    // fallback — still remove locally
   }
+  mockStore.deletePayment(id);
 }

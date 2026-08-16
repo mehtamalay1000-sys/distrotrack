@@ -1,7 +1,7 @@
 export type UserRole = 'owner' | 'worker';
 
 export type WorkerStatus = 'active' | 'inactive';
-export type RouteStatus = 'active' | 'inactive';
+export type RouteStatus = 'active' | 'inactive' | 'completed';
 export type PartyStatus = 'active' | 'inactive';
 export type ProductStatus = 'active' | 'inactive';
 

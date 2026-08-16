@@ -280,6 +280,11 @@ class MockStore {
     });
 
     // Cascade filter out from local state
+    this.payments = this.payments.filter((p) => {
+      if (p.delivery_id && deliveryIds.has(p.delivery_id)) return false;
+      if (p.party_id && partyIds.has(p.party_id)) return false;
+      return true;
+    });
     this.routes = this.routes.filter((r) => r.id !== id);
     this.picklists = this.picklists.filter((pl) => !picklistIds.has(pl.id));
     this.picklistItems = this.picklistItems.filter((pli) => !picklistIds.has(pli.picklist_id));
@@ -617,6 +622,10 @@ class MockStore {
 
     this.saveToStorage();
     return created;
+  }
+  deletePayment(id: string) {
+    this.payments = this.payments.filter((p) => p.id !== id);
+    this.saveToStorage();
   }
 
   // ── Expenses ───────────────────────────────────────────────────────

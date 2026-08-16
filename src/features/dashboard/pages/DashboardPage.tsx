@@ -2,7 +2,7 @@ import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
   TrendingUp, DollarSign, AlertCircle, Truck, CheckCircle2, Receipt,
-  FileUp, ArrowRight, ClipboardList
+  FileUp, ArrowRight, ClipboardList, CalendarDays, Banknote, CreditCard, Clock
 } from 'lucide-react';
 import { PageHeader, StatCard, Button, Card, StatusBadge, LoadingState } from '@/shared/ui';
 import { getDashboardStats } from '../services/dashboardService';
@@ -30,6 +30,8 @@ export function DashboardPage() {
 
   if (statsLoading || !stats) return <LoadingState message="Loading daily dashboard…" />;
 
+  const monthName = new Date().toLocaleString('default', { month: 'long', year: 'numeric' });
+
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
       <PageHeader
@@ -42,7 +44,7 @@ export function DashboardPage() {
         }
       />
 
-      {/* Primary KPI Grid */}
+      {/* Primary KPI Grid — Today */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard
           label="Today's Sales"
@@ -64,6 +66,82 @@ export function DashboardPage() {
           value={formatCurrency(stats.totalExpensesToday)}
           icon={<Receipt className="h-5 w-5 text-red-500 dark:text-red-400" />}
         />
+      </div>
+
+      {/* Monthly Overview Section */}
+      <div>
+        <div className="flex items-center gap-2 mb-3">
+          <CalendarDays className="h-5 w-5 text-primary-600 dark:text-primary-400" />
+          <h2 className="text-sm font-bold text-surface-900 dark:text-surface-100 uppercase tracking-wider">
+            Monthly Overview — {monthName}
+          </h2>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+          {/* Monthly Sales */}
+          <div className="bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-blue-950/30 dark:to-indigo-950/30 border border-blue-200/80 dark:border-blue-800/50 rounded-2xl p-4 shadow-xs">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[10px] font-bold text-blue-800 dark:text-blue-300 uppercase tracking-wider">Monthly Sales</span>
+              <div className="h-7 w-7 rounded-lg bg-blue-500 text-white flex items-center justify-center shadow-xs">
+                <TrendingUp className="h-3.5 w-3.5" />
+              </div>
+            </div>
+            <div className="text-xl font-black text-blue-700 dark:text-blue-300 tracking-tight">
+              {formatCurrency(stats.monthlySales)}
+            </div>
+          </div>
+
+          {/* Monthly Collections */}
+          <div className="bg-gradient-to-br from-emerald-50 to-teal-50 dark:from-emerald-950/30 dark:to-teal-950/30 border border-emerald-200/80 dark:border-emerald-800/50 rounded-2xl p-4 shadow-xs">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[10px] font-bold text-emerald-800 dark:text-emerald-300 uppercase tracking-wider">Monthly Collections</span>
+              <div className="h-7 w-7 rounded-lg bg-emerald-500 text-white flex items-center justify-center shadow-xs">
+                <DollarSign className="h-3.5 w-3.5" />
+              </div>
+            </div>
+            <div className="text-xl font-black text-emerald-700 dark:text-emerald-300 tracking-tight">
+              {formatCurrency(stats.monthlyCollections)}
+            </div>
+          </div>
+
+          {/* Monthly Udhari */}
+          <div className="bg-gradient-to-br from-amber-50 to-orange-50 dark:from-amber-950/30 dark:to-orange-950/30 border border-amber-200/80 dark:border-amber-800/50 rounded-2xl p-4 shadow-xs">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[10px] font-bold text-amber-800 dark:text-amber-300 uppercase tracking-wider">Monthly Udhari</span>
+              <div className="h-7 w-7 rounded-lg bg-amber-500 text-white flex items-center justify-center shadow-xs">
+                <Clock className="h-3.5 w-3.5" />
+              </div>
+            </div>
+            <div className="text-xl font-black text-amber-700 dark:text-amber-300 tracking-tight">
+              {formatCurrency(stats.monthlyUdhari)}
+            </div>
+          </div>
+
+          {/* Monthly Cash */}
+          <div className="bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-2xl p-4 shadow-xs">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[10px] font-bold text-surface-500 dark:text-surface-400 uppercase tracking-wider">Monthly Cash</span>
+              <div className="h-7 w-7 rounded-lg bg-green-100 dark:bg-green-950/50 text-green-600 dark:text-green-400 flex items-center justify-center">
+                <Banknote className="h-3.5 w-3.5" />
+              </div>
+            </div>
+            <div className="text-xl font-extrabold text-surface-900 dark:text-white">
+              {formatCurrency(stats.monthlyCash)}
+            </div>
+          </div>
+
+          {/* Monthly Cheque */}
+          <div className="bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-2xl p-4 shadow-xs">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[10px] font-bold text-surface-500 dark:text-surface-400 uppercase tracking-wider">Monthly Cheque</span>
+              <div className="h-7 w-7 rounded-lg bg-blue-100 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 flex items-center justify-center">
+                <CreditCard className="h-3.5 w-3.5" />
+              </div>
+            </div>
+            <div className="text-xl font-extrabold text-surface-900 dark:text-white">
+              {formatCurrency(stats.monthlyCheque)}
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* Secondary Quick Overview */}

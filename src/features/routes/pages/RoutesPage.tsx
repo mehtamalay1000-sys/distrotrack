@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { Plus, Search, MoreHorizontal, Edit2, Trash2, ChevronDown, ChevronUp, CheckCircle2, MapPin, Building2, Package, Settings2, RefreshCw } from 'lucide-react';
+import { Plus, Search, MoreHorizontal, Edit2, Trash2, ChevronDown, ChevronUp, CheckCircle2, MapPin, Building2, Package, Settings2, RefreshCw, RotateCcw } from 'lucide-react';
 import { PageHeader, Button, Input, Select, Modal, EmptyState, LoadingState, ErrorState, StatusBadge, Card } from '@/shared/ui';
 import { getRoutes, createRoute, updateRoute, deleteRoute, seedOfficialRoutes } from '../services/routeService';
 import { getWorkers } from '@/features/workers/services/workerService';
@@ -21,6 +21,7 @@ export function RoutesPage() {
   const [editingRouteForItems, setEditingRouteForItems] = useState<Route | null>(null);
   const [menuOpen, setMenuOpen] = useState<string | null>(null);
   const [expandedRouteId, setExpandedRouteId] = useState<string | null>(null);
+  const [showCompleted, setShowCompleted] = useState(false);
   const [form, setForm] = useState({ name: '', code: '', description: '', assigned_worker_id: '' });
 
   const { data: routes = [], isLoading: rLoading, error } = useQuery({ queryKey: ['routes'], queryFn: getRoutes });
@@ -77,7 +78,7 @@ export function RoutesPage() {
           await updatePicklistStatus(pl.id, 'completed');
         }
       }
-      await updateRoute(route.id, { status: 'active' });
+      await updateRoute(route.id, { status: 'completed' as any });
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['routes'] });
@@ -89,10 +90,25 @@ export function RoutesPage() {
     onError: (e: Error) => toast.error(e.message),
   });
 
+  // Reactivate a completed route
+  const reactivateRouteMut = useMutation({
+    mutationFn: async (routeId: string) => {
+      await updateRoute(routeId, { status: 'active' });
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['routes'] });
+      toast.success('Route reactivated!');
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
   const filtered = routes.filter((r) =>
     r.name.toLowerCase().includes(search.toLowerCase()) ||
     r.code.toLowerCase().includes(search.toLowerCase())
   );
+
+  const activeRoutes = filtered.filter((r) => r.status !== 'completed');
+  const completedRoutes = filtered.filter((r) => r.status === 'completed');
 
   function openCreate() {
     setEditing(null);
@@ -163,11 +179,14 @@ export function RoutesPage() {
         </div>
       </div>
 
-      {filtered.length === 0 ? (
+      {activeRoutes.length === 0 && completedRoutes.length === 0 ? (
         <EmptyState title="No routes found" description={search ? 'Try a different search' : 'Add your first route or import an SAP picklist'} action={!search ? <Button size="sm" onClick={openCreate}>Add Route</Button> : undefined} />
       ) : (
+        <div className="space-y-6">
+        {/* Active Routes Section */}
+        {activeRoutes.length > 0 && (
         <div className="space-y-4">
-          {filtered.map((route) => {
+          {activeRoutes.map((route) => {
             const isExpanded = expandedRouteId === route.id;
             // Get parties assigned to this route
             const routeParties = parties.filter(p => p.route_id === route.id || p.route?.code === route.code);
@@ -375,6 +394,73 @@ export function RoutesPage() {
               </Card>
             );
           })}
+        </div>
+        )}
+
+        {/* Completed Routes Section */}
+        {completedRoutes.length > 0 && (
+          <div className="space-y-3">
+            <button
+              onClick={() => setShowCompleted(!showCompleted)}
+              className="w-full flex items-center justify-between px-4 py-3 bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800/50 rounded-xl hover:bg-emerald-100 dark:hover:bg-emerald-950/50 transition-colors"
+            >
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="h-5 w-5 text-emerald-600 dark:text-emerald-400" />
+                <span className="text-sm font-bold text-emerald-800 dark:text-emerald-300">
+                  Completed Routes ({completedRoutes.length})
+                </span>
+              </div>
+              {showCompleted ? <ChevronUp className="h-4 w-4 text-emerald-600" /> : <ChevronDown className="h-4 w-4 text-emerald-600" />}
+            </button>
+
+            {showCompleted && completedRoutes.map((route) => {
+              const routeParties = parties.filter(p => p.route_id === route.id || p.route?.code === route.code);
+              const routePicklists = picklists.filter(pl => pl.route_id === route.id || pl.route?.code === route.code);
+              const routeTotalAmount = routePicklists.reduce((sum, pl) => sum + Number(pl.total_amount || 0), 0);
+
+              return (
+                <Card key={route.id} className="p-4 border border-emerald-200 dark:border-emerald-800/50 bg-emerald-50/50 dark:bg-emerald-950/20">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <div className="h-8 w-8 rounded-lg bg-emerald-100 dark:bg-emerald-900/50 flex items-center justify-center">
+                        <CheckCircle2 className="h-4.5 w-4.5 text-emerald-600 dark:text-emerald-400" />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-xs bg-emerald-100 dark:bg-emerald-900/60 text-emerald-700 dark:text-emerald-300 px-2 py-0.5 rounded font-bold">{route.code}</span>
+                          <h3 className="font-semibold text-sm text-surface-900 dark:text-white">{route.name}</h3>
+                          <StatusBadge status="completed" />
+                        </div>
+                        <p className="text-xs text-surface-500 dark:text-surface-400 mt-0.5">
+                          {routeParties.length} parties • {formatCurrency(routeTotalAmount)} total
+                          {route.worker && <> • Worker: {route.worker.name}</>}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        icon={<RotateCcw className="h-3.5 w-3.5" />}
+                        loading={reactivateRouteMut.isPending}
+                        onClick={() => reactivateRouteMut.mutate(route.id)}
+                      >
+                        Reactivate
+                      </Button>
+                      <button
+                        onClick={() => { deleteMut.mutate(route.id); }}
+                        className="p-1.5 rounded-lg hover:bg-danger-50 dark:hover:bg-danger-950/40 text-surface-400 hover:text-danger-600 transition-colors"
+                        title="Delete route"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+                </Card>
+              );
+            })}
+          </div>
+        )}
         </div>
       )}
 
