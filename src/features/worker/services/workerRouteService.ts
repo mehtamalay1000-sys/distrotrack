@@ -1,6 +1,7 @@
 import { supabase } from '@/lib/supabase';
 import { mockStore } from '@/lib/mockStore';
 import type { Picklist, Delivery, PaymentMode, PicklistItem } from '@/lib/database.types';
+import { addNotification } from '@/features/notifications/services/notificationService';
 
 // ── Query Functions ──────────────────────────────────────────────
 
@@ -357,6 +358,28 @@ export async function completePartyDelivery(input: CompleteDeliveryInput): Promi
     }
   }
 
+  // 2.5 Get existing delivery to preserve its scheduled delivery_date
+  let targetDeliveryDate = todayStr;
+  try {
+    const { data: exDel } = await supabase
+      .from('deliveries')
+      .select('delivery_date, total_amount')
+      .eq('id', input.deliveryId)
+      .maybeSingle();
+    if (exDel?.delivery_date) {
+      targetDeliveryDate = exDel.delivery_date;
+    }
+  } catch {
+    // fallback
+  }
+
+  const mockDel = mockStore.getDeliveries().find((d) => d.id === input.deliveryId);
+  if (mockDel?.delivery_date) {
+    targetDeliveryDate = mockDel.delivery_date;
+  }
+
+  const finalDeliveredAmount = deliveredAmount > 0 ? deliveredAmount : (mockDel?.total_amount || 0);
+
   // 3. Update delivery record
   const deliveryStatus = allDelivered ? 'delivered' : 'partial';
   await supabase
@@ -364,8 +387,8 @@ export async function completePartyDelivery(input: CompleteDeliveryInput): Promi
     .update({
       status: deliveryStatus,
       delivered_at: now,
-      delivery_date: todayStr,
-      delivered_amount: deliveredAmount,
+      delivery_date: targetDeliveryDate,
+      delivered_amount: finalDeliveredAmount,
       collected_amount: input.payment.mode === 'credit' ? 0 : input.payment.amount,
       payment_mode: input.payment.mode,
     })
@@ -382,7 +405,7 @@ export async function completePartyDelivery(input: CompleteDeliveryInput): Promi
         worker_id: input.workerId,
         amount: input.payment.amount,
         payment_mode: input.payment.mode,
-        payment_date: todayStr,
+        payment_date: targetDeliveryDate,
         cheque_number: input.payment.cheque_number || null,
         cheque_date: input.payment.cheque_date || null,
         cheque_bank: input.payment.cheque_bank || null,
@@ -400,12 +423,22 @@ export async function completePartyDelivery(input: CompleteDeliveryInput): Promi
     worker_id: input.workerId,
     amount: input.payment.amount,
     payment_mode: input.payment.mode,
-    payment_date: todayStr,
+    payment_date: targetDeliveryDate,
     cheque_number: input.payment.cheque_number,
     cheque_date: input.payment.cheque_date,
     cheque_bank: input.payment.cheque_bank,
     notes: input.payment.notes,
     status: input.payment.mode === 'credit' ? 'pending' : 'collected',
+  });
+
+  mockStore.saveDelivery({
+    id: input.deliveryId,
+    status: deliveryStatus,
+    delivered_at: now,
+    delivery_date: targetDeliveryDate,
+    delivered_amount: finalDeliveredAmount,
+    collected_amount: input.payment.mode === 'credit' ? 0 : input.payment.amount,
+    payment_mode: input.payment.mode,
   });
 
   // 5. Update party outstanding if credit
@@ -465,14 +498,51 @@ export async function completePartyDelivery(input: CompleteDeliveryInput): Promi
       .eq('id', input.picklistId);
   }
 
-  // 7. Update invoice status
-  if (input.invoiceId) {
-    await supabase
-      .from('invoices')
-      .update({ status: deliveryStatus === 'delivered' ? 'delivered' : 'partial' })
-      .eq('id', input.invoiceId);
+    if (input.invoiceId) {
+      await supabase
+        .from('invoices')
+        .update({ status: deliveryStatus === 'delivered' ? 'delivered' : 'partial' })
+        .eq('id', input.invoiceId);
+    }
+
+    // 8. Trigger Realtime Notification
+    try {
+      const mockParties = mockStore.getParties();
+      const partyObj = mockParties.find((p) => p.id === input.partyId);
+      const partyName = partyObj?.name || 'Customer';
+
+      const mockWorkers = mockStore.getWorkers();
+      const workerObj = mockWorkers.find((w) => w.id === input.workerId);
+      const workerName = workerObj?.name || 'Worker';
+
+      const paymentDesc = input.payment.amount > 0
+        ? ` (Collected ₹${input.payment.amount.toLocaleString('en-IN')} via ${input.payment.mode.toUpperCase()})`
+        : ' (Payment pending)';
+
+      // Notify Admin
+      addNotification({
+        recipient_role: 'admin',
+        type: 'delivery',
+        title: `Delivery Completed: ${partyName}`,
+        message: `${workerName} completed delivery to ${partyName}${paymentDesc}.`,
+        link: '/admin/deliveries',
+      });
+
+      // Notify Worker
+      if (input.workerId) {
+        addNotification({
+          recipient_role: 'worker',
+          recipient_worker_id: input.workerId,
+          type: 'delivery',
+          title: `Delivery Confirmed: ${partyName}`,
+          message: `Your delivery to ${partyName} was recorded successfully${paymentDesc}.`,
+          link: '/w/route',
+        });
+      }
+    } catch (err) {
+      console.error('Failed to dispatch delivery notification:', err);
+    }
   }
-}
 
 // ── Salesman Performance & Metrics ────────────────────────────────
 

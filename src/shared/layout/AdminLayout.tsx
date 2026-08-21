@@ -7,6 +7,7 @@ import {
   Truck, CreditCard, Receipt, BarChart3, FileUp, Menu, X, LogOut, ChevronDown,
   Sun, Moon, Database
 } from 'lucide-react';
+import { NotificationBell } from '@/shared/ui';
 
 const navItems = [
   { to: '/admin', label: 'Dashboard', icon: LayoutDashboard, end: true },
@@ -125,11 +126,33 @@ export function AdminLayout() {
       {/* Main content */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Header */}
-        <header className="h-14 bg-white dark:bg-surface-900 border-b border-surface-200 dark:border-surface-800 flex items-center px-4 lg:px-6 sticky top-0 z-20">
-          <button onClick={() => setSidebarOpen(true)} className="lg:hidden mr-3 p-1 text-surface-500 hover:text-surface-700 dark:hover:text-surface-300">
-            <Menu className="h-5 w-5" />
-          </button>
-          <div className="flex-1" />
+        <header className="h-14 bg-white dark:bg-surface-900 border-b border-surface-200 dark:border-surface-800 flex items-center justify-between px-4 lg:px-6 sticky top-0 z-20">
+          <div className="flex items-center gap-2">
+            <button onClick={() => setSidebarOpen(true)} className="lg:hidden mr-2 p-1 text-surface-500 hover:text-surface-700 dark:hover:text-surface-300">
+              <Menu className="h-5 w-5" />
+            </button>
+            <div className="hidden sm:flex items-center gap-2 text-xs font-semibold text-surface-500 dark:text-surface-400">
+              <span>DistroTrack ERP</span>
+              <span className="h-1 w-1 rounded-full bg-surface-300 dark:bg-surface-600" />
+              <span className="text-emerald-600 dark:text-emerald-400 flex items-center gap-1">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                Live Sync
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {/* Realtime Notification Bell */}
+            <NotificationBell role="admin" />
+
+            <button
+              onClick={toggleTheme}
+              className="p-2 rounded-xl text-surface-600 dark:text-surface-300 hover:text-surface-900 dark:hover:text-white hover:bg-surface-100 dark:hover:bg-surface-800 transition-colors"
+              title={theme === 'dark' ? 'Light Mode' : 'Dark Mode'}
+            >
+              {theme === 'dark' ? <Sun className="h-4 w-4 text-amber-400" /> : <Moon className="h-4 w-4" />}
+            </button>
+          </div>
         </header>
 
         {/* Page content */}

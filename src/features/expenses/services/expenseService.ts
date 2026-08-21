@@ -1,6 +1,7 @@
 import { supabase } from '@/lib/supabase';
 import { mockStore } from '@/lib/mockStore';
 import type { Expense } from '@/lib/database.types';
+import { addNotification } from '@/features/notifications/services/notificationService';
 
 export async function getExpenses(): Promise<Expense[]> {
   try {
@@ -51,13 +52,53 @@ export async function createExpense(input: {
       })
       .select()
       .single();
+    let savedExpense: Expense;
     if (error || !data) {
-      return mockStore.saveExpense(input);
+      savedExpense = mockStore.saveExpense(input);
+    } else {
+      mockStore.saveExpense(data as Expense);
+      savedExpense = data as Expense;
     }
-    mockStore.saveExpense(data as Expense);
-    return data as Expense;
+
+    // Trigger Realtime Notifications
+    try {
+      addNotification({
+        recipient_role: 'admin',
+        type: 'expense',
+        title: `Expense Logged: ₹${input.amount}`,
+        message: `${input.worker_name || 'Worker'} logged ₹${Number(input.amount).toLocaleString('en-IN')} for ${input.category} (${input.description || 'No description'}).`,
+        link: '/admin/expenses',
+      });
+
+      if (input.worker_id) {
+        addNotification({
+          recipient_role: 'worker',
+          recipient_worker_id: input.worker_id,
+          type: 'expense',
+          title: `Expense Recorded: ₹${input.amount}`,
+          message: `Your expense of ₹${Number(input.amount).toLocaleString('en-IN')} for ${input.category} was recorded.`,
+          link: '/w/expenses',
+        });
+      }
+    } catch (err) {
+      console.error('Failed to dispatch expense notification:', err);
+    }
+
+    return savedExpense;
   } catch {
-    return mockStore.saveExpense(input);
+    const saved = mockStore.saveExpense(input);
+    try {
+      addNotification({
+        recipient_role: 'admin',
+        type: 'expense',
+        title: `Expense Logged: ₹${input.amount}`,
+        message: `${input.worker_name || 'Worker'} logged ₹${Number(input.amount).toLocaleString('en-IN')} for ${input.category}.`,
+        link: '/admin/expenses',
+      });
+    } catch {
+      // ignore
+    }
+    return saved;
   }
 }
 

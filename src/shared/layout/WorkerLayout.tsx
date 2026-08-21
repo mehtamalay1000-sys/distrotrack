@@ -2,6 +2,7 @@ import { Outlet, NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '@/app/AuthProvider';
 import { useTheme } from '@/shared/theme/ThemeProvider';
 import { Home, MapPin, Clock, User, LogOut, Sun, Moon, Receipt, CreditCard } from 'lucide-react';
+import { NotificationBell } from '@/shared/ui';
 import { useState } from 'react';
 
 const tabs = [
@@ -34,8 +35,11 @@ export function WorkerLayout() {
           </div>
           <span className="font-semibold text-sm text-surface-900 dark:text-white">DistroTrack</span>
         </div>
-        <div className="flex items-center gap-1">
-          <span className="text-xs text-surface-500 dark:text-surface-400 mr-2 hidden sm:block">
+        <div className="flex items-center gap-1.5">
+          {/* Realtime Notification Bell for Worker */}
+          <NotificationBell role="worker" workerId={profile?.id} />
+
+          <span className="text-xs text-surface-500 dark:text-surface-400 mx-1 hidden sm:block">
             {profile?.full_name || 'Worker'}
           </span>
           <div className="relative">

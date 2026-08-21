@@ -5,6 +5,7 @@ import { upsertPartyByCode } from '@/features/parties/services/partyService';
 import { lookupProductBySku, upsertProductBySku } from '@/features/products/services/productService';
 import { validateProductRow } from '../parsers/helpers';
 import type { Picklist } from '@/lib/database.types';
+import { addNotification } from '@/features/notifications/services/notificationService';
 
 /**
  * Commits a fully validated SAP import to Supabase database (or local store).
@@ -13,8 +14,11 @@ import type { Picklist } from '@/lib/database.types';
 export async function confirmImportToDatabase(
   picklist: ParsedPicklist,
   matchResult: MatchResult,
-  assignedWorkerId?: string
+  assignedWorkerId?: string,
+  deliveryDate?: string
 ): Promise<Picklist> {
+  // Use the explicitly provided delivery date, falling back to the picklist's parsed date
+  const effectiveDate = deliveryDate || picklist.date;
   // 1. Ensure Route exists or get first active route
   let routeId: string | null = null;
   try {
@@ -70,7 +74,7 @@ export async function confirmImportToDatabase(
       .from('picklists')
       .insert({
         picklist_number: picklist.picklistNumber,
-        date: picklist.date,
+        date: effectiveDate,
         route_id: routeId,
         worker_id: assignedWorkerId || null,
         status: 'confirmed',
@@ -85,7 +89,7 @@ export async function confirmImportToDatabase(
     if (error || !data) {
       picklistRecord = mockStore.savePicklist({
         picklist_number: picklist.picklistNumber,
-        date: picklist.date,
+        date: effectiveDate,
         route_id: routeId,
         worker_id: assignedWorkerId || null,
         status: 'confirmed',
@@ -100,7 +104,7 @@ export async function confirmImportToDatabase(
   } catch {
     picklistRecord = mockStore.savePicklist({
       picklist_number: picklist.picklistNumber,
-      date: picklist.date,
+      date: effectiveDate,
       route_id: routeId,
       worker_id: assignedWorkerId || null,
       status: 'confirmed',
@@ -127,7 +131,7 @@ export async function confirmImportToDatabase(
             party_id: party.id,
             route_code: pair.invoice.routeCode || picklist.routeCode,
             sales_rep: pair.invoice.salesRep || null,
-            date: pair.invoice.date || picklist.date,
+            date: effectiveDate,
             total_amount: pair.invoice.totalAmount,
             tax_amount: pair.invoice.taxAmount,
             net_amount: pair.invoice.netAmount,
@@ -253,7 +257,7 @@ export async function confirmImportToDatabase(
         status: 'pending',
         sequence_order: seq,
         total_amount: pair.picklistParty?.totalAmount || pair.invoice?.netAmount || 0,
-        delivery_date: picklist.date,
+        delivery_date: effectiveDate,
         notes: `Generated from SAP Picklist ${picklist.picklistNumber}`,
       }).select('id').single();
 
@@ -269,7 +273,7 @@ export async function confirmImportToDatabase(
       invoice_id: invoiceId,
       status: 'pending',
       total_amount: pair.picklistParty?.totalAmount || pair.invoice?.netAmount || 0,
-      delivery_date: picklist.date,
+      delivery_date: effectiveDate,
       notes: `Generated from SAP Picklist ${picklist.picklistNumber}`,
     });
 
@@ -306,6 +310,38 @@ export async function confirmImportToDatabase(
         amount: item.amount,
       });
     }
+  }
+
+  // 4. Trigger Realtime Notifications for Admin and Worker
+  try {
+    const formattedDate = new Date(effectiveDate + 'T00:00:00').toLocaleDateString('en-IN', {
+      weekday: 'short',
+      day: 'numeric',
+      month: 'short',
+    });
+
+    // Notify Admin
+    addNotification({
+      recipient_role: 'admin',
+      type: 'picklist',
+      title: `Picklist #${picklistRecord.picklist_number} Imported`,
+      message: `Route ${picklist.routeName || picklist.routeCode} scheduled for delivery on ${formattedDate} (${matchResult.pairs.length} stops, ₹${Number(picklist.totalAmount || 0).toLocaleString('en-IN')}).`,
+      link: '/admin/picklists',
+    });
+
+    // Notify Assigned Worker
+    if (assignedWorkerId) {
+      addNotification({
+        recipient_role: 'worker',
+        recipient_worker_id: assignedWorkerId,
+        type: 'picklist',
+        title: `New Route Assigned: ${picklist.routeName || picklist.routeCode}`,
+        message: `You have been assigned ${picklist.routeName || picklist.routeCode} for delivery on ${formattedDate} with ${matchResult.pairs.length} customer stops.`,
+        link: '/w/route',
+      });
+    }
+  } catch (err) {
+    console.error('Failed to dispatch import notification:', err);
   }
 
   return picklistRecord;

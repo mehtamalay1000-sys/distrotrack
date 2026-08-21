@@ -3,7 +3,6 @@ import { getPicklists } from '@/features/picklists/services/picklistService';
 import { getDeliveries } from '@/features/deliveries/services/deliveryService';
 import { getPayments } from '@/features/payments/services/paymentService';
 import { getExpenses } from '@/features/expenses/services/expenseService';
-import { getParties } from '@/features/parties/services/partyService';
 import { getWorkers } from '@/features/workers/services/workerService';
 
 export interface DashboardStats {
@@ -36,43 +35,70 @@ export async function getDashboardStats(): Promise<DashboardStats> {
   }
 
   try {
-    const [picklists, deliveries, payments, expenses, parties, workers] = await Promise.all([
+    const [picklists, deliveries, payments, expenses, workers] = await Promise.all([
       getPicklists().catch(() => []),
       getDeliveries().catch(() => []),
       getPayments().catch(() => []),
       getExpenses().catch(() => []),
-      getParties().catch(() => []),
       getWorkers().catch(() => []),
     ]);
 
-    // ── Daily Stats (use today's date) ─────────────────────────────────
+    // ── Helper: Effective Date matching ──────────────────────────────
+    const getEffectiveDate = (dateStr: string | null | undefined, createdAtStr: string | null | undefined): string => {
+      if (dateStr) return dateStr.split('T')[0];
+      if (createdAtStr) return createdAtStr.split('T')[0];
+      return '';
+    };
 
+    // ── Daily Stats (strictly for today's delivery/operations date) ─────
+
+    // Today's Sales: only picklists scheduled for today
     const todaySales = picklists
-      .filter((p) => p.date === todayStr || p.created_at?.startsWith(todayStr))
+      .filter((p) => getEffectiveDate(p.date, p.created_at) === todayStr)
       .reduce((sum, p) => sum + Number(p.total_amount || 0), 0);
 
+    // Today's Collections: payments collected on today's date
     const todayCollections = payments
-      .filter((p) => (p.payment_mode === 'cash' || p.payment_mode === 'cheque' || p.payment_mode === 'upi') && (p.payment_date === todayStr || p.created_at?.startsWith(todayStr)))
+      .filter((p) => {
+        const isDirectMode = p.payment_mode === 'cash' || p.payment_mode === 'cheque' || p.payment_mode === 'upi';
+        return isDirectMode && getEffectiveDate(p.payment_date, p.created_at) === todayStr;
+      })
       .reduce((sum, p) => sum + Number(p.amount || 0), 0);
 
-    // Total outstanding Udhari: Derived from active pending deliveries.
-    // If there are no active deliveries or picklists, totalOutstanding must be 0!
+    // Deliveries scheduled for today
+    const todayDeliveries = deliveries.filter(
+      (d) => getEffectiveDate(d.delivery_date, d.created_at) === todayStr
+    );
+
+    // Pending / Completed counts for today's deliveries
+    const pendingDeliveriesCount = todayDeliveries.filter(
+      (d) => d.status === 'pending' || d.status === 'out_for_delivery'
+    ).length;
+
+    const completedDeliveriesCount = todayDeliveries.filter(
+      (d) => d.status === 'delivered' || d.status === 'partial'
+    ).length;
+
+    // Total outstanding Udhari for today's deliveries (or active past due deliveries up to today)
     let totalOutstanding = 0;
-    if (deliveries.length > 0) {
-      totalOutstanding = deliveries
+    if (todayDeliveries.length > 0) {
+      totalOutstanding = todayDeliveries
         .filter((d) => d.status === 'pending' || d.status === 'out_for_delivery' || d.status === 'partial')
         .reduce((sum, d) => sum + Math.max(0, Number(d.total_amount || 0) - Number(d.collected_amount || 0)), 0);
-    } else if (picklists.length === 0) {
-      totalOutstanding = 0;
     } else {
-      totalOutstanding = parties.reduce((sum, p) => sum + Number(p.outstanding_amount || 0), 0);
+      // If no deliveries today, check for past pending deliveries (on or before today, not future)
+      const pastPendingDeliveries = deliveries.filter((d) => {
+        const dDate = getEffectiveDate(d.delivery_date, d.created_at);
+        return dDate && dDate <= todayStr && (d.status === 'pending' || d.status === 'out_for_delivery' || d.status === 'partial');
+      });
+      totalOutstanding = pastPendingDeliveries.reduce(
+        (sum, d) => sum + Math.max(0, Number(d.total_amount || 0) - Number(d.collected_amount || 0)),
+        0
+      );
     }
 
-    const pendingDeliveriesCount = deliveries.filter((d) => d.status === 'pending' || d.status === 'out_for_delivery').length;
-    const completedDeliveriesCount = deliveries.filter((d) => d.status === 'delivered' || d.status === 'partial').length;
-
     const totalExpensesToday = expenses
-      .filter((e) => e.date === todayStr || e.created_at?.startsWith(todayStr))
+      .filter((e) => getEffectiveDate(e.date, e.created_at) === todayStr)
       .reduce((sum, e) => sum + Number(e.amount || 0), 0);
 
     let activeWorkersCount = workers.filter((w) => w.status === 'active').length;
@@ -91,11 +117,11 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     // ── Monthly Stats ──────────────────────────────────────────────────
 
     const monthlySales = picklists
-      .filter((p) => isCurrentMonth(p.date) || isCurrentMonth(p.created_at))
+      .filter((p) => isCurrentMonth(p.date || p.created_at))
       .reduce((sum, p) => sum + Number(p.total_amount || 0), 0);
 
     const monthlyPayments = payments.filter(
-      (p) => isCurrentMonth(p.payment_date) || isCurrentMonth(p.created_at)
+      (p) => isCurrentMonth(p.payment_date || p.created_at)
     );
 
     const monthlyCollections = monthlyPayments

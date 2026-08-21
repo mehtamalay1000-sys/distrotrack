@@ -18,15 +18,20 @@ export function DashboardPage() {
     queryFn: getDashboardStats,
   });
 
-  const { data: recentDeliveries = [] } = useQuery({
+  const { data: allDeliveries = [] } = useQuery({
     queryKey: ['deliveries'],
     queryFn: getDeliveries,
   });
 
-  const { data: recentPayments = [] } = useQuery({
+  const todayStr = new Date().toISOString().split('T')[0];
+  const recentDeliveries = allDeliveries.filter((d) => (d.delivery_date || d.created_at?.split('T')[0]) === todayStr);
+
+  const { data: allPayments = [] } = useQuery({
     queryKey: ['payments'],
     queryFn: getPayments,
   });
+
+  const recentPayments = allPayments.filter((p) => (p.payment_date || p.created_at?.split('T')[0]) === todayStr);
 
   if (statsLoading || !stats) return <LoadingState message="Loading daily dashboard…" />;
 
@@ -199,21 +204,32 @@ export function DashboardPage() {
             </button>
           </div>
           <div className="divide-y divide-surface-100 dark:divide-surface-800">
-            {recentDeliveries.slice(0, 5).map((d) => (
-              <div key={d.id} className="p-3 flex items-center justify-between hover:bg-surface-50 dark:hover:bg-surface-800/40 transition-colors">
-                <div>
-                  <div className="text-sm font-medium text-surface-900 dark:text-surface-100">{d.party?.name || 'Customer'}</div>
-                  <div className="text-xs text-surface-400 font-mono">{d.invoice?.invoice_number || d.party?.code}</div>
-                </div>
-                <div className="flex items-center gap-3">
-                  <div className="text-right">
-                    <div className="text-sm font-semibold text-surface-900 dark:text-surface-100">{formatCurrency(d.invoice?.net_amount || 0)}</div>
-                    <div className="text-[10px] text-surface-400">{d.worker?.name || 'Unassigned'}</div>
+            {recentDeliveries.slice(0, 5).map((d) => {
+              const totalDelVal = Number(
+                d.delivered_amount ||
+                d.total_amount ||
+                d.invoice?.net_amount ||
+                d.collected_amount ||
+                (d.payments && d.payments[0] ? d.payments[0].amount : 0) ||
+                0
+              );
+
+              return (
+                <div key={d.id} className="p-3 flex items-center justify-between hover:bg-surface-50 dark:hover:bg-surface-800/40 transition-colors">
+                  <div>
+                    <div className="text-sm font-medium text-surface-900 dark:text-surface-100">{d.party?.name || 'Customer'}</div>
+                    <div className="text-xs text-surface-400 font-mono">{d.invoice?.invoice_number || d.party?.code}</div>
                   </div>
-                  <StatusBadge status={d.status} />
+                  <div className="flex items-center gap-3">
+                    <div className="text-right">
+                      <div className="text-sm font-semibold text-surface-900 dark:text-surface-100">{formatCurrency(totalDelVal)}</div>
+                      <div className="text-[10px] text-surface-400">{d.worker?.name || 'Unassigned'}</div>
+                    </div>
+                    <StatusBadge status={d.status} />
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
             {recentDeliveries.length === 0 && (
               <div className="p-6 text-center text-xs text-surface-400">No recent deliveries recorded</div>
             )}

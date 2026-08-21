@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { Upload, FileUp, CheckCircle2, AlertTriangle, ArrowRight, Loader2, RefreshCw, FileText, Sparkles } from 'lucide-react';
+import { Upload, FileUp, CheckCircle2, AlertTriangle, ArrowRight, Loader2, RefreshCw, FileText, Sparkles, CalendarDays } from 'lucide-react';
 import { PageHeader, Button, Select, StatusBadge, Card } from '@/shared/ui';
 import { parsePicklist } from '../parsers/picklistParser';
 import { parseBills } from '../parsers/billsParser';
@@ -16,6 +16,13 @@ export function ImportPage() {
   const navigate = useNavigate();
   const qc = useQueryClient();
 
+  // Compute tomorrow's date as default delivery date
+  const getTomorrowStr = () => {
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    return d.toISOString().split('T')[0];
+  };
+
   const [picklistFile, setPicklistFile] = useState<File | null>(null);
   const [billsFile, setBillsFile] = useState<File | null>(null);
 
@@ -24,6 +31,7 @@ export function ImportPage() {
   const [parsedBills, setParsedBills] = useState<ParsedBillsResult | null>(null);
   const [matchResult, setMatchResult] = useState<MatchResult | null>(null);
   const [assignedWorkerId, setAssignedWorkerId] = useState<string>('');
+  const [deliveryDate, setDeliveryDate] = useState<string>('');
   const [activeTab, setActiveTab] = useState<'summary' | 'parties' | 'invoices'>('summary');
 
   const { data: workers = [] } = useQuery({ queryKey: ['workers'], queryFn: getWorkers });
@@ -31,7 +39,8 @@ export function ImportPage() {
   const importMutation = useMutation({
     mutationFn: async () => {
       if (!parsedPicklist || !matchResult) throw new Error('No parsed data to import');
-      return confirmImportToDatabase(parsedPicklist, matchResult, assignedWorkerId);
+      if (!deliveryDate) throw new Error('Please select a delivery date');
+      return confirmImportToDatabase(parsedPicklist, matchResult, assignedWorkerId, deliveryDate);
     },
     onSuccess: (picklistRecord) => {
       qc.invalidateQueries({ queryKey: ['picklists'] });
@@ -84,7 +93,7 @@ export function ImportPage() {
   }
 
   function handleLoadSample() {
-    const today = new Date().toISOString().split('T')[0];
+    const tomorrow = getTomorrowStr();
     // Use real SAP SKUs from the Product Master so the import flow
     // demonstrates correct lookup-first product referencing
     const party1Items: ParsedPicklistItem[] = [
@@ -101,7 +110,7 @@ export function ImportPage() {
       picklistNumber: 'SAP-PL-8890',
       routeCode: 'SANGAMNER_6',
       routeName: 'SANGAMNER 6',
-      date: today,
+      date: tomorrow,
       pageCount: 2,
       totalItems: 5,
       totalAmount: 5288,
@@ -134,7 +143,7 @@ export function ImportPage() {
           invoiceNumber: 'A37A506290',
           partyCode: 'C000727249',
           partyName: 'RAJESH KIRANA',
-          date: today,
+          date: tomorrow,
           totalAmount: 2216,
           taxAmount: 110.80,
           netAmount: 2216,
@@ -152,7 +161,7 @@ export function ImportPage() {
           invoiceNumber: 'A37A506291',
           partyCode: 'C000812345',
           partyName: 'SHREE GANESH STORE',
-          date: today,
+          date: tomorrow,
           totalAmount: 3072,
           taxAmount: 153.60,
           netAmount: 3072,
@@ -181,6 +190,7 @@ export function ImportPage() {
     setParsedPicklist(null);
     setParsedBills(null);
     setMatchResult(null);
+    setDeliveryDate('');
   }
 
   return (
@@ -314,18 +324,66 @@ export function ImportPage() {
             </Card>
           </div>
 
-          {/* Worker Assignment Selector before final commit */}
-          <Card className="p-4 bg-surface-50 dark:bg-surface-800 border-surface-200 dark:border-surface-700">
+          {/* Delivery Date Picker — Mandatory */}
+          <Card className={`p-4 border-2 transition-colors ${
+            deliveryDate
+              ? 'border-emerald-300 dark:border-emerald-700 bg-emerald-50/30 dark:bg-emerald-950/20'
+              : 'border-red-300 dark:border-red-700 bg-red-50/30 dark:bg-red-950/20'
+          }`}>
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <div className={`h-10 w-10 rounded-xl flex items-center justify-center flex-shrink-0 ${
+                  deliveryDate
+                    ? 'bg-emerald-100 dark:bg-emerald-900/40'
+                    : 'bg-red-100 dark:bg-red-900/40'
+                }`}>
+                  <CalendarDays className={`h-5 w-5 ${
+                    deliveryDate
+                      ? 'text-emerald-600 dark:text-emerald-400'
+                      : 'text-red-600 dark:text-red-400'
+                  }`} />
+                </div>
+                <div>
+                  <h4 className="text-sm font-semibold text-surface-900 dark:text-surface-100 flex items-center gap-2">
+                    Date of Delivery
+                    <span className="text-[10px] font-bold uppercase tracking-wider bg-red-100 dark:bg-red-900/50 text-red-700 dark:text-red-300 px-1.5 py-0.5 rounded">Required</span>
+                  </h4>
+                  <p className="text-xs text-surface-500 dark:text-surface-400 mt-0.5">
+                    Picklists are printed in the evening. Select the actual delivery date (usually tomorrow).
+                  </p>
+                </div>
+              </div>
+              <div className="w-full sm:w-52">
+                <input
+                  id="delivery-date-picker"
+                  type="date"
+                  value={deliveryDate}
+                  onChange={(e) => setDeliveryDate(e.target.value)}
+                  className="w-full text-sm px-3 py-2 border border-surface-300 dark:border-surface-600 rounded-xl bg-white dark:bg-surface-800 text-surface-900 dark:text-surface-100 focus:outline-none focus:ring-2 focus:ring-primary-500/40 focus:border-primary-500 transition-shadow font-medium"
+                />
+              </div>
+            </div>
+          </Card>
+
+          {/* Worker Assignment — Mandatory */}
+          <Card className={`p-4 border-2 transition-colors ${
+            assignedWorkerId
+              ? 'border-emerald-300 dark:border-emerald-700 bg-emerald-50/30 dark:bg-emerald-950/20'
+              : 'border-red-300 dark:border-red-700 bg-red-50/30 dark:bg-red-950/20'
+          }`}>
             <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
               <div>
-                <h4 className="text-sm font-semibold text-surface-900 dark:text-surface-100">Assign Delivery Worker (Optional)</h4>
-                <p className="text-xs text-surface-500 dark:text-surface-400">Assign a worker to handle all deliveries created from this SAP Picklist</p>
+                <h4 className="text-sm font-semibold text-surface-900 dark:text-surface-100 flex items-center gap-2">
+                  Assign Delivery Worker
+                  <span className="text-[10px] font-bold uppercase tracking-wider bg-red-100 dark:bg-red-900/50 text-red-700 dark:text-red-300 px-1.5 py-0.5 rounded">Required</span>
+                </h4>
+                <p className="text-xs text-surface-500 dark:text-surface-400">Select a worker to handle all deliveries created from this SAP Picklist</p>
               </div>
               <div className="w-full sm:w-64">
                 <Select
                   value={assignedWorkerId}
                   onChange={(e) => setAssignedWorkerId(e.target.value)}
-                  placeholder="Unassigned"
+                  placeholder="Select Worker…"
                   options={workers.filter((w) => w.status === 'active').map((w) => ({ value: w.id, label: w.name }))}
                 />
               </div>
@@ -480,10 +538,18 @@ export function ImportPage() {
             <Button
               size="lg"
               loading={importMutation.isPending}
+              disabled={!deliveryDate || !assignedWorkerId}
               onClick={() => importMutation.mutate()}
               icon={<CheckCircle2 className="h-5 w-5" />}
             >
-              Confirm & Save Picklist to Database
+              {!deliveryDate && !assignedWorkerId
+                ? 'Select Delivery Date & Worker to Continue'
+                : !deliveryDate
+                  ? 'Select Delivery Date to Continue'
+                  : !assignedWorkerId
+                    ? 'Select Delivery Worker to Continue'
+                    : `Confirm & Save for ${new Date(deliveryDate + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })}`
+              }
             </Button>
           </div>
         </div>
