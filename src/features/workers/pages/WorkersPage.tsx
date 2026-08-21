@@ -4,10 +4,11 @@ import { toast } from 'sonner';
 import {
   Plus, Search, Phone, Mail, Edit2, Trash2, Target,
   User, MoreVertical, CheckCircle2, XCircle, IndianRupee,
-  TrendingUp, Calendar, ChevronRight, X, Loader2,
+  TrendingUp, Calendar, X, Loader2, Sparkles,
 } from 'lucide-react';
 import { getWorkers, createWorker, updateWorker, deleteWorker } from '../services/workerService';
 import { formatCurrency } from '@/shared/utils/format';
+import { addNotification } from '@/features/notifications/services/notificationService';
 import type { Worker } from '@/lib/database.types';
 
 const MONTHS = [
@@ -54,9 +55,60 @@ export function WorkersPage() {
       queryClient.invalidateQueries({ queryKey: ['workers'] });
       toast.success('Updated successfully');
       closeModal();
-      setTargetWorker(null);
     },
     onError: (e: Error) => toast.error(e.message),
+  });
+
+  // Dedicated Target Assignment Mutation with Notifications
+  const setTargetMutation = useMutation({
+    mutationFn: async ({
+      id,
+      name,
+      phone,
+      target,
+      month,
+    }: {
+      id: string;
+      name: string;
+      phone: string | null;
+      target: number;
+      month: string;
+    }) => {
+      const updated = await updateWorker(id, { name, phone: phone || undefined, monthly_target: target });
+      return { updated: { ...updated, name }, target, month };
+    },
+    onSuccess: ({ updated, target, month }) => {
+      queryClient.invalidateQueries({ queryKey: ['workers'] });
+      queryClient.invalidateQueries({ queryKey: ['worker-dashboard-metrics'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-metrics'] });
+
+      const [y, m] = month.split('-');
+      const monthName = MONTHS[parseInt(m, 10) - 1] || 'Current Month';
+      const monthYearLabel = `${monthName} ${y}`;
+
+      // Notify Worker
+      addNotification({
+        recipient_role: 'worker',
+        recipient_worker_id: updated.id,
+        title: `🎯 Monthly Target Set: ${formatCurrency(target)}`,
+        message: `Admin assigned a sales target of ${formatCurrency(target)} for ${monthYearLabel}.`,
+        type: 'system',
+        link: '/w',
+      });
+
+      // Notify Admin
+      addNotification({
+        recipient_role: 'admin',
+        title: `Target Assigned: ${updated.name}`,
+        message: `Set monthly target of ${formatCurrency(target)} for ${monthYearLabel}.`,
+        type: 'system',
+        link: '/workers',
+      });
+
+      toast.success(`Target of ${formatCurrency(target)} assigned to ${updated.name} for ${monthYearLabel}`);
+      setTargetWorker(null);
+    },
+    onError: (e: Error) => toast.error(e.message || 'Failed to update target'),
   });
 
   const deleteMutation = useMutation({
@@ -123,9 +175,17 @@ export function WorkersPage() {
   function handleSetTarget(e: React.FormEvent) {
     e.preventDefault();
     if (!targetWorker) return;
-    updateMutation.mutate({
+    const num = Number(targetAmount);
+    if (!num || num <= 0) {
+      toast.error('Please enter a valid target amount');
+      return;
+    }
+    setTargetMutation.mutate({
       id: targetWorker.id,
-      data: { monthly_target: Number(targetAmount || 50000) },
+      name: targetWorker.name,
+      phone: targetWorker.phone,
+      target: num,
+      month: targetMonth,
     });
   }
 
@@ -152,7 +212,7 @@ export function WorkersPage() {
   }
 
   const activeCount = workers.filter((w) => w.status === 'active').length;
-  const totalTarget = workers.reduce((s, w) => s + (w.monthly_target ?? 0), 0);
+  const totalTarget = workers.reduce((s, w) => s + (Number(w.monthly_target) || 50000), 0);
 
   const [year, month] = targetMonth.split('-');
   const selectedMonthLabel = `${MONTHS[parseInt(month) - 1]} ${year}`;
@@ -362,134 +422,254 @@ export function WorkersPage() {
         </div>
       )}
 
-      {/* ── Give Target Modal ────────────────────────────────────────── */}
+      {/* ── Set Monthly Target Modal (Fully Responsive & Screen Contained) ──────────────── */}
       {targetWorker && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-2xl max-w-md w-full shadow-2xl overflow-hidden">
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-3xl max-w-md w-full shadow-2xl overflow-hidden flex flex-col max-h-[90vh] my-auto animate-in fade-in zoom-in-95 duration-200">
             
-            {/* Modal Header */}
-            <div className="p-5 border-b border-surface-200 dark:border-surface-700 flex items-center justify-between bg-gradient-to-r from-blue-600 to-indigo-600 text-white">
+            {/* Modal Header (Fixed) */}
+            <div className="p-4 sm:p-5 border-b border-surface-100 dark:border-surface-700/60 bg-gradient-to-r from-blue-600 to-indigo-600 text-white flex items-center justify-between flex-shrink-0">
               <div className="flex items-center gap-3">
-                <div className="h-10 w-10 rounded-xl bg-white/20 backdrop-blur-md flex items-center justify-center border border-white/25">
+                <div className="h-10 w-10 rounded-2xl bg-white/20 backdrop-blur-md flex items-center justify-center border border-white/25 shadow-sm">
                   <Target className="h-5 w-5 text-white" />
                 </div>
                 <div>
-                  <h2 className="text-base font-bold">Set Monthly Target</h2>
-                  <p className="text-xs text-blue-100">{targetWorker.name}</p>
+                  <h2 className="text-base font-extrabold tracking-tight leading-tight">Set Monthly Target</h2>
+                  <p className="text-xs text-blue-100 font-medium">Salesman: {targetWorker.name}</p>
                 </div>
               </div>
               <button
+                type="button"
                 onClick={() => setTargetWorker(null)}
-                className="p-1.5 rounded-lg bg-white/15 hover:bg-white/25 transition-colors cursor-pointer"
+                className="p-1.5 rounded-xl bg-white/10 hover:bg-white/20 transition-all text-white cursor-pointer"
               >
-                <X className="h-4 w-4 text-white" />
+                <X className="h-4 w-4" />
               </button>
             </div>
 
-            {/* Modal Body */}
-            <form onSubmit={handleSetTarget} className="p-5 space-y-5">
+            {/* Modal Body (Scrollable if screen is small) */}
+            <form onSubmit={handleSetTarget} className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-4">
               
-              {/* Month Selector */}
+              {/* Salesman Context Pill */}
+              <div className="flex items-center justify-between p-3 rounded-2xl bg-surface-50 dark:bg-surface-900 border border-surface-200/80 dark:border-surface-700 text-xs">
+                <div className="flex items-center gap-2.5">
+                  <div className="h-7 w-7 rounded-lg bg-blue-100 dark:bg-blue-950 text-blue-700 dark:text-blue-300 flex items-center justify-center font-bold text-xs">
+                    {targetWorker.name.charAt(0).toUpperCase()}
+                  </div>
+                  <div>
+                    <div className="font-bold text-surface-900 dark:text-surface-100 leading-tight">{targetWorker.name}</div>
+                    <div className="text-surface-400 font-mono text-[10px]">{targetWorker.phone || 'Field Sales'}</div>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <div className="text-[9px] uppercase font-bold text-surface-400">Current</div>
+                  <div className="font-extrabold text-amber-600 dark:text-amber-400 text-xs">
+                    {formatCurrency(targetWorker.monthly_target ?? 50000)}
+                  </div>
+                </div>
+              </div>
+
+              {/* Month Selection */}
               <div className="space-y-1.5">
-                <label className="block text-xs font-bold text-surface-700 dark:text-surface-300 uppercase tracking-wide">
-                  Select Month
-                </label>
-                <div className="relative">
-                  <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-surface-400" />
+                <div className="flex items-center justify-between">
+                  <label className="text-[11px] font-bold text-surface-700 dark:text-surface-300 uppercase tracking-wide">
+                    Target Period
+                  </label>
+                  <span className="text-xs font-bold text-blue-600 dark:text-blue-400">
+                    {selectedMonthLabel}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  {(() => {
+                    const now = new Date();
+                    const curMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+                    const nextDate = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+                    const nextMonthKey = `${nextDate.getFullYear()}-${String(nextDate.getMonth() + 1).padStart(2, '0')}`;
+                    const curLabel = `${MONTHS[now.getMonth()]} ${now.getFullYear()}`;
+                    const nextLabel = `${MONTHS[nextDate.getMonth()]} ${nextDate.getFullYear()}`;
+
+                    return (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => setTargetMonth(curMonthKey)}
+                          className={`p-2 rounded-xl text-xs font-bold border transition-all text-center cursor-pointer ${
+                            targetMonth === curMonthKey
+                              ? 'bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-300 border-blue-400 dark:border-blue-700 shadow-xs'
+                              : 'bg-surface-50 dark:bg-surface-900 text-surface-600 dark:text-surface-400 border-surface-200 dark:border-surface-700 hover:border-surface-300'
+                          }`}
+                        >
+                          <div className="text-[9px] text-surface-400 uppercase font-semibold">This Month</div>
+                          <div className="text-xs truncate">{curLabel}</div>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setTargetMonth(nextMonthKey)}
+                          className={`p-2 rounded-xl text-xs font-bold border transition-all text-center cursor-pointer ${
+                            targetMonth === nextMonthKey
+                              ? 'bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-300 border-blue-400 dark:border-blue-700 shadow-xs'
+                              : 'bg-surface-50 dark:bg-surface-900 text-surface-600 dark:text-surface-400 border-surface-200 dark:border-surface-700 hover:border-surface-300'
+                          }`}
+                        >
+                          <div className="text-[9px] text-surface-400 uppercase font-semibold">Next Month</div>
+                          <div className="text-xs truncate">{nextLabel}</div>
+                        </button>
+                      </>
+                    );
+                  })()}
+                </div>
+
+                <div className="relative pt-0.5">
+                  <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-surface-400" />
                   <input
                     type="month"
                     value={targetMonth}
                     onChange={(e) => setTargetMonth(e.target.value)}
                     required
-                    className="w-full h-11 pl-9 pr-4 text-sm border border-surface-300 dark:border-surface-600 rounded-xl bg-white dark:bg-surface-900 text-surface-900 dark:text-surface-100 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
+                    className="w-full h-9 pl-9 pr-3 text-xs font-semibold border border-surface-200 dark:border-surface-700 rounded-xl bg-white dark:bg-surface-900 text-surface-800 dark:text-surface-200 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
                   />
                 </div>
-                <p className="text-[11px] text-surface-400">Target will apply for: <strong className="text-surface-700 dark:text-surface-300">{selectedMonthLabel}</strong></p>
               </div>
 
-              {/* Target Amount */}
+              {/* Target Amount Input */}
               <div className="space-y-1.5">
-                <label className="block text-xs font-bold text-surface-700 dark:text-surface-300 uppercase tracking-wide">
-                  Sales Target Amount (₹)
-                </label>
+                <div className="flex items-center justify-between">
+                  <label className="text-[11px] font-bold text-surface-700 dark:text-surface-300 uppercase tracking-wide">
+                    Target Amount (₹)
+                  </label>
+                  <span className="text-[10px] text-surface-400 font-mono">Min: ₹1,000</span>
+                </div>
+
                 <div className="relative">
-                  <IndianRupee className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-surface-400" />
+                  <div className="absolute left-3.5 top-1/2 -translate-y-1/2 text-surface-400 font-bold text-sm">
+                    ₹
+                  </div>
                   <input
                     type="number"
                     min="1000"
                     step="500"
                     value={targetAmount}
                     onChange={(e) => setTargetAmount(e.target.value)}
-                    placeholder="e.g. 75000"
+                    placeholder="75000"
                     required
-                    className="w-full h-11 pl-9 pr-4 text-sm border border-surface-300 dark:border-surface-600 rounded-xl bg-white dark:bg-surface-900 text-surface-900 dark:text-surface-100 focus:outline-none focus:ring-2 focus:ring-blue-500/30 font-semibold"
+                    className="w-full h-11 pl-8 pr-3 text-base font-black tracking-tight border-2 border-surface-200 dark:border-surface-700 rounded-xl bg-white dark:bg-surface-900 text-surface-900 dark:text-surface-100 focus:outline-none focus:border-blue-600 dark:focus:border-blue-500 transition-all shadow-xs"
                   />
                 </div>
-                <p className="text-[11px] text-surface-400">
-                  Current target:{' '}
-                  <strong className="text-amber-600 dark:text-amber-400">
-                    {formatCurrency(targetWorker.monthly_target ?? 50000)}
-                  </strong>
-                </p>
-              </div>
 
-              {/* Quick Presets */}
-              <div className="space-y-2">
-                <label className="block text-[11px] font-bold text-surface-500 dark:text-surface-400 uppercase tracking-wide">
-                  Quick Presets
-                </label>
-                <div className="flex flex-wrap gap-2">
-                  {[50000, 60000, 75000, 100000, 125000, 150000].map((amt) => (
+                {/* Quick Increment Steppers */}
+                <div className="flex items-center gap-1 pt-0.5">
+                  {[
+                    { label: '-5k', val: -5000 },
+                    { label: '+5k', val: 5000 },
+                    { label: '+10k', val: 10000 },
+                    { label: '+25k', val: 25000 },
+                  ].map((step) => (
                     <button
-                      key={amt}
+                      key={step.label}
                       type="button"
-                      onClick={() => setTargetAmount(String(amt))}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all cursor-pointer ${
-                        targetAmount === String(amt)
-                          ? 'bg-blue-600 text-white border-blue-600'
-                          : 'bg-surface-50 dark:bg-surface-900 text-surface-700 dark:text-surface-300 border-surface-200 dark:border-surface-600 hover:border-blue-400'
-                      }`}
+                      onClick={() => {
+                        const current = Number(targetAmount || 0);
+                        const nextVal = Math.max(1000, current + step.val);
+                        setTargetAmount(String(nextVal));
+                      }}
+                      className="px-2 py-0.5 rounded-lg bg-surface-100 dark:bg-surface-800 hover:bg-surface-200 dark:hover:bg-surface-700 text-[10px] font-bold text-surface-600 dark:text-surface-300 transition-all cursor-pointer"
                     >
-                      {formatCurrency(amt)}
+                      {step.label}
                     </button>
                   ))}
                 </div>
               </div>
 
-              {/* Preview */}
-              {targetAmount && (
-                <div className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-950/30 dark:to-indigo-950/30 border border-blue-200/70 dark:border-blue-800/40 rounded-xl p-4 flex items-center justify-between">
-                  <div>
-                    <div className="text-[11px] text-blue-600 dark:text-blue-400 font-bold uppercase tracking-wide">Target Preview</div>
-                    <div className="text-lg font-extrabold text-blue-700 dark:text-blue-300 mt-0.5">
-                      {formatCurrency(Number(targetAmount))}
-                    </div>
-                    <div className="text-[11px] text-blue-500 dark:text-blue-400">{selectedMonthLabel} • {targetWorker.name}</div>
+              {/* Quick Presets Chips */}
+              <div className="space-y-1.5">
+                <label className="block text-[10px] font-bold text-surface-400 uppercase tracking-wider">
+                  Presets
+                </label>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {[50000, 60000, 75000, 100000, 125000, 150000].map((amt) => {
+                    const isSelected = Number(targetAmount) === amt;
+                    return (
+                      <button
+                        key={amt}
+                        type="button"
+                        onClick={() => setTargetAmount(String(amt))}
+                        className={`py-1.5 px-2 rounded-xl text-xs font-bold border transition-all text-center cursor-pointer ${
+                          isSelected
+                            ? 'bg-blue-600 text-white border-blue-600 shadow-sm shadow-blue-500/30'
+                            : 'bg-surface-50 dark:bg-surface-900/60 text-surface-700 dark:text-surface-300 border-surface-200/90 dark:border-surface-700 hover:border-blue-400'
+                        }`}
+                      >
+                        {formatCurrency(amt)}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Real-time Target Insights Card */}
+              {Number(targetAmount) > 0 && (
+                <div className="p-3 rounded-2xl bg-gradient-to-br from-blue-50/80 via-indigo-50/50 to-surface-50 dark:from-blue-950/30 dark:via-indigo-950/20 dark:to-surface-900 border border-blue-200/70 dark:border-blue-800/40 space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[9px] uppercase font-extrabold tracking-wider text-blue-600 dark:text-blue-400 flex items-center gap-1">
+                      <Sparkles className="h-2.5 w-2.5" />
+                      Target Projection
+                    </span>
+                    <span className="text-[11px] font-bold text-slate-700 dark:text-slate-300">
+                      {selectedMonthLabel}
+                    </span>
                   </div>
-                  <ChevronRight className="h-5 w-5 text-blue-400" />
+
+                  <div className="flex items-baseline justify-between pt-0.5">
+                    <div>
+                      <div className="text-xl font-black text-slate-900 dark:text-white tracking-tight leading-tight">
+                        {formatCurrency(Number(targetAmount))}
+                      </div>
+                      <div className="text-[10px] text-surface-500 dark:text-surface-400">
+                        {targetWorker.name}
+                      </div>
+                    </div>
+
+                    {/* Daily run rate estimation */}
+                    <div className="text-right">
+                      <div className="text-xs font-bold text-indigo-600 dark:text-indigo-400">
+                        {formatCurrency(Math.round(Number(targetAmount) / 26))} / day
+                      </div>
+                      <div className="text-[9px] text-surface-400">
+                        ~26 working days
+                      </div>
+                    </div>
+                  </div>
                 </div>
               )}
 
-              {/* Submit */}
-              <div className="flex gap-3 pt-1">
+              {/* Modal Actions (Sticky bottom inside modal) */}
+              <div className="flex items-center gap-2.5 pt-2">
                 <button
                   type="button"
                   onClick={() => setTargetWorker(null)}
-                  className="flex-1 px-4 py-3 rounded-xl border border-surface-300 dark:border-surface-600 text-sm font-semibold text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-700 transition-all cursor-pointer"
+                  className="flex-1 px-3.5 py-2.5 rounded-xl border border-surface-300 dark:border-surface-600 text-xs font-bold text-surface-700 dark:text-surface-300 hover:bg-surface-100 dark:hover:bg-surface-700 transition-all cursor-pointer"
                 >
                   Cancel
                 </button>
+
                 <button
                   type="submit"
-                  disabled={updateMutation.isPending}
-                  className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white text-sm font-bold shadow-sm transition-all cursor-pointer"
+                  disabled={setTargetMutation.isPending || !Number(targetAmount)}
+                  className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 active:scale-[0.98] disabled:opacity-50 text-white text-xs font-bold shadow-md shadow-blue-600/20 transition-all cursor-pointer"
                 >
-                  {updateMutation.isPending ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
+                  {setTargetMutation.isPending ? (
+                    <>
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      <span>Saving…</span>
+                    </>
                   ) : (
-                    <Target className="h-4 w-4" />
+                    <>
+                      <Target className="h-3.5 w-3.5" />
+                      <span>Assign Target</span>
+                    </>
                   )}
-                  Assign Target
                 </button>
               </div>
             </form>

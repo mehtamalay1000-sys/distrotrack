@@ -183,24 +183,43 @@ class MockStore {
   }
 
   // ── Workers ────────────────────────────────────────────────────────
-  getWorkers(): Worker[] { return [...this.workers]; }
+  getWorkers(): Worker[] {
+    // Filter out any accidental phantom unnamed workers
+    return this.workers.filter((w) => w && w.name && w.name !== 'New Salesman');
+  }
   saveWorker(wData: Partial<Worker>): Worker {
-    const existingIdx = this.workers.findIndex((w) => w.id === wData.id);
+    let existingIdx = this.workers.findIndex((w) => Boolean(wData.id && w.id === wData.id));
+    if (existingIdx === -1 && wData.name) {
+      existingIdx = this.workers.findIndex(
+        (w) => w.name.trim().toLowerCase() === wData.name!.trim().toLowerCase()
+      );
+    }
+    if (existingIdx === -1 && wData.phone) {
+      existingIdx = this.workers.findIndex((w) => Boolean(w.phone && w.phone === wData.phone));
+    }
+
     if (existingIdx >= 0) {
-      const updated = { ...this.workers[existingIdx], ...wData, updated_at: new Date().toISOString() };
+      const updated = {
+        ...this.workers[existingIdx],
+        ...wData,
+        id: wData.id || this.workers[existingIdx].id,
+        name: wData.name || this.workers[existingIdx].name,
+        monthly_target: wData.monthly_target !== undefined ? Number(wData.monthly_target) : this.workers[existingIdx].monthly_target,
+        updated_at: new Date().toISOString(),
+      };
       this.workers[existingIdx] = updated;
       this.saveToStorage();
       return updated;
     } else {
       const created: Worker = {
         id: wData.id || `w-${Date.now()}`,
-        name: wData.name || 'New Salesman',
+        name: wData.name || 'Salesman',
         phone: wData.phone || '',
         email: wData.email || null,
         pin: wData.pin || '1234',
         status: wData.status || 'active',
         notes: wData.notes || null,
-        monthly_target: Number(wData.monthly_target || 50000),
+        monthly_target: Number(wData.monthly_target ?? 50000),
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };

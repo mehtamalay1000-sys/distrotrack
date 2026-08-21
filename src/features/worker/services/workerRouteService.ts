@@ -595,10 +595,20 @@ export async function getWorkerPerformanceMetrics(workerId: string, workerName?:
         .select('monthly_target')
         .eq('id', workerId)
         .maybeSingle();
-      if (workerRow) monthlyTarget = Number(workerRow.monthly_target ?? 0);
+      if (workerRow && workerRow.monthly_target) {
+        monthlyTarget = Number(workerRow.monthly_target);
+      }
     }
   } catch {
     monthlyTarget = 0;
+  }
+
+  // Fallback to local store if Supabase worker table did not yield target
+  if (monthlyTarget === 0) {
+    const mockW = mockStore.getWorkers().find(w => w.id === workerId || (workerName && w.name.toLowerCase().includes(workerName.toLowerCase())));
+    if (mockW && mockW.monthly_target) {
+      monthlyTarget = Number(mockW.monthly_target);
+    }
   }
 
   // ── 2. Fetch this worker's real picklists ────────────────────────
