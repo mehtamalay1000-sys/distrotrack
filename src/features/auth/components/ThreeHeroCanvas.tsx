@@ -1,535 +1,212 @@
 import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 
-interface ThreeHeroCanvasProps {
-  activeStep: number;
-  onStepChange?: (stepIndex: number) => void;
-  isReducedMotion?: boolean;
-}
-
-export interface NodeData {
-  id: string;
-  name: string;
-  sub: string;
-  stepIndex: number;
-  tPos: number; // Position on curve 0..1
-  position: [number, number, number];
-  color: string;
-}
-
-export const ROUTE_NODES: NodeData[] = [
-  { id: 'depot', name: 'Master Distribution Hub', sub: 'FMCG Depot & Pallet Dispatch', stepIndex: 0, tPos: 0.02, position: [-13, 0, -6], color: '#2563eb' },
-  { id: 'batch', name: 'SAP Digital Batching', sub: 'Automated Picklist Engine', stepIndex: 1, tPos: 0.20, position: [-5, 0, 7], color: '#4f46e5' },
-  { id: 'dispatch', name: 'Smart Route Dispatch', sub: 'AI Driver Navigation', stepIndex: 2, tPos: 0.40, position: [6, 0, 9], color: '#0284c7' },
-  { id: 'retail', name: 'Retail Store Drop-off', sub: 'Party Proof of Delivery', stepIndex: 3, tPos: 0.60, position: [13, 0, 1], color: '#059669' },
-  { id: 'payment', name: 'Instant Reconciliation', sub: 'Cash & UPI Clearance', stepIndex: 4, tPos: 0.80, position: [7, 0, -9], color: '#d97706' },
-  { id: 'intelligence', name: 'Executive Intelligence', sub: 'Real-time Velocity & Margins', stepIndex: 5, tPos: 0.95, position: [-4, 0, -11], color: '#7c3aed' },
-];
-
-export function ThreeHeroCanvas({ activeStep, onStepChange: _onStepChange, isReducedMotion = false }: ThreeHeroCanvasProps) {
+export function ThreeHeroCanvas() {
   const containerRef = useRef<HTMLDivElement>(null);
-  const activeStepRef = useRef(activeStep);
-  activeStepRef.current = activeStep;
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
-    // ── 1. SCENE, FOG & CAMERA ─────────────────────────────────────────────
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color('#f8faff');
-    scene.fog = new THREE.FogExp2('#f8faff', 0.012);
+    const w = container.clientWidth;
+    const h = container.clientHeight;
 
-    const width = container.clientWidth;
-    const height = container.clientHeight;
+    const camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 200);
+    camera.position.set(0, 0, 36);
 
-    const camera = new THREE.PerspectiveCamera(36, width / height, 0.1, 300);
-    const defaultCamPos = new THREE.Vector3(0, 28, 38);
-    camera.position.copy(defaultCamPos);
-    const cameraTarget = new THREE.Vector3(0, 0, 0);
-    camera.lookAt(cameraTarget);
-
-    const renderer = new THREE.WebGLRenderer({
-      antialias: true,
-      alpha: false,
-      powerPreference: 'high-performance',
-    });
-    renderer.setSize(width, height);
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(w, h);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.15;
-
+    renderer.toneMappingExposure = 1.2;
     container.appendChild(renderer.domElement);
 
-    // ── 2. LIGHTING ────────────────────────────────────────────────────────
-    const ambient = new THREE.AmbientLight('#ffffff', 1.4);
-    scene.add(ambient);
+    // ── Ambient Soft Lighting ──────────────────────────────────────
+    scene.add(new THREE.AmbientLight('#ffffff', 0.8));
+    const pointLight1 = new THREE.PointLight('#6366f1', 1.5, 40);
+    pointLight1.position.set(-15, 12, 10);
+    scene.add(pointLight1);
 
-    const hemiLight = new THREE.HemisphereLight('#eff6ff', '#e2e8f0', 1.1);
-    scene.add(hemiLight);
+    const pointLight2 = new THREE.PointLight('#3b82f6', 1.5, 40);
+    pointLight2.position.set(15, -10, 10);
+    scene.add(pointLight2);
 
-    const sunLight = new THREE.DirectionalLight('#fffbeb', 2.2);
-    sunLight.position.set(25, 40, 20);
-    sunLight.castShadow = true;
-    sunLight.shadow.mapSize.width = 2048;
-    sunLight.shadow.mapSize.height = 2048;
-    sunLight.shadow.bias = -0.0003;
-    const shadowDist = 30;
-    sunLight.shadow.camera.left = -shadowDist;
-    sunLight.shadow.camera.right = shadowDist;
-    sunLight.shadow.camera.top = shadowDist;
-    sunLight.shadow.camera.bottom = -shadowDist;
-    scene.add(sunLight);
+    // ── Wide Ethereal Orbital Ring System ─────────────────────────
+    const ringsGroup = new THREE.Group();
+    scene.add(ringsGroup);
 
-    const softFill = new THREE.DirectionalLight('#bfdbfe', 0.8);
-    softFill.position.set(-20, 20, -20);
-    scene.add(softFill);
-
-    // ── 3. GROUND PLATFORM & SUBTLE GRID ───────────────────────────────────
-    const groundGeo = new THREE.PlaneGeometry(130, 130);
-    const groundMat = new THREE.MeshStandardMaterial({
-      color: '#f1f5f9',
-      roughness: 0.85,
-      metalness: 0.05,
-    });
-    const ground = new THREE.Mesh(groundGeo, groundMat);
-    ground.rotation.x = -Math.PI / 2;
-    ground.position.y = -0.02;
-    ground.receiveShadow = true;
-    scene.add(ground);
-
-    const gridHelper = new THREE.GridHelper(100, 50, '#94a3b8', '#e2e8f0');
-    gridHelper.position.y = 0.01;
-    (gridHelper.material as THREE.Material).opacity = 0.45;
-    (gridHelper.material as THREE.Material).transparent = true;
-    scene.add(gridHelper);
-
-    // ── 4. SPLINE HIGHWAY TRACK ────────────────────────────────────────────
-    const curvePoints = ROUTE_NODES.map((n) => new THREE.Vector3(...n.position));
-    const curve = new THREE.CatmullRomCurve3(curvePoints, true, 'centripetal', 0.5);
-
-    // Main road ribbon
-    const tubeGeo = new THREE.TubeGeometry(curve, 160, 0.45, 12, true);
-    const tubeMat = new THREE.MeshStandardMaterial({
-      color: '#3b82f6',
-      roughness: 0.3,
-      metalness: 0.2,
-      emissive: '#1d4ed8',
-      emissiveIntensity: 0.35,
-    });
-    const roadMesh = new THREE.Mesh(tubeGeo, tubeMat);
-    roadMesh.position.y = 0.25;
-    roadMesh.castShadow = true;
-    scene.add(roadMesh);
-
-    // Outer glowing circuit ring
-    const outerTubeGeo = new THREE.TubeGeometry(curve, 160, 0.65, 8, true);
-    const outerTubeMat = new THREE.MeshBasicMaterial({
-      color: '#60a5fa',
-      transparent: true,
-      opacity: 0.2,
-      wireframe: true,
-    });
-    const outerRingMesh = new THREE.Mesh(outerTubeGeo, outerTubeMat);
-    outerRingMesh.position.y = 0.25;
-    scene.add(outerRingMesh);
-
-    // ── 5. 3D STATIONS / HUBS ──────────────────────────────────────────────
-    const animatedObjects: Array<{
-      mesh: THREE.Object3D;
-      update: (time: number) => void;
-    }> = [];
-
-    const createStationBase = (pos: [number, number, number], colorHex: string) => {
-      const group = new THREE.Group();
-      group.position.set(...pos);
-
-      // Base cylinder
-      const baseGeo = new THREE.CylinderGeometry(2.4, 2.7, 0.4, 32);
-      const baseMat = new THREE.MeshStandardMaterial({
-        color: '#ffffff',
-        roughness: 0.2,
-        metalness: 0.1,
-      });
-      const baseMesh = new THREE.Mesh(baseGeo, baseMat);
-      baseMesh.position.y = 0.2;
-      baseMesh.receiveShadow = true;
-      baseMesh.castShadow = true;
-      group.add(baseMesh);
-
-      // Glowing color ring
-      const ringGeo = new THREE.TorusGeometry(2.3, 0.08, 16, 48);
-      const ringMat = new THREE.MeshStandardMaterial({
-        color: colorHex,
-        emissive: colorHex,
-        emissiveIntensity: 0.8,
-      });
-      const ring = new THREE.Mesh(ringGeo, ringMat);
-      ring.rotation.x = Math.PI / 2;
-      ring.position.y = 0.42;
-      group.add(ring);
-
-      // Beacon light column
-      const beaconGeo = new THREE.CylinderGeometry(0.1, 0.1, 8, 16);
-      const beaconMat = new THREE.MeshBasicMaterial({
-        color: colorHex,
-        transparent: true,
-        opacity: 0.15,
-      });
-      const beacon = new THREE.Mesh(beaconGeo, beaconMat);
-      beacon.position.y = 4;
-      group.add(beacon);
-
-      scene.add(group);
-      return group;
+    const createDelicateRing = (radius: number, color: string, opacity: number, rotX: number, rotY: number) => {
+      const geo = new THREE.TorusGeometry(radius, 0.02, 16, 120);
+      const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.rotation.x = rotX;
+      mesh.rotation.y = rotY;
+      ringsGroup.add(mesh);
+      return mesh;
     };
 
-    const depotGroup = createStationBase(ROUTE_NODES[0].position, '#2563eb');
-    const warehouseBuilding = new THREE.Group();
-    const mainWhGeo = new THREE.BoxGeometry(2.6, 2.0, 3.2);
-    const mainWhMat = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.2 });
-    const mainWh = new THREE.Mesh(mainWhGeo, mainWhMat);
-    mainWh.position.y = 1.4;
-    mainWh.castShadow = true;
-    warehouseBuilding.add(mainWh);
+    const ring1 = createDelicateRing(14, '#94a3b8', 0.25, Math.PI / 3, 0.2);
+    const ring2 = createDelicateRing(17, '#818cf8', 0.18, Math.PI / 2.5, -0.4);
+    const ring3 = createDelicateRing(20, '#cbd5e1', 0.12, Math.PI / 4, 0.5);
 
-    const roofGeo = new THREE.ConeGeometry(2.2, 0.8, 4);
-    const roofMat = new THREE.MeshStandardMaterial({ color: '#2563eb', roughness: 0.3 });
-    const roof = new THREE.Mesh(roofGeo, roofMat);
-    roof.position.y = 2.8;
-    roof.rotation.y = Math.PI / 4;
-    warehouseBuilding.add(roof);
+    // ── Floating Constellation Route Nodes ────────────────────────
+    const nodeCoords: [number, number, number][] = [
+      [-19, 8, -4], [-14, 12, -2], [-10, 6, -6], [-16, -7, -3],
+      [-22, -2, -5], [-7, -11, -2], [8, 12, -4], [15, 9, -2],
+      [20, 4, -5], [17, -6, -3], [12, -11, -4], [22, -1, -6],
+      [-4, 14, -5], [4, -13, -3], [-12, -13, -5], [19, 11, -6],
+      [-21, 5, -2], [10, -5, -8]
+    ];
 
-    // Radar dish on roof
-    const radarDishGeo = new THREE.CylinderGeometry(0.5, 0.1, 0.15, 16);
-    const radarDishMat = new THREE.MeshStandardMaterial({ color: '#38bdf8', metalness: 0.8 });
-    const radarDish = new THREE.Mesh(radarDishGeo, radarDishMat);
-    radarDish.position.set(0, 3.4, 0);
-    warehouseBuilding.add(radarDish);
+    const nodeGroup = new THREE.Group();
+    scene.add(nodeGroup);
 
-    depotGroup.add(warehouseBuilding);
-    animatedObjects.push({
-      mesh: radarDish,
-      update: (t) => {
-        radarDish.rotation.y = t * 1.5;
-      },
+    const sphereGeo = new THREE.SphereGeometry(0.2, 12, 12);
+    const nodeMeshes: THREE.Mesh[] = [];
+
+    nodeCoords.forEach(([x, y, z], idx) => {
+      const isHub = idx % 4 === 0;
+      const mat = new THREE.MeshBasicMaterial({
+        color: isHub ? '#4f46e5' : '#94a3b8',
+        transparent: true,
+        opacity: isHub ? 0.75 : 0.45
+      });
+      const node = new THREE.Mesh(sphereGeo, mat);
+      node.position.set(x, y, z);
+      if (isHub) node.scale.setScalar(1.5);
+      nodeGroup.add(node);
+      nodeMeshes.push(node);
+
+      // Subtle pulse halo around hubs
+      if (isHub) {
+        const haloGeo = new THREE.RingGeometry(0.45, 0.52, 32);
+        const haloMat = new THREE.MeshBasicMaterial({
+          color: '#6366f1',
+          transparent: true,
+          opacity: 0.35,
+          side: THREE.DoubleSide
+        });
+        const halo = new THREE.Mesh(haloGeo, haloMat);
+        halo.position.set(x, y, z + 0.05);
+        nodeGroup.add(halo);
+      }
     });
 
-    const picklistGroup = createStationBase(ROUTE_NODES[1].position, '#4f46e5');
-    const terminalGeo = new THREE.BoxGeometry(1.6, 2.4, 0.4);
-    const terminalMat = new THREE.MeshStandardMaterial({ color: '#1e1b4b', roughness: 0.1 });
-    const terminalMesh = new THREE.Mesh(terminalGeo, terminalMat);
-    terminalMesh.position.y = 1.6;
-    terminalMesh.castShadow = true;
-    picklistGroup.add(terminalMesh);
-
-    // Holographic screen
-    const screenGeo = new THREE.PlaneGeometry(1.3, 1.8);
-    const screenMat = new THREE.MeshBasicMaterial({ color: '#818cf8', transparent: true, opacity: 0.85 });
-    const screenMesh = new THREE.Mesh(screenGeo, screenMat);
-    screenMesh.position.set(0, 1.6, 0.22);
-    picklistGroup.add(screenMesh);
-
-    // Floating document particles
-    const docGeo = new THREE.PlaneGeometry(0.6, 0.8);
-    const docMat = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.4, side: THREE.DoubleSide });
-    const doc1 = new THREE.Mesh(docGeo, docMat);
-    doc1.position.set(-1.0, 2.5, 0.5);
-    picklistGroup.add(doc1);
-
-    animatedObjects.push({
-      mesh: doc1,
-      update: (t) => {
-        doc1.position.y = 2.5 + Math.sin(t * 2.5) * 0.25;
-        doc1.rotation.y = Math.sin(t * 1.5) * 0.3;
-      },
-    });
-
-    const dispatchGroup = createStationBase(ROUTE_NODES[2].position, '#0284c7');
-    const towerGeo = new THREE.CylinderGeometry(0.6, 1.1, 3.2, 16);
-    const towerMat = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.2, metalness: 0.3 });
-    const tower = new THREE.Mesh(towerGeo, towerMat);
-    tower.position.y = 2.0;
-    tower.castShadow = true;
-    dispatchGroup.add(tower);
-
-    // Glowing satellite ring
-    const satRingGeo = new THREE.TorusGeometry(1.4, 0.06, 16, 32);
-    const satRingMat = new THREE.MeshBasicMaterial({ color: '#38bdf8' });
-    const satRing = new THREE.Mesh(satRingGeo, satRingMat);
-    satRing.position.y = 2.8;
-    satRing.rotation.x = Math.PI / 3;
-    dispatchGroup.add(satRing);
-
-    animatedObjects.push({
-      mesh: satRing,
-      update: (t) => {
-        satRing.rotation.z = t * 1.8;
-      },
-    });
-
-    const retailGroup = createStationBase(ROUTE_NODES[3].position, '#059669');
-    const storeBuildingGeo = new THREE.BoxGeometry(2.8, 1.8, 2.2);
-    const storeBuildingMat = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.3 });
-    const storeMesh = new THREE.Mesh(storeBuildingGeo, storeBuildingMat);
-    storeMesh.position.y = 1.3;
-    storeMesh.castShadow = true;
-    retailGroup.add(storeMesh);
-
-    // Store Awning
-    const awningGeo = new THREE.BoxGeometry(2.9, 0.2, 0.9);
-    const awningMat = new THREE.MeshStandardMaterial({ color: '#10b981', roughness: 0.2 });
-    const awning = new THREE.Mesh(awningGeo, awningMat);
-    awning.position.set(0, 1.9, 1.3);
-    awning.rotation.x = 0.2;
-    retailGroup.add(awning);
-
-    // Floating checkmark badge
-    const checkBadgeGeo = new THREE.SphereGeometry(0.4, 16, 16);
-    const checkBadgeMat = new THREE.MeshStandardMaterial({ color: '#10b981', emissive: '#059669', emissiveIntensity: 0.6 });
-    const checkBadge = new THREE.Mesh(checkBadgeGeo, checkBadgeMat);
-    checkBadge.position.set(0, 3.0, 0);
-    retailGroup.add(checkBadge);
-
-    animatedObjects.push({
-      mesh: checkBadge,
-      update: (t) => {
-        checkBadge.position.y = 3.0 + Math.sin(t * 3) * 0.2;
-        checkBadge.rotation.y = t * 2;
-      },
-    });
-
-    const paymentGroup = createStationBase(ROUTE_NODES[4].position, '#d97706');
-    const posGeo = new THREE.BoxGeometry(1.2, 1.8, 1.6);
-    const posMat = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.2 });
-    const posMesh = new THREE.Mesh(posGeo, posMat);
-    posMesh.position.y = 1.3;
-    posMesh.castShadow = true;
-    paymentGroup.add(posMesh);
-
-    // Gold floating rupee coin
-    const coinGeo = new THREE.CylinderGeometry(0.65, 0.65, 0.12, 32);
-    const coinMat = new THREE.MeshStandardMaterial({
-      color: '#fbbf24',
-      metalness: 0.85,
-      roughness: 0.15,
-      emissive: '#d97706',
-      emissiveIntensity: 0.4,
-    });
-    const coin = new THREE.Mesh(coinGeo, coinMat);
-    coin.position.set(0, 2.7, 0);
-    coin.rotation.x = Math.PI / 2;
-    paymentGroup.add(coin);
-
-    animatedObjects.push({
-      mesh: coin,
-      update: (t) => {
-        coin.rotation.z = t * 2.2;
-        coin.position.y = 2.7 + Math.sin(t * 2.8) * 0.18;
-      },
-    });
-
-    const intelGroup = createStationBase(ROUTE_NODES[5].position, '#7c3aed');
-    const pillarGeo = new THREE.CylinderGeometry(0.7, 0.7, 3.2, 24);
-    const pillarMat = new THREE.MeshStandardMaterial({
-      color: '#ffffff',
-      roughness: 0.1,
-      metalness: 0.2,
-    });
-    const pillar = new THREE.Mesh(pillarGeo, pillarMat);
-    pillar.position.y = 2.0;
-    pillar.castShadow = true;
-    intelGroup.add(pillar);
-
-    // Glowing data rings
-    const ring1Geo = new THREE.TorusGeometry(1.1, 0.05, 16, 32);
-    const ring1Mat = new THREE.MeshBasicMaterial({ color: '#a855f7' });
-    const ring1 = new THREE.Mesh(ring1Geo, ring1Mat);
-    ring1.position.y = 2.2;
-    ring1.rotation.x = Math.PI / 2.5;
-    intelGroup.add(ring1);
-
-    const ring2 = ring1.clone();
-    ring2.position.y = 2.8;
-    ring2.rotation.x = -Math.PI / 3;
-    intelGroup.add(ring2);
-
-    animatedObjects.push({
-      mesh: ring1,
-      update: (t) => {
-        ring1.rotation.z = t * 1.6;
-        ring2.rotation.z = -t * 2.0;
-      },
-    });
-
-    // ── 6. THE SMART ELECTRIC DELIVERY VAN ──────────────────────────────────
-    const vanGroup = new THREE.Group();
-
-    // Van Body
-    const bodyGeo = new THREE.BoxGeometry(1.6, 1.1, 2.6);
-    const bodyMat = new THREE.MeshStandardMaterial({
-      color: '#ffffff',
-      roughness: 0.15,
-      metalness: 0.1,
-    });
-    const body = new THREE.Mesh(bodyGeo, bodyMat);
-    body.position.y = 0.85;
-    body.castShadow = true;
-    vanGroup.add(body);
-
-    // Cabin windshield
-    const windGeo = new THREE.BoxGeometry(1.45, 0.7, 0.8);
-    const windMat = new THREE.MeshStandardMaterial({
-      color: '#1e293b',
-      roughness: 0.1,
-      metalness: 0.9,
-    });
-    const windshield = new THREE.Mesh(windGeo, windMat);
-    windshield.position.set(0, 0.95, 0.95);
-    vanGroup.add(windshield);
-
-    // Blue branding stripe
-    const stripeGeo = new THREE.BoxGeometry(1.62, 0.25, 2.4);
-    const stripeMat = new THREE.MeshStandardMaterial({
-      color: '#2563eb',
-      roughness: 0.2,
-      emissive: '#1d4ed8',
-      emissiveIntensity: 0.4,
-    });
-    const stripe = new THREE.Mesh(stripeGeo, stripeMat);
-    stripe.position.y = 0.8;
-    vanGroup.add(stripe);
-
-    // Headlights
-    const lightGeo = new THREE.SphereGeometry(0.12, 12, 12);
-    const lightMat = new THREE.MeshBasicMaterial({ color: '#67e8f9' });
-    const hlLeft = new THREE.Mesh(lightGeo, lightMat);
-    hlLeft.position.set(0.55, 0.6, 1.32);
-    const hlRight = hlLeft.clone();
-    hlRight.position.x = -0.55;
-    vanGroup.add(hlLeft);
-    vanGroup.add(hlRight);
-
-    // 4 Wheels
-    const wheelGeo = new THREE.CylinderGeometry(0.3, 0.3, 0.25, 16);
-    const wheelMat = new THREE.MeshStandardMaterial({ color: '#0f172a', roughness: 0.8 });
-    const w1 = new THREE.Mesh(wheelGeo, wheelMat);
-    w1.rotation.z = Math.PI / 2;
-    w1.position.set(0.85, 0.3, 0.8);
-    const w2 = w1.clone();
-    w2.position.set(-0.85, 0.3, 0.8);
-    const w3 = w1.clone();
-    w3.position.set(0.85, 0.3, -0.8);
-    const w4 = w1.clone();
-    w4.position.set(-0.85, 0.3, -0.8);
-    vanGroup.add(w1);
-    vanGroup.add(w2);
-    vanGroup.add(w3);
-    vanGroup.add(w4);
-
-    scene.add(vanGroup);
-
-    // ── 7. FLOATING GLOW PARTICLES (SHIMMER) ───────────────────────────────
-    const particleCount = 80;
-    const particleGeo = new THREE.BufferGeometry();
-    const particlePositions = new Float32Array(particleCount * 3);
-    for (let i = 0; i < particleCount * 3; i += 3) {
-      particlePositions[i] = (Math.random() - 0.5) * 50;
-      particlePositions[i + 1] = Math.random() * 12 + 1;
-      particlePositions[i + 2] = (Math.random() - 0.5) * 50;
+    // ── Connecting Distribution Lines ─────────────────────────────
+    const lineMat = new THREE.LineBasicMaterial({ color: '#94a3b8', transparent: true, opacity: 0.12 });
+    for (let i = 0; i < nodeCoords.length; i++) {
+      for (let j = i + 1; j < nodeCoords.length; j++) {
+        const dx = nodeCoords[i][0] - nodeCoords[j][0];
+        const dy = nodeCoords[i][1] - nodeCoords[j][1];
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < 11) {
+          const geo = new THREE.BufferGeometry().setFromPoints([
+            new THREE.Vector3(...nodeCoords[i]),
+            new THREE.Vector3(...nodeCoords[j])
+          ]);
+          nodeGroup.add(new THREE.Line(geo, lineMat));
+        }
+      }
     }
-    particleGeo.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
-    const particleMat = new THREE.PointsMaterial({
-      color: '#60a5fa',
-      size: 0.35,
-      transparent: true,
-      opacity: 0.6,
-    });
-    const particles = new THREE.Points(particleGeo, particleMat);
+
+    // ── Active Delivery Pulse Packet ──────────────────────────────
+    const packetGeo = new THREE.SphereGeometry(0.25, 12, 12);
+    const packetMat = new THREE.MeshBasicMaterial({ color: '#3b82f6', transparent: true, opacity: 0.9 });
+    const packet = new THREE.Mesh(packetGeo, packetMat);
+    scene.add(packet);
+
+    let routeStep = 0;
+    let packetProgress = 0;
+    const packetRoute = [0, 1, 6, 7, 8, 9, 10, 5, 3, 4, 0];
+
+    // ── Stardust Particle Atmosphere ──────────────────────────────
+    const pCount = 90;
+    const pGeo = new THREE.BufferGeometry();
+    const pPos = new Float32Array(pCount * 3);
+    for (let i = 0; i < pCount; i++) {
+      pPos[i * 3] = (Math.random() - 0.5) * 55;
+      pPos[i * 3 + 1] = (Math.random() - 0.5) * 35;
+      pPos[i * 3 + 2] = (Math.random() - 0.5) * 15 - 5;
+    }
+    pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
+    const pMat = new THREE.PointsMaterial({ color: '#94a3b8', size: 0.09, transparent: true, opacity: 0.3 });
+    const particles = new THREE.Points(pGeo, pMat);
     scene.add(particles);
 
-    // ── 8. INTERACTIVE MOUSE PARALLAX & ANIMATION LOOP ─────────────────────
-    let mouseX = 0;
-    let mouseY = 0;
-
-    const onMouseMove = (e: MouseEvent) => {
-      const rect = container.getBoundingClientRect();
-      mouseX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-      mouseY = -(((e.clientY - rect.top) / rect.height) * 2 - 1);
+    // ── Mouse Interactivity ───────────────────────────────────────
+    let mouseX = 0, mouseY = 0;
+    const onMouse = (e: MouseEvent) => {
+      mouseX = (e.clientX / window.innerWidth) * 2 - 1;
+      mouseY = -(e.clientY / window.innerHeight) * 2 + 1;
     };
-    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mousemove', onMouse);
 
-    let vanProgress = 0;
-    let animationFrameId: number;
-    let clock = new THREE.Clock();
+    // ── Animation Loop ────────────────────────────────────────────
+    const clock = new THREE.Clock();
+    let frame: number;
 
     const animate = () => {
-      animationFrameId = requestAnimationFrame(animate);
-      const delta = clock.getDelta();
-      const elapsedTime = clock.getElapsedTime();
+      frame = requestAnimationFrame(animate);
+      const t = clock.getElapsedTime();
 
-      // Update station animations
-      animatedObjects.forEach((obj) => obj.update(elapsedTime));
+      // Slow elegant ring rotations
+      ring1.rotation.z = t * 0.04;
+      ring2.rotation.z = -t * 0.03;
+      ring3.rotation.y = t * 0.025;
 
-      // Shimmering particles slow float
-      particles.rotation.y = elapsedTime * 0.03;
+      // Node breathing & floating
+      nodeMeshes.forEach((mesh, idx) => {
+        mesh.position.y = nodeCoords[idx][1] + Math.sin(t * 0.8 + idx) * 0.15;
+      });
 
-      // Animate Van along spline
-      if (!isReducedMotion) {
-        vanProgress = (vanProgress + delta * 0.07) % 1.0;
-        const currentPos = curve.getPointAt(vanProgress);
-        const nextPos = curve.getPointAt((vanProgress + 0.01) % 1.0);
-
-        vanGroup.position.copy(currentPos);
-        vanGroup.position.y += 0.25;
-        vanGroup.lookAt(nextPos.x, vanGroup.position.y, nextPos.z);
+      // Animated packet travelling on active delivery route
+      packetProgress += 0.006;
+      if (packetProgress >= 1) {
+        packetProgress = 0;
+        routeStep = (routeStep + 1) % (packetRoute.length - 1);
       }
+      const fromIdx = packetRoute[routeStep];
+      const toIdx = packetRoute[routeStep + 1];
+      const fromPos = nodeCoords[fromIdx];
+      const toPos = nodeCoords[toIdx];
 
-      // Smooth camera interpolation based on active step node
-      const currentNode = ROUTE_NODES[activeStepRef.current] || ROUTE_NODES[0];
-      const targetPos = new THREE.Vector3(
-        currentNode.position[0] * 0.4 + mouseX * 2.5,
-        24 + mouseY * 1.5,
-        currentNode.position[2] * 0.4 + 32
-      );
-      const targetLook = new THREE.Vector3(
-        currentNode.position[0] * 0.6,
-        1.5,
-        currentNode.position[2] * 0.6
+      packet.position.set(
+        fromPos[0] + (toPos[0] - fromPos[0]) * packetProgress,
+        fromPos[1] + (toPos[1] - fromPos[1]) * packetProgress + Math.sin(t * 0.8 + fromIdx) * 0.15,
+        fromPos[2] + (toPos[2] - fromPos[2]) * packetProgress + 0.2
       );
 
-      camera.position.lerp(targetPos, 0.04);
-      cameraTarget.lerp(targetLook, 0.04);
-      camera.lookAt(cameraTarget);
+      // Ambient particle drift
+      particles.rotation.y = t * 0.006;
+
+      // Subtle responsive camera parallax
+      camera.position.x += (mouseX * 1.8 - camera.position.x) * 0.02;
+      camera.position.y += (mouseY * 1.2 - camera.position.y) * 0.02;
+      camera.lookAt(0, 0, 0);
 
       renderer.render(scene, camera);
     };
-
     animate();
 
-    // ── 9. RESIZE HANDLER ──────────────────────────────────────────────────
-    const handleResize = () => {
+    const onResize = () => {
       if (!container) return;
-      const w = container.clientWidth;
-      const h = container.clientHeight;
-      camera.aspect = w / h;
+      const nw = container.clientWidth;
+      const nh = container.clientHeight;
+      camera.aspect = nw / nh;
       camera.updateProjectionMatrix();
-      renderer.setSize(w, h);
+      renderer.setSize(nw, nh);
     };
-    window.addEventListener('resize', handleResize);
+    window.addEventListener('resize', onResize);
 
     return () => {
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('resize', handleResize);
-      cancelAnimationFrame(animationFrameId);
-      if (container && renderer.domElement) {
-        container.removeChild(renderer.domElement);
-      }
+      cancelAnimationFrame(frame);
+      window.removeEventListener('mousemove', onMouse);
+      window.removeEventListener('resize', onResize);
+      if (container.contains(renderer.domElement)) container.removeChild(renderer.domElement);
       renderer.dispose();
     };
-  }, [isReducedMotion]);
+  }, []);
 
-  return <div ref={containerRef} className="w-full h-full relative cursor-grab active:cursor-grabbing" />;
+  return <div ref={containerRef} className="absolute inset-0 pointer-events-none" />;
 }
