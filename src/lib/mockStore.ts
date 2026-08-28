@@ -376,17 +376,12 @@ class MockStore {
     this.deliveryItems = this.deliveryItems.filter((dli) => !deliveryIds.has(dli.delivery_id));
     this.parties = this.parties.filter((p) => !partyIds.has(p.id));
 
-    // Also purge orphan payments: if a payment references a delivery or route that no longer exists
+    // Also purge orphan payments: if a payment references a delivery that no longer exists
     const remainingDeliveryIds = new Set(this.deliveries.map((d) => d.id));
     this.payments = this.payments.filter((p) => {
       if (p.delivery_id && !remainingDeliveryIds.has(p.delivery_id)) return false;
       return true;
     });
-
-    // If there are no routes left or no picklists and deliveries left, wipe all route payments
-    if (this.routes.length === 0 || (this.picklists.length === 0 && this.deliveries.length === 0)) {
-      this.payments = [];
-    }
 
     this.saveToStorage();
   }
@@ -518,11 +513,6 @@ class MockStore {
     this.deliveries = this.deliveries.filter((d) => !deliveryIds.has(d.id));
     this.deliveryItems = this.deliveryItems.filter((dli) => !deliveryIds.has(dli.delivery_id));
     this.payments = this.payments.filter((p) => !p.delivery_id || !deliveryIds.has(p.delivery_id));
-
-    // If no picklists and no deliveries remain, clear all payments
-    if (this.picklists.length === 0 && this.deliveries.length === 0) {
-      this.payments = [];
-    }
 
     this.saveToStorage();
   }
@@ -751,6 +741,10 @@ class MockStore {
   }
   deletePayment(id: string) {
     this.payments = this.payments.filter((p) => p.id !== id);
+    this.saveToStorage();
+  }
+  deletePaymentByDelivery(deliveryId: string) {
+    this.payments = this.payments.filter((p) => p.delivery_id !== deliveryId);
     this.saveToStorage();
   }
 

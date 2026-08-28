@@ -277,6 +277,22 @@ export async function createPayment(input: {
 }
 
 export async function deletePayment(id: string): Promise<void> {
+  // Handle synthetic del_pay_ IDs derived from delivery records
+  if (id.startsWith('del_pay_')) {
+    const deliveryId = id.replace('del_pay_', '');
+    // Delete the delivery's payment from Supabase by delivery_id
+    try {
+      await supabase.from('payments').delete().eq('delivery_id', deliveryId);
+    } catch {
+      // ignore
+    }
+    // Also clear the delivery's collected_amount and payment_mode in local store
+    mockStore.saveDelivery({ id: deliveryId, collected_amount: 0, payment_mode: null as any, status: 'pending', delivered_amount: 0 });
+    // Delete any real payment with this delivery_id from mockStore
+    mockStore.deletePaymentByDelivery(deliveryId);
+    return;
+  }
+
   try {
     await supabase.from('payments').delete().eq('id', id);
   } catch {

@@ -215,15 +215,28 @@ export async function getDeliveryDetail(deliveryId: string): Promise<Delivery | 
       items = mockDelItems as any;
     } else {
       const allPickItems = mockStore.getPicklistItems();
-      const partyCode = (delivery.party?.code || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
       const partyId = delivery.party_id || delivery.party?.id || '';
+      const partyCode = (delivery.party?.code || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+      // Numeric digits only (for matching e.g. 'C000727390' -> '727390')
+      const partyDigits = partyCode.replace(/[^0-9]/g, '');
 
       const matchedPickItems = allPickItems.filter((pli: PicklistItem) => {
-        const pliPartyId = (pli.party_id || '').toUpperCase();
-        return (
-          pli.party_id === partyId ||
-          (partyCode && pliPartyId && (pliPartyId === partyCode || pliPartyId.includes(partyCode) || partyCode.includes(pliPartyId)))
-        );
+        // Match by picklist_id + party_id
+        if (delivery.picklist_id && pli.picklist_id === delivery.picklist_id) {
+          if (!pli.party_id) return true; // no party filter on this item, include all from this picklist
+          const pliCode = (pli.party_id || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+          const pliDigits = pliCode.replace(/[^0-9]/g, '');
+          if (pli.party_id === partyId) return true;
+          if (partyCode && pliCode === partyCode) return true;
+          if (partyDigits && pliDigits === partyDigits) return true;
+        }
+        // Match by party_id directly
+        if (pli.party_id === partyId) return true;
+        const pliCode = (pli.party_id || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+        const pliDigits = pliCode.replace(/[^0-9]/g, '');
+        if (partyCode && pliCode && (pliCode === partyCode || pliCode.includes(partyCode) || partyCode.includes(pliCode))) return true;
+        if (partyDigits && pliDigits && pliDigits === partyDigits) return true;
+        return false;
       });
 
       if (matchedPickItems.length > 0) {
@@ -240,6 +253,33 @@ export async function getDeliveryDetail(deliveryId: string): Promise<Delivery | 
           amount: pli.amount,
           notes: null,
         }));
+      }
+
+      // Stage D2: If still empty and delivery has a picklist_id, pull ALL items from that picklist and narrow by party
+      if (items.length === 0 && delivery.picklist_id) {
+        const allPlItems = allPickItems.filter((pli: PicklistItem) => pli.picklist_id === delivery.picklist_id);
+        if (allPlItems.length > 0) {
+          // Group by party and try to find the right party's items
+          const partyItems = allPlItems.filter((pli: PicklistItem) => {
+            if (!pli.party_id) return false;
+            const pliDigits = (pli.party_id || '').replace(/[^0-9]/g, '');
+            return pliDigits === partyDigits || pli.party_id === partyId;
+          });
+          const targetItems = partyItems.length > 0 ? partyItems : allPlItems;
+          items = targetItems.map((pli: PicklistItem) => ({
+            id: pli.id,
+            delivery_id: delivery!.id,
+            product_id: pli.product_id,
+            sku: pli.sku,
+            product_name: pli.product_name,
+            ordered_qty: pli.quantity,
+            delivered_qty: pli.quantity,
+            free_quantity: pli.free_quantity || 0,
+            rate: pli.rate,
+            amount: pli.amount,
+            notes: null,
+          }));
+        }
       }
     }
   }
