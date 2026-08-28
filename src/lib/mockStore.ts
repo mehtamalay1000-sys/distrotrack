@@ -157,6 +157,76 @@ const INITIAL_EXPENSES: Expense[] = [
   },
 ];
 
+export function isPaymentLinkedToActiveRoute(
+  p: Payment,
+  parties: Party[],
+  deliveries: Delivery[],
+  picklists: Picklist[],
+  routes: Route[]
+): boolean {
+  if (!routes || routes.length === 0) return false;
+
+  const activeRouteIds = new Set(routes.map((r) => r.id));
+  const activeRouteCodes = new Set(routes.map((r) => (r.code || '').toLowerCase()));
+
+  // 1. Direct route_id or route_code on payment
+  if ((p as any).route_id) {
+    return activeRouteIds.has((p as any).route_id);
+  }
+  if ((p as any).route_code) {
+    return activeRouteCodes.has(String((p as any).route_code).toLowerCase());
+  }
+
+  // 2. Through delivery
+  if (p.delivery_id) {
+    const del = deliveries.find((d) => d.id === p.delivery_id);
+    if (!del) {
+      // Delivery was deleted, so this payment is orphaned and should be deleted
+      return false;
+    }
+    if (del.picklist_id) {
+      const pl = picklists.find((x) => x.id === del.picklist_id);
+      if (pl) {
+        if (pl.route_id && activeRouteIds.has(pl.route_id)) return true;
+        if (pl.route?.code && activeRouteCodes.has(pl.route.code.toLowerCase())) return true;
+        if ((pl as any).route_code && activeRouteCodes.has(String((pl as any).route_code).toLowerCase())) return true;
+      }
+    }
+    if ((del as any).route_id && activeRouteIds.has((del as any).route_id)) return true;
+    if ((del as any).route_code && activeRouteCodes.has(String((del as any).route_code).toLowerCase())) return true;
+    if (del.party_id) {
+      const pt = parties.find((x) => x.id === del.party_id || x.code === del.party_id);
+      if (pt?.route_id && activeRouteIds.has(pt.route_id)) return true;
+      if (pt?.route?.code && activeRouteCodes.has(pt.route.code.toLowerCase())) return true;
+    }
+    return false;
+  }
+
+  // 3. Through payment.delivery embedded object
+  if (p.delivery) {
+    const pl = p.delivery.picklist || picklists.find((x) => x.id === p.delivery?.picklist_id);
+    if (pl) {
+      if (pl.route_id && activeRouteIds.has(pl.route_id)) return true;
+      if (pl.route?.code && activeRouteCodes.has(pl.route.code.toLowerCase())) return true;
+      if ((pl as any).route_code && activeRouteCodes.has(String((pl as any).route_code).toLowerCase())) return true;
+    }
+    if ((p.delivery as any).route_id && activeRouteIds.has((p.delivery as any).route_id)) return true;
+    return false;
+  }
+
+  // 4. Through party (only if party is linked to an active route)
+  if (p.party_id) {
+    const pt = parties.find((x) => x.id === p.party_id || x.code === p.party_id) || p.party;
+    if (pt) {
+      if (pt.route_id && activeRouteIds.has(pt.route_id)) return true;
+      if (pt.route?.code && activeRouteCodes.has(pt.route.code.toLowerCase())) return true;
+      if ((pt as any).route_code && activeRouteCodes.has(String((pt as any).route_code).toLowerCase())) return true;
+    }
+  }
+
+  return false;
+}
+
 class MockStore {
   private workers: Worker[] = [];
   private routes: Route[] = [];
@@ -209,16 +279,10 @@ class MockStore {
         this.payments = parsed.payments || INITIAL_PAYMENTS;
         this.expenses = parsed.expenses && parsed.expenses.length > 0 ? parsed.expenses : [...INITIAL_EXPENSES];
 
-        // Integrity cleanup: if all picklists & deliveries were deleted, wipe route payments
-        if (this.picklists.length === 0 && this.deliveries.length === 0) {
-          this.payments = [];
-        } else {
-          const activeDeliveryIds = new Set(this.deliveries.map((d) => d.id));
-          this.payments = this.payments.filter((p) => {
-            if (p.delivery_id && !activeDeliveryIds.has(p.delivery_id)) return false;
-            return true;
-          });
-        }
+        // Strict route integrity: every payment MUST belong to an existing active route
+        this.payments = (this.payments || []).filter((p) =>
+          isPaymentLinkedToActiveRoute(p, this.parties, this.deliveries, this.picklists, this.routes)
+        );
         // Deduplicate picklistItems to prevent doubled quantities
         const rawItems: PicklistItem[] = parsed.picklistItems || [];
         const seenKeys = new Set<string>();
@@ -715,20 +779,10 @@ class MockStore {
 
   // ── Payments ───────────────────────────────────────────────────────
   getPayments(): Payment[] {
-    // If no picklists and no deliveries exist in the store, all route payments are purged
-    if (this.picklists.length === 0 && this.deliveries.length === 0) {
-      if (this.payments.length > 0) {
-        this.payments = [];
-        this.saveToStorage();
-      }
-      return [];
-    }
-
-    const activeDelIds = new Set(this.deliveries.map((d) => d.id));
-    const validPayments = this.payments.filter((p) => {
-      if (p.delivery_id && !activeDelIds.has(p.delivery_id)) return false;
-      return true;
-    });
+    // Strict route integrity: every payment MUST belong to an existing active route
+    const validPayments = this.payments.filter((p) =>
+      isPaymentLinkedToActiveRoute(p, this.parties, this.deliveries, this.picklists, this.routes)
+    );
 
     if (validPayments.length !== this.payments.length) {
       this.payments = validPayments;

@@ -1,5 +1,5 @@
 import { supabase } from '@/lib/supabase';
-import { mockStore } from '@/lib/mockStore';
+import { mockStore, isPaymentLinkedToActiveRoute } from '@/lib/mockStore';
 import type { Payment, PaymentMode } from '@/lib/database.types';
 
 export async function getPayments(): Promise<Payment[]> {
@@ -100,11 +100,9 @@ export async function getPayments(): Promise<Payment[]> {
     return [];
   }
 
-  const activeDeliveryIds = new Set(allDeliveries.map((d) => d.id));
-  const validMerged = merged.filter((p) => {
-    if (p.delivery_id && !activeDeliveryIds.has(p.delivery_id)) return false;
-    return true;
-  });
+  const validMerged = merged.filter((p) =>
+    isPaymentLinkedToActiveRoute(p, allParties, allDeliveries, allPicklists, allRoutes)
+  );
 
   for (let i = 0; i < validMerged.length; i++) {
     const p = validMerged[i];
