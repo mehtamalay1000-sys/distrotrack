@@ -4,7 +4,7 @@ import { useAuth } from '@/app/AuthProvider';
 import { toast } from 'sonner';
 import { Plus, Receipt, Trash2, Calendar, Coffee, Car, Truck, Wrench, Loader2, Eye } from 'lucide-react';
 import { getWorkerExpenses, createExpense, deleteExpense } from '@/features/expenses/services/expenseService';
-import { formatCurrency, formatDate } from '@/shared/utils/format';
+import { formatCurrency, formatDate, getLocalDateString } from '@/shared/utils/format';
 
 const WORKER_CATEGORIES = [
   'Tea & Refreshment',
@@ -25,7 +25,7 @@ export function WorkerExpensesPage() {
   const [form, setForm] = useState({
     category: WORKER_CATEGORIES[0],
     amount: '',
-    date: new Date().toISOString().split('T')[0],
+    date: getLocalDateString(),
     description: '',
   });
 
@@ -45,7 +45,7 @@ export function WorkerExpensesPage() {
       setForm({
         category: WORKER_CATEGORIES[0],
         amount: '',
-        date: new Date().toISOString().split('T')[0],
+        date: getLocalDateString(),
         description: '',
       });
     },
@@ -81,7 +81,7 @@ export function WorkerExpensesPage() {
     });
   };
 
-  const todayStr = new Date().toISOString().split('T')[0];
+  const todayStr = getLocalDateString();
   const myExpenses = expenses.filter((e) => e.worker_id === workerId || (e.worker_name && e.worker_name.toLowerCase().includes(workerName.toLowerCase())));
   const totalMyExpenses = myExpenses.reduce((sum, e) => sum + Number(e.amount || 0), 0);
   const todayMyExpenses = myExpenses.filter((e) => e.date === todayStr).reduce((sum, e) => sum + Number(e.amount || 0), 0);

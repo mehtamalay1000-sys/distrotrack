@@ -9,7 +9,7 @@ import { parseBills } from '../parsers/billsParser';
 import { matchInvoices } from '../parsers/matcher';
 import { confirmImportToDatabase } from '../services/importService';
 import { getWorkers } from '@/features/workers/services/workerService';
-import { formatCurrency } from '@/shared/utils/format';
+import { formatCurrency, getLocalDateString } from '@/shared/utils/format';
 import type { ParsedPicklist, ParsedPicklistItem, ParsedBillsResult, MatchResult } from '../parsers/types';
 
 export function ImportPage() {
@@ -20,7 +20,7 @@ export function ImportPage() {
   const getTomorrowStr = () => {
     const d = new Date();
     d.setDate(d.getDate() + 1);
-    return d.toISOString().split('T')[0];
+    return getLocalDateString(d);
   };
 
   const [picklistFile, setPicklistFile] = useState<File | null>(null);

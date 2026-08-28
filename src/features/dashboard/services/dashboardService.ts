@@ -4,6 +4,7 @@ import { getDeliveries } from '@/features/deliveries/services/deliveryService';
 import { getPayments } from '@/features/payments/services/paymentService';
 import { getExpenses } from '@/features/expenses/services/expenseService';
 import { getWorkers } from '@/features/workers/services/workerService';
+import { getLocalDateString, parseEffectiveDateString } from '@/shared/utils/format';
 
 export interface DashboardStats {
   todaySales: number;
@@ -13,7 +14,6 @@ export interface DashboardStats {
   completedDeliveriesCount: number;
   totalExpensesToday: number;
   activeWorkersCount: number;
-  // Monthly stats
   monthlySales: number;
   monthlyCollections: number;
   monthlyUdhari: number;
@@ -23,14 +23,15 @@ export interface DashboardStats {
 
 export async function getDashboardStats(): Promise<DashboardStats> {
   const now = new Date();
-  const todayStr = now.toISOString().split('T')[0];
+  const todayStr = getLocalDateString(now);
   const currentYear = now.getFullYear();
   const currentMonth = now.getMonth(); // 0-indexed
 
   /** Check if a date string falls in the current month */
   function isCurrentMonth(dateStr: string | null | undefined): boolean {
     if (!dateStr) return false;
-    const d = new Date(dateStr);
+    const cleanStr = parseEffectiveDateString(dateStr);
+    const d = new Date(cleanStr);
     return d.getFullYear() === currentYear && d.getMonth() === currentMonth;
   }
 
@@ -45,9 +46,7 @@ export async function getDashboardStats(): Promise<DashboardStats> {
 
     // ── Helper: Effective Date matching ──────────────────────────────
     const getEffectiveDate = (dateStr: string | null | undefined, createdAtStr: string | null | undefined): string => {
-      if (dateStr) return dateStr.split('T')[0];
-      if (createdAtStr) return createdAtStr.split('T')[0];
-      return '';
+      return parseEffectiveDateString(dateStr || createdAtStr);
     };
 
     // ── Daily Stats (strictly for today's delivery/operations date) ─────

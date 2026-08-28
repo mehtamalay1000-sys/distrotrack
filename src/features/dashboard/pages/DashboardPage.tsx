@@ -8,7 +8,7 @@ import { PageHeader, StatCard, Button, Card, StatusBadge, LoadingState } from '@
 import { getDashboardStats } from '../services/dashboardService';
 import { getDeliveries } from '@/features/deliveries/services/deliveryService';
 import { getPayments } from '@/features/payments/services/paymentService';
-import { formatCurrency, formatDate } from '@/shared/utils/format';
+import { formatCurrency, formatDate, getLocalDateString, parseEffectiveDateString } from '@/shared/utils/format';
 
 export function DashboardPage() {
   const navigate = useNavigate();
@@ -23,15 +23,15 @@ export function DashboardPage() {
     queryFn: getDeliveries,
   });
 
-  const todayStr = new Date().toISOString().split('T')[0];
-  const recentDeliveries = allDeliveries.filter((d) => (d.delivery_date || d.created_at?.split('T')[0]) === todayStr);
+  const todayStr = getLocalDateString();
+  const recentDeliveries = allDeliveries.filter((d) => parseEffectiveDateString(d.delivery_date || d.created_at) === todayStr);
 
   const { data: allPayments = [] } = useQuery({
     queryKey: ['payments'],
     queryFn: getPayments,
   });
 
-  const recentPayments = allPayments.filter((p) => (p.payment_date || p.created_at?.split('T')[0]) === todayStr);
+  const recentPayments = allPayments.filter((p) => parseEffectiveDateString(p.payment_date || p.created_at) === todayStr);
 
   if (statsLoading || !stats) return <LoadingState message="Loading daily dashboard…" />;
 

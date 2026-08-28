@@ -50,3 +50,30 @@ export function truncate(str: string, maxLen: number): string {
   if (str.length <= maxLen) return str;
   return str.slice(0, maxLen - 1) + '…';
 }
+
+/**
+ * Returns YYYY-MM-DD in local time (prevents UTC timezone shift bug)
+ */
+export function getLocalDateString(d: Date = new Date()): string {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * Parses any date/timestamp into local YYYY-MM-DD
+ */
+export function parseEffectiveDateString(dateStr: string | null | undefined): string {
+  if (!dateStr) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return dateStr;
+  try {
+    const d = new Date(dateStr);
+    if (!isNaN(d.getTime())) {
+      return getLocalDateString(d);
+    }
+  } catch {
+    // fallback
+  }
+  return dateStr.split('T')[0];
+}

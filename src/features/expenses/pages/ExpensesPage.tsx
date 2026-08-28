@@ -5,7 +5,7 @@ import { Plus, Receipt, Trash2, Eye, EyeOff, User } from 'lucide-react';
 import { PageHeader, Button, Input, Select, Modal, EmptyState, LoadingState, ErrorState } from '@/shared/ui';
 import { getExpenses, createExpense, deleteExpense } from '../services/expenseService';
 import { getWorkers } from '@/features/workers/services/workerService';
-import { formatCurrency, formatDate } from '@/shared/utils/format';
+import { formatCurrency, formatDate, getLocalDateString } from '@/shared/utils/format';
 
 const CATEGORIES = ['Fuel & Vehicle', 'Rent / Travel', 'Tea & Refreshment', 'Worker Allowance', 'Loading / Unloading', 'Office Supplies', 'Misc Repair', 'Other'];
 
@@ -15,7 +15,7 @@ export function ExpensesPage() {
   const [form, setForm] = useState({
     category: CATEGORIES[0],
     amount: 0,
-    date: new Date().toISOString().split('T')[0],
+    date: getLocalDateString(),
     description: '',
     worker_id: '',
     visible_to_worker: false,
@@ -49,7 +49,7 @@ export function ExpensesPage() {
     setForm({
       category: CATEGORIES[0],
       amount: 0,
-      date: new Date().toISOString().split('T')[0],
+      date: getLocalDateString(),
       description: '',
       worker_id: '',
       visible_to_worker: false,

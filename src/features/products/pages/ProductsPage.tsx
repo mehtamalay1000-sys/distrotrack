@@ -11,7 +11,7 @@ import {
   getProductMonthlyAnalytics, getRouteSalesHistory, seedProductMaster,
   clearAllSalesAnalyticsData,
 } from '../services/productService';
-import { formatCurrency } from '@/shared/utils/format';
+import { formatCurrency, getLocalDateString } from '@/shared/utils/format';
 import type { Product } from '@/lib/database.types';
 
 export function ProductsPage() {
@@ -31,7 +31,7 @@ export function ProductsPage() {
   const [selectedMonth, setSelectedMonth] = useState('2026-08');
 
   // Route & Date history filters
-  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
+  const [selectedDate, setSelectedDate] = useState(getLocalDateString());
   const [selectedRoute, setSelectedRoute] = useState('SANGAMNER_6');
 
   // React Query hooks

@@ -2,6 +2,7 @@ import { supabase } from '@/lib/supabase';
 import { mockStore } from '@/lib/mockStore';
 import type { Picklist, Delivery, PaymentMode, PicklistItem } from '@/lib/database.types';
 import { addNotification } from '@/features/notifications/services/notificationService';
+import { getLocalDateString } from '@/shared/utils/format';
 
 // ── Query Functions ──────────────────────────────────────────────
 
@@ -376,7 +377,7 @@ export interface CompleteDeliveryInput {
 /** Complete a party delivery — update items, create payment, update delivery status */
 export async function completePartyDelivery(input: CompleteDeliveryInput): Promise<void> {
   const now = new Date().toISOString();
-  const todayStr = new Date().toISOString().split('T')[0];
+  const todayStr = getLocalDateString();
 
   // 1. Update delivery items with delivered quantities
   for (const item of input.deliveredItems) {

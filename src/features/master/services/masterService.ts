@@ -1,6 +1,7 @@
 import { supabase } from '@/lib/supabase';
 import { getExpenses } from '@/features/expenses/services/expenseService';
 import { getParties } from '@/features/parties/services/partyService';
+import { getLocalDateString } from '@/shared/utils/format';
 import type { MasterAuditLog } from '@/lib/database.types';
 
 // ── Date Helpers ─────────────────────────────────────────────────
@@ -11,7 +12,7 @@ export interface DateRange {
 }
 
 export function todayRange(): DateRange {
-  const t = new Date().toISOString().split('T')[0];
+  const t = getLocalDateString();
   return { from: t, to: t };
 }
 
@@ -207,7 +208,7 @@ export async function getWorkerMonitorData(workerId: string, historyRange: DateR
       .maybeSingle();
 
     // Deliveries for today (or active picklist)
-    const todayStr = new Date().toISOString().split('T')[0];
+    const todayStr = getLocalDateString();
     const { data: deliveriesRaw } = await supabase
       .from('deliveries')
       .select('id, status, sequence_order, total_amount, delivered_amount, collected_amount, payment_mode, delivered_at, notes, party:parties(name), items:delivery_items(id)')

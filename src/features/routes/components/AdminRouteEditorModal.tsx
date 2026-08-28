@@ -6,7 +6,7 @@ import { getParties } from '@/features/parties/services/partyService';
 import { getProducts } from '@/features/products/services/productService';
 import { mockStore } from '@/lib/mockStore';
 import { supabase } from '@/lib/supabase';
-import { formatCurrency } from '@/shared/utils/format';
+import { formatCurrency, getLocalDateString } from '@/shared/utils/format';
 import type { Route, DeliveryItem } from '@/lib/database.types';
 
 interface AdminRouteEditorModalProps {
@@ -50,7 +50,7 @@ export function AdminRouteEditorModal({ route, onClose }: AdminRouteEditorModalP
         worker_id: route.assigned_worker_id || null,
         status: 'pending',
         total_amount: 0,
-        delivery_date: new Date().toISOString().split('T')[0],
+        delivery_date: getLocalDateString(),
         notes: `Added to route ${route.name}`,
       });
 

@@ -1,5 +1,6 @@
-import type { Worker, Route, Party, Product, Picklist, Delivery, Payment, Expense, PicklistItem, DeliveryItem } from '@/lib/database.types';
+ import type { Worker, Route, Party, Product, Picklist, Delivery, Payment, Expense, PicklistItem, DeliveryItem } from '@/lib/database.types';
 import { SAP_PRODUCT_MASTER } from '@/features/products/data/productMaster';
+import { getLocalDateString } from '@/shared/utils/format';
 
 const INITIAL_WORKERS: Worker[] = [
   {
@@ -517,7 +518,7 @@ class MockStore {
       const created: Picklist = {
         id: plData.id || `pl-${Date.now()}`,
         picklist_number: plData.picklist_number || `PL-${Date.now().toString().slice(-4)}`,
-        date: plData.date || new Date().toISOString().split('T')[0],
+        date: plData.date || getLocalDateString(),
         route_id: plData.route_id || null,
         worker_id: plData.worker_id || null,
         status: plData.status || 'draft',
@@ -596,7 +597,7 @@ class MockStore {
         invoice_id: dData.invoice_id || null,
         status: dData.status || 'pending',
         sequence_order: dData.sequence_order || 0,
-        delivery_date: dData.delivery_date || new Date().toISOString().split('T')[0],
+        delivery_date: dData.delivery_date || getLocalDateString(),
         started_at: dData.started_at || null,
         delivered_at: dData.status === 'delivered' ? new Date().toISOString() : (dData.delivered_at || null),
         total_amount: Number(dData.total_amount || 0),
@@ -752,7 +753,7 @@ class MockStore {
       reference_number: payData.reference_number || null,
       cheque_date: payData.cheque_date || null,
       cheque_bank: payData.cheque_bank || null,
-      payment_date: payData.payment_date || new Date().toISOString().split('T')[0],
+      payment_date: payData.payment_date || getLocalDateString(),
       status: payData.status || 'collected',
       notes: payData.notes || null,
       created_at: new Date().toISOString(),
@@ -793,7 +794,7 @@ class MockStore {
       route_id: expData.route_id || null,
       category: expData.category || 'other',
       amount: Number(expData.amount || 0),
-      date: expData.date || new Date().toISOString().split('T')[0],
+      date: expData.date || getLocalDateString(),
       description: expData.description || null,
       receipt_url: expData.receipt_url || null,
       visible_to_worker: expData.visible_to_worker ?? false,
