@@ -263,11 +263,21 @@ export async function startRoute(picklistId: string): Promise<void> {
 export async function endRoute(picklistId: string): Promise<void> {
   const now = new Date().toISOString();
 
-  // Get all deliveries to calculate totals
-  const { data: deliveries } = await supabase
-    .from('deliveries')
-    .select('*, payments(*)')
-    .eq('picklist_id', picklistId);
+  // 1. Get all deliveries from Supabase
+  let dbDeliveries: any[] = [];
+  try {
+    const { data } = await supabase
+      .from('deliveries')
+      .select('*, payments(*)')
+      .eq('picklist_id', picklistId);
+    if (data) dbDeliveries = data;
+  } catch {
+    // fallback
+  }
+
+  // 2. Also check mockStore deliveries
+  const mockDeliveries = mockStore.getDeliveries().filter((d) => d.picklist_id === picklistId);
+  const combinedDeliveries = dbDeliveries.length > 0 ? dbDeliveries : mockDeliveries;
 
   let totalCollected = 0;
   let totalCash = 0;
@@ -275,25 +285,61 @@ export async function endRoute(picklistId: string): Promise<void> {
   let totalCredit = 0;
   let completedParties = 0;
 
-  if (deliveries) {
-    for (const d of deliveries) {
-      if (d.status === 'delivered' || d.status === 'partial') {
-        completedParties++;
+  for (const d of combinedDeliveries) {
+    if (d.status === 'delivered' || d.status === 'partial') {
+      completedParties++;
+    }
+
+    const dCollected = Number(d.collected_amount || 0);
+    const dDelivered = Number(d.delivered_amount || d.total_amount || 0);
+
+    // If payments array exists and has entries, use it
+    if (d.payments && Array.isArray(d.payments) && d.payments.length > 0) {
+      for (const p of d.payments) {
+        const amt = Number(p.amount || 0);
+        if (p.payment_mode === 'cash') totalCash += amt;
+        else if (p.payment_mode === 'cheque' || p.payment_mode === 'upi') totalCheque += amt;
+        else if (p.payment_mode === 'credit') totalCredit += amt;
       }
-      totalCollected += Number(d.collected_amount || 0);
-      if (d.payments && Array.isArray(d.payments)) {
-        for (const p of d.payments) {
-          if (p.payment_mode === 'cash') totalCash += Number(p.amount || 0);
-          else if (p.payment_mode === 'cheque') totalCheque += Number(p.amount || 0);
-          else if (p.payment_mode === 'credit') totalCredit += Number(p.amount || 0);
-        }
+    } else {
+      // Direct delivery fallback
+      if (d.payment_mode === 'cash') {
+        const amt = dCollected > 0 ? dCollected : dDelivered;
+        totalCash += amt;
+      } else if (d.payment_mode === 'cheque' || d.payment_mode === 'upi') {
+        const amt = dCollected > 0 ? dCollected : dDelivered;
+        totalCheque += amt;
+      } else if (d.payment_mode === 'credit') {
+        totalCredit += dDelivered;
       }
     }
   }
 
-  const { error } = await supabase
-    .from('picklists')
-    .update({
+  totalCollected = totalCash + totalCheque;
+
+  // Update Supabase
+  try {
+    await supabase
+      .from('picklists')
+      .update({
+        status: 'completed',
+        completed_at: now,
+        completed_parties: completedParties,
+        total_collected: totalCollected,
+        total_cash: totalCash,
+        total_cheque: totalCheque,
+        total_credit: totalCredit,
+      })
+      .eq('id', picklistId);
+  } catch (err) {
+    console.warn('Could not update picklist in Supabase:', err);
+  }
+
+  // Update mockStore
+  const pl = mockStore.getPicklists().find((p) => p.id === picklistId);
+  if (pl) {
+    mockStore.savePicklist({
+      ...pl,
       status: 'completed',
       completed_at: now,
       completed_parties: completedParties,
@@ -301,9 +347,8 @@ export async function endRoute(picklistId: string): Promise<void> {
       total_cash: totalCash,
       total_cheque: totalCheque,
       total_credit: totalCredit,
-    })
-    .eq('id', picklistId);
-  if (error) throw new Error(`Failed to end route: ${error.message}`);
+    });
+  }
 }
 
 // ── Delivery Workflow ────────────────────────────────────────────

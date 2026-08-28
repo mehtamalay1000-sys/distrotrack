@@ -1,7 +1,8 @@
 import { createBrowserRouter } from 'react-router-dom';
-import { ProtectedRoute, RoleRedirect, AdminGuard, WorkerGuard } from './ProtectedRoute';
+import { ProtectedRoute, RoleRedirect, AdminGuard, WorkerGuard, MasterGuard } from './ProtectedRoute';
 import { AdminLayout } from '@/shared/layout/AdminLayout';
 import { WorkerLayout } from '@/shared/layout/WorkerLayout';
+import { MasterLayout } from '@/shared/layout/MasterLayout';
 import { LoginPage } from '@/features/auth/LoginPage';
 
 // ── Admin pages ──────────────────────────────────────────────────
@@ -27,6 +28,14 @@ import { WorkerHistoryPage } from '@/features/worker/pages/WorkerHistoryPage';
 import { WorkerProfilePage } from '@/features/worker/pages/WorkerProfilePage';
 import { WorkerExpensesPage } from '@/features/worker/pages/WorkerExpensesPage';
 import { WorkerPaymentsPage } from '@/features/worker/pages/WorkerPaymentsPage';
+
+// ── Master pages ─────────────────────────────────────────────────
+import { MasterDashboardPage } from '@/features/master/pages/MasterDashboardPage';
+import { MasterBusinessPage } from '@/features/master/pages/MasterBusinessPage';
+import { MasterWorkerMonitorPage } from '@/features/master/pages/MasterWorkerMonitorPage';
+import { MasterSystemPage } from '@/features/master/pages/MasterSystemPage';
+import { MasterHistoryPage } from '@/features/master/pages/MasterHistoryPage';
+import { MasterReportsPage } from '@/features/master/pages/MasterReportsPage';
 
 export const router = createBrowserRouter([
   // Public
@@ -78,6 +87,27 @@ export const router = createBrowserRouter([
               { path: '/w/expenses', element: <WorkerExpensesPage /> },
               { path: '/w/history', element: <WorkerHistoryPage /> },
               { path: '/w/profile', element: <WorkerProfilePage /> },
+            ],
+          },
+        ],
+      },
+
+      // ── Master routes ──────────────────────────────────────────
+      // Protected by MasterGuard — only role='master' can access.
+      // Normal admins and workers attempting to navigate here are
+      // redirected to their respective dashboards.
+      {
+        element: <MasterGuard />,
+        children: [
+          {
+            element: <MasterLayout />,
+            children: [
+              { path: '/master', element: <MasterDashboardPage /> },
+              { path: '/master/business', element: <MasterBusinessPage /> },
+              { path: '/master/workers', element: <MasterWorkerMonitorPage /> },
+              { path: '/master/system', element: <MasterSystemPage /> },
+              { path: '/master/history', element: <MasterHistoryPage /> },
+              { path: '/master/reports', element: <MasterReportsPage /> },
             ],
           },
         ],

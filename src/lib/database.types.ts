@@ -1,4 +1,4 @@
-export type UserRole = 'owner' | 'worker';
+export type UserRole = 'owner' | 'worker' | 'master';
 
 export type WorkerStatus = 'active' | 'inactive';
 export type RouteStatus = 'active' | 'inactive' | 'completed';
@@ -265,6 +265,21 @@ export interface Expense {
   // Joined
   worker?: Worker | null;
   route?: Route | null;
+}
+
+// ── Master Audit Log ────────────────────────────────────────────────
+
+export interface MasterAuditLog {
+  id: string;
+  occurred_at: string;
+  user_id: string | null;
+  user_name: string | null;
+  role: string | null;
+  module: string;
+  action: string;
+  status: 'success' | 'failure' | 'warning';
+  detail: string | null;
+  ip_hint: string | null;
 }
 
 // ── Database type for Supabase client ───────────────────────────────

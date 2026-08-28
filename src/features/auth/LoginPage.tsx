@@ -8,6 +8,7 @@ import {
   Delete,
   Building2,
   ShieldCheck,
+  Shield,
   MapPin,
   CheckCircle2,
   Sparkles,
@@ -50,8 +51,21 @@ export function LoginPage() {
   const handleRoleSelect = async (role: UserRole) => {
     setSelectedRole(role);
     setError('');
-    setLoadingUsers(true);
+    setPin('');
 
+    // ── Dedicated Master Mode Direct PIN Entry ───────────────────
+    if (role === 'master') {
+      setSelectedUser({
+        id: 'master-001',
+        name: 'Master Administrator',
+        phone: null,
+      });
+      setStep('pin');
+      return;
+    }
+
+    // ── Admin and Worker User Selection ─────────────────────────
+    setLoadingUsers(true);
     try {
       const fetchedUsers =
         role === 'owner' ? await getAvailableAdmins() : await getAvailableWorkers();
@@ -118,7 +132,7 @@ export function LoginPage() {
     setError('');
     if (step === 'pin') {
       setPin('');
-      if (users.length === 1) {
+      if (selectedRole === 'master' || users.length === 1) {
         setStep('role');
         setSelectedRole(null);
         setSelectedUser(null);
@@ -263,6 +277,8 @@ export function LoginPage() {
                 ? 'Sign In'
                 : step === 'user'
                 ? `Select ${selectedRole === 'owner' ? 'Admin' : 'Salesman'}`
+                : selectedRole === 'master'
+                ? 'Master Security PIN'
                 : 'Security PIN'}
             </h2>
             <p className="text-xs sm:text-sm text-slate-400 mt-1">
@@ -270,6 +286,8 @@ export function LoginPage() {
                 ? 'Choose your authorized portal profile to continue'
                 : step === 'user'
                 ? 'Select your verified personnel account'
+                : selectedRole === 'master'
+                ? 'Enter your 4-digit Master authorization key'
                 : `Authenticating verified session for ${selectedUser?.name}`}
             </p>
           </div>
@@ -279,6 +297,7 @@ export function LoginPage() {
             {/* ── STEP 1: ROLE SELECTION ────────────────────────── */}
             {step === 'role' && (
               <div className="space-y-3.5">
+                {/* 1. Distributor Admin / Owner */}
                 <button
                   onClick={() => handleRoleSelect('owner')}
                   disabled={loadingUsers}
@@ -300,6 +319,7 @@ export function LoginPage() {
                   </div>
                 </button>
 
+                {/* 2. Delivery Salesman */}
                 <button
                   onClick={() => handleRoleSelect('worker')}
                   disabled={loadingUsers}
@@ -317,6 +337,31 @@ export function LoginPage() {
                     </div>
                   </div>
                   <div className="h-8 w-8 rounded-full bg-slate-100 group-hover:bg-blue-600 group-hover:text-white flex items-center justify-center text-slate-400 transition-colors">
+                    →
+                  </div>
+                </button>
+
+                {/* 3. Master Access */}
+                <button
+                  onClick={() => handleRoleSelect('master')}
+                  disabled={loadingUsers}
+                  className="w-full group p-4 rounded-2xl border-2 border-indigo-200/90 bg-indigo-50/20 hover:border-indigo-600 hover:bg-indigo-50/60 transition-all text-left flex items-center gap-4 cursor-pointer disabled:opacity-50"
+                >
+                  <div className="h-12 w-12 rounded-2xl bg-gradient-to-tr from-indigo-700 to-indigo-900 text-indigo-200 flex items-center justify-center flex-shrink-0 shadow-md shadow-indigo-500/20 group-hover:scale-105 transition-transform">
+                    <Shield className="h-6 w-6 text-white" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-bold text-indigo-950 group-hover:text-indigo-700 transition-colors flex items-center gap-1.5">
+                      <span>Master Access</span>
+                      <span className="px-1.5 py-0.5 text-[10px] font-black uppercase tracking-wider bg-indigo-600 text-white rounded-md">
+                        System
+                      </span>
+                    </div>
+                    <div className="text-xs text-indigo-900/60 mt-0.5 leading-snug">
+                      Global oversight, audits, historical records & monitor
+                    </div>
+                  </div>
+                  <div className="h-8 w-8 rounded-full bg-indigo-100/70 group-hover:bg-indigo-600 group-hover:text-white flex items-center justify-center text-indigo-500 transition-colors">
                     →
                   </div>
                 </button>
@@ -364,14 +409,30 @@ export function LoginPage() {
             {step === 'pin' && (
               <div className="space-y-5">
                 {/* User badge */}
-                <div className="flex items-center gap-3 p-3 rounded-2xl bg-slate-50 border border-slate-100">
-                  <div className="h-9 w-9 rounded-xl bg-blue-100 text-blue-700 flex items-center justify-center font-bold text-sm">
-                    {selectedUser?.name.charAt(0).toUpperCase()}
+                <div className={`flex items-center gap-3 p-3 rounded-2xl border ${
+                  selectedRole === 'master'
+                    ? 'bg-indigo-50/80 border-indigo-200'
+                    : 'bg-slate-50 border-slate-100'
+                }`}>
+                  <div className={`h-9 w-9 rounded-xl flex items-center justify-center font-bold text-sm ${
+                    selectedRole === 'master'
+                      ? 'bg-indigo-600 text-white shadow-xs'
+                      : 'bg-blue-100 text-blue-700'
+                  }`}>
+                    {selectedRole === 'master' ? (
+                      <Shield className="h-5 w-5" />
+                    ) : (
+                      selectedUser?.name.charAt(0).toUpperCase()
+                    )}
                   </div>
                   <div>
                     <div className="text-sm font-bold text-slate-900">{selectedUser?.name}</div>
                     <div className="text-xs text-slate-500 font-medium">
-                      {selectedRole === 'owner' ? 'Administrator' : 'Salesman'}
+                      {selectedRole === 'master'
+                        ? 'Master Privileged Mode'
+                        : selectedRole === 'owner'
+                        ? 'Administrator'
+                        : 'Salesman'}
                     </div>
                   </div>
                 </div>
@@ -385,7 +446,9 @@ export function LoginPage() {
                         key={idx}
                         className={`h-3.5 w-3.5 rounded-full transition-all duration-200 ${
                           isFilled
-                            ? 'bg-blue-600 scale-110 shadow-md shadow-blue-500/30 ring-4 ring-blue-100'
+                            ? selectedRole === 'master'
+                              ? 'bg-indigo-600 scale-110 shadow-md shadow-indigo-500/30 ring-4 ring-indigo-100'
+                              : 'bg-blue-600 scale-110 shadow-md shadow-blue-500/30 ring-4 ring-blue-100'
                             : 'bg-slate-200'
                         }`}
                       />
@@ -408,7 +471,11 @@ export function LoginPage() {
                       type="button"
                       onClick={() => handlePinDigit(digit)}
                       disabled={loading}
-                      className="h-13 rounded-2xl bg-slate-50 hover:bg-blue-50 hover:text-blue-700 active:scale-95 text-slate-800 text-lg font-bold border border-slate-200/80 transition-all cursor-pointer flex items-center justify-center shadow-xs"
+                      className={`h-13 rounded-2xl text-slate-800 text-lg font-bold border border-slate-200/80 transition-all cursor-pointer flex items-center justify-center shadow-xs active:scale-95 ${
+                        selectedRole === 'master'
+                          ? 'bg-slate-50 hover:bg-indigo-50 hover:text-indigo-700'
+                          : 'bg-slate-50 hover:bg-blue-50 hover:text-blue-700'
+                      }`}
                     >
                       {digit}
                     </button>
@@ -418,7 +485,11 @@ export function LoginPage() {
                     type="button"
                     onClick={() => handlePinDigit('0')}
                     disabled={loading}
-                    className="h-13 rounded-2xl bg-slate-50 hover:bg-blue-50 hover:text-blue-700 active:scale-95 text-slate-800 text-lg font-bold border border-slate-200/80 transition-all cursor-pointer flex items-center justify-center shadow-xs"
+                    className={`h-13 rounded-2xl text-slate-800 text-lg font-bold border border-slate-200/80 transition-all cursor-pointer flex items-center justify-center shadow-xs active:scale-95 ${
+                      selectedRole === 'master'
+                        ? 'bg-slate-50 hover:bg-indigo-50 hover:text-indigo-700'
+                        : 'bg-slate-50 hover:bg-blue-50 hover:text-blue-700'
+                    }`}
                   >
                     0
                   </button>
@@ -433,7 +504,9 @@ export function LoginPage() {
                 </div>
 
                 {loading && (
-                  <div className="flex items-center justify-center gap-2 text-xs text-blue-600 font-medium py-1">
+                  <div className={`flex items-center justify-center gap-2 text-xs font-medium py-1 ${
+                    selectedRole === 'master' ? 'text-indigo-600' : 'text-blue-600'
+                  }`}>
                     <Loader2 className="h-4 w-4 animate-spin" />
                     <span>Verifying security credentials…</span>
                   </div>

@@ -6,11 +6,13 @@ import { PageHeader, Button, Input, Select, Modal, EmptyState, LoadingState, Err
 import { getRoutes, createRoute, updateRoute, deleteRoute, seedOfficialRoutes } from '../services/routeService';
 import { getWorkers } from '@/features/workers/services/workerService';
 import { getParties } from '@/features/parties/services/partyService';
-import { getDeliveries, updateDeliveryStatus } from '@/features/deliveries/services/deliveryService';
-import { getPicklists, updatePicklistStatus } from '@/features/picklists/services/picklistService';
-import { getPayments } from '@/features/payments/services/paymentService';
+import { getDeliveries } from '@/features/deliveries/services/deliveryService';
+import { getPicklists } from '@/features/picklists/services/picklistService';
+import { getPayments, createPayment } from '@/features/payments/services/paymentService';
+import { supabase } from '@/lib/supabase';
+import { mockStore } from '@/lib/mockStore';
 import { formatCurrency } from '@/shared/utils/format';
-import type { Route } from '@/lib/database.types';
+import type { Route, PaymentMode } from '@/lib/database.types';
 import { AdminRouteEditorModal } from '../components/AdminRouteEditorModal';
 
 export function RoutesPage() {
@@ -68,24 +70,101 @@ export function RoutesPage() {
       const routeDeliveries = deliveries.filter(d => partyIds.has(d.party_id) || d.picklist?.route_id === route.id);
       const routePicklists = picklists.filter(pl => pl.route_id === route.id || pl.route?.code === route.code);
 
+      let routeTotalCash = 0;
+      let routeTotalCheque = 0;
+      let routeTotalCredit = 0;
+
       for (const del of routeDeliveries) {
-        if (del.status !== 'delivered') {
-          await updateDeliveryStatus(del.id, 'delivered');
+        const party = parties.find(p => p.id === del.party_id);
+        const isCredit = (party && Number(party.outstanding_amount || 0) > 0) || del.payment_mode === 'credit';
+        const billAmt = Number(del.total_amount || del.delivered_amount || 0);
+
+        const mode: PaymentMode = isCredit
+          ? 'credit'
+          : (del.payment_mode === 'cheque' || del.payment_mode === 'upi' ? del.payment_mode : 'cash');
+        const collectedAmt = isCredit ? 0 : billAmt;
+
+        if (mode === 'cash') routeTotalCash += billAmt;
+        else if (mode === 'cheque' || mode === 'upi') routeTotalCheque += billAmt;
+        else if (mode === 'credit') routeTotalCredit += billAmt;
+
+        const deliveredAt = del.delivered_at || new Date().toISOString();
+
+        // Update delivery in Supabase & mockStore
+        try {
+          await supabase.from('deliveries').update({
+            status: 'delivered',
+            delivered_amount: billAmt,
+            collected_amount: collectedAmt,
+            payment_mode: mode,
+            delivered_at: deliveredAt,
+          }).eq('id', del.id);
+        } catch {
+          // fallback
+        }
+
+        mockStore.saveDelivery({
+          id: del.id,
+          status: 'delivered',
+          delivered_amount: billAmt,
+          collected_amount: collectedAmt,
+          payment_mode: mode,
+          delivered_at: deliveredAt,
+        });
+
+        // Record payment
+        if (billAmt > 0) {
+          await createPayment({
+            delivery_id: del.id,
+            party_id: del.party_id,
+            worker_id: del.worker_id || route.assigned_worker_id || undefined,
+            amount: billAmt,
+            payment_mode: mode,
+          });
         }
       }
+
+      // Update route picklists
+      const totalCollected = routeTotalCash + routeTotalCheque;
       for (const pl of routePicklists) {
-        if (pl.status !== 'completed') {
-          await updatePicklistStatus(pl.id, 'completed');
+        try {
+          await supabase.from('picklists').update({
+            status: 'completed',
+            completed_at: new Date().toISOString(),
+            completed_parties: routeDeliveries.length,
+            total_collected: totalCollected,
+            total_cash: routeTotalCash,
+            total_cheque: routeTotalCheque,
+            total_credit: routeTotalCredit,
+          }).eq('id', pl.id);
+        } catch {
+          // fallback
         }
+
+        mockStore.savePicklist({
+          id: pl.id,
+          status: 'completed',
+          completed_at: new Date().toISOString(),
+          completed_parties: routeDeliveries.length,
+          total_collected: totalCollected,
+          total_cash: routeTotalCash,
+          total_cheque: routeTotalCheque,
+          total_credit: routeTotalCredit,
+        });
       }
+
       await updateRoute(route.id, { status: 'completed' as any });
+      return { totalCash: routeTotalCash, totalCredit: routeTotalCredit };
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       qc.invalidateQueries({ queryKey: ['routes'] });
       qc.invalidateQueries({ queryKey: ['deliveries'] });
       qc.invalidateQueries({ queryKey: ['picklists'] });
+      qc.invalidateQueries({ queryKey: ['payments'] });
       qc.invalidateQueries({ queryKey: ['dashboard-stats'] });
-      toast.success('Route marked as COMPLETE! All deliveries updated.');
+      qc.invalidateQueries({ queryKey: ['worker-today-route'] });
+      qc.invalidateQueries({ queryKey: ['worker-history'] });
+      toast.success(`Route completed! Recorded ${formatCurrency(result?.totalCash || 0)} Cash collected.`);
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -202,6 +281,27 @@ export function RoutesPage() {
             const completedCount = routeDeliveries.filter(d => d.status === 'delivered').length;
             const isAllDelivered = routeDeliveries.length > 0 && completedCount === routeDeliveries.length;
 
+            // Calculate cash collected vs credit for this route
+            const routeCashCollected = routePicklists.reduce((s, pl) => s + Number(pl.total_cash || 0), 0) ||
+              routeDeliveries.reduce((sum, d) => {
+                const party = parties.find(p => p.id === d.party_id);
+                const isCredit = (party && Number(party.outstanding_amount || 0) > 0) || d.payment_mode === 'credit';
+                if (!isCredit && (d.status === 'delivered' || isAllDelivered)) {
+                  return sum + Number(d.collected_amount || d.delivered_amount || d.total_amount || 0);
+                }
+                return sum;
+              }, 0);
+
+            const routeCreditAmount = routePicklists.reduce((s, pl) => s + Number(pl.total_credit || 0), 0) ||
+              routeDeliveries.reduce((sum, d) => {
+                const party = parties.find(p => p.id === d.party_id);
+                const isCredit = (party && Number(party.outstanding_amount || 0) > 0) || d.payment_mode === 'credit';
+                if (isCredit && (d.status === 'delivered' || isAllDelivered)) {
+                  return sum + Number(d.delivered_amount || d.total_amount || party?.outstanding_amount || 0);
+                }
+                return sum;
+              }, 0);
+
             return (
               <Card key={route.id} className="p-0 overflow-hidden border border-surface-200 dark:border-surface-700">
                 {/* Route Main Header */}
@@ -243,6 +343,20 @@ export function RoutesPage() {
                       <span className="text-surface-400 block uppercase font-medium text-[10px]">Total Route Value</span>
                       <span className="font-bold text-primary-700 dark:text-primary-400 text-sm">{formatCurrency(routeTotalAmount)}</span>
                     </div>
+
+                    {/* Cash Collected */}
+                    <div className="text-xs">
+                      <span className="text-surface-400 block uppercase font-medium text-[10px]">Cash Collected</span>
+                      <span className="font-black text-emerald-700 dark:text-emerald-400 text-sm">{formatCurrency(routeCashCollected)}</span>
+                    </div>
+
+                    {/* Credit / Udhar */}
+                    {routeCreditAmount > 0 && (
+                      <div className="text-xs">
+                        <span className="text-surface-400 block uppercase font-medium text-[10px]">Credit / Udhar</span>
+                        <span className="font-black text-amber-700 dark:text-amber-400 text-sm">{formatCurrency(routeCreditAmount)}</span>
+                      </div>
+                    )}
 
                     {/* Completion Status */}
                     <div className="text-xs">
@@ -340,11 +454,23 @@ export function RoutesPage() {
                                     <StatusBadge status={partyDelivery?.status || 'pending'} />
                                   </div>
 
-                                  {/* Outstanding Amount */}
+                                  {/* Bill / Delivered Value */}
                                   <div className="text-xs text-right">
-                                    <span className="text-surface-400 block text-[10px] uppercase font-medium">Balance</span>
-                                    <span className={`font-bold ${party.outstanding_amount > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-surface-700 dark:text-surface-300'}`}>
-                                      {formatCurrency(party.outstanding_amount)}
+                                    <span className="text-surface-400 block text-[10px] uppercase font-medium">Bill Amount</span>
+                                    <span className="font-bold text-surface-900 dark:text-surface-100">
+                                      {formatCurrency(partyDelivery?.delivered_amount || partyDelivery?.total_amount || 0)}
+                                    </span>
+                                  </div>
+
+                                  {/* Outstanding / Payment Status */}
+                                  <div className="text-xs text-right">
+                                    <span className="text-surface-400 block text-[10px] uppercase font-medium">
+                                      {paymentMode === 'credit' ? 'Credit Balance' : 'Cash Paid'}
+                                    </span>
+                                    <span className={`font-black ${paymentMode === 'credit' ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-700 dark:text-emerald-400'}`}>
+                                      {paymentMode === 'credit'
+                                        ? formatCurrency(party.outstanding_amount || partyDelivery?.total_amount || 0)
+                                        : formatCurrency(partyDelivery?.collected_amount || partyDelivery?.total_amount || 0)}
                                     </span>
                                   </div>
                                 </div>

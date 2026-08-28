@@ -132,13 +132,14 @@ export function PaymentsPage() {
   }
 
   // ── Helper: Get route ID of a payment ─────────────────────────────────
+  // ── Helper: Get route ID of a payment ─────────────────────────────────
   function getPaymentRouteId(p: Payment): string | null {
     const dPicklist = (p.delivery as any)?.picklist;
     if (dPicklist?.route_id) return dPicklist.route_id;
     if (dPicklist?.route?.id) return dPicklist.route.id;
-    const pParty = p.party as any;
-    if (pParty?.route_id) return pParty.route_id;
-    if (pParty?.route?.id) return pParty.route.id;
+    const pt = p.party || parties.find((x) => x.id === p.party_id || x.code === p.party_id);
+    if (pt?.route_id) return pt.route_id;
+    if (pt?.route?.id) return pt.route.id;
     return null;
   }
 
@@ -176,11 +177,12 @@ export function PaymentsPage() {
     if (statusTab === 'paid' && p.payment_mode === 'credit') return false;
     if (statusTab === 'remaining' && p.payment_mode !== 'credit') return false;
 
+    const pt = p.party || parties.find((x) => x.id === p.party_id || x.code === p.party_id);
     // Search filter
     const matchesSearch =
-      (p.party?.name ?? '').toLowerCase().includes(search.toLowerCase()) ||
+      (pt?.name ?? '').toLowerCase().includes(search.toLowerCase()) ||
       (p.cheque_number ?? '').toLowerCase().includes(search.toLowerCase()) ||
-      (p.party?.code ?? '').toLowerCase().includes(search.toLowerCase());
+      (pt?.code ?? '').toLowerCase().includes(search.toLowerCase());
 
     return matchesSearch;
   });
@@ -393,10 +395,18 @@ export function PaymentsPage() {
             <tbody>
               {finalFiltered.map((p) => {
                 const isPaid = p.payment_mode !== 'credit';
+                const party = p.party || parties.find((x) => x.id === p.party_id || x.code === p.party_id);
+                const routeId =
+                  (p.delivery as any)?.picklist?.route_id ||
+                  (p.delivery as any)?.picklist?.route?.id ||
+                  party?.route_id ||
+                  party?.route?.id;
+                const matchedRoute = routes.find((r) => r.id === routeId);
                 const routeName =
                   (p.delivery?.picklist?.route as any)?.name ||
-                  p.party?.route?.name ||
-                  'Assigned Route';
+                  party?.route?.name ||
+                  matchedRoute?.name ||
+                  'Main Route';
 
                 return (
                   <tr key={p.id}>
@@ -405,9 +415,9 @@ export function PaymentsPage() {
                     </td>
                     <td>
                       <div className="font-bold text-surface-900 dark:text-surface-100">
-                        {p.party ? p.party.name : 'Unknown'}
+                        {party ? party.name : 'Unknown Customer'}
                       </div>
-                      <div className="font-mono text-[11px] text-surface-400">{p.party?.code}</div>
+                      <div className="font-mono text-[11px] text-surface-400">{party?.code}</div>
                     </td>
                     <td>
                       <span className="inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-0.5 rounded-lg bg-surface-100 dark:bg-surface-700 text-surface-700 dark:text-surface-300 border border-surface-200 dark:border-surface-600">

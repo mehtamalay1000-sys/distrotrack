@@ -48,6 +48,96 @@ export async function getPayments(): Promise<Payment[]> {
     }
   }
 
+  // Fallback: Check completed deliveries that might not have direct payment rows yet
+  try {
+    const mockDeliveries = mockStore.getDeliveries();
+    for (const d of mockDeliveries) {
+      if (d.status === 'delivered' || d.status === 'partial') {
+        const isCredit = d.payment_mode === 'credit';
+        const amt = Number(d.collected_amount || (isCredit ? d.delivered_amount || d.total_amount : 0) || 0);
+        if (amt > 0 && d.payment_mode) {
+          const existing = merged.find((p) => p.delivery_id === d.id);
+          const k = `del_pay_${d.id}`;
+          if (!existing && !seenKeys.has(k)) {
+            seenKeys.add(k);
+            const partyObj = mockStore.getParties().find((p) => p.id === d.party_id);
+            const workerObj = mockStore.getWorkers().find((w) => w.id === d.worker_id);
+            merged.push({
+              id: k,
+              delivery_id: d.id,
+              party_id: d.party_id,
+              worker_id: d.worker_id,
+              amount: amt,
+              payment_mode: d.payment_mode as PaymentMode,
+              payment_date: d.delivery_date || d.delivered_at?.split('T')[0] || new Date().toISOString().split('T')[0],
+              status: isCredit ? 'pending' : 'collected',
+              party: partyObj
+                ? { ...partyObj, route: mockStore.getRoutes().find((r) => r.id === partyObj.route_id) || null }
+                : null,
+              worker: workerObj || null,
+              delivery: d as any,
+              notes: d.notes || null,
+              created_at: d.delivered_at || d.created_at,
+              updated_at: d.updated_at,
+            } as Payment);
+          }
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  // Ensure every merged payment has party, worker, delivery, and route populated
+  const allParties = mockStore.getParties();
+  const allRoutes = mockStore.getRoutes();
+  const allWorkers = mockStore.getWorkers();
+  const allDeliveries = mockStore.getDeliveries();
+  const allPicklists = mockStore.getPicklists();
+
+  for (let i = 0; i < merged.length; i++) {
+    const p = merged[i];
+    let pt = p.party;
+    if (!pt || !pt.name || pt.name === 'Unknown') {
+      pt = allParties.find((x) => x.id === p.party_id || x.code === p.party_id) || pt;
+    }
+    let del = p.delivery;
+    if (!del && p.delivery_id) {
+      del = allDeliveries.find((d) => d.id === p.delivery_id) as any;
+    }
+    let w = p.worker;
+    if (!w && (p.worker_id || (p as any).received_by_worker_id)) {
+      w = allWorkers.find((x) => x.id === (p.worker_id || (p as any).received_by_worker_id)) || w;
+    }
+    if (pt) {
+      let r = (pt as any).route;
+      if (!r && (pt as any).route_id) {
+        r = allRoutes.find((x) => x.id === (pt as any).route_id) || r;
+      }
+      if (!r && (del as any)?.picklist?.route_id) {
+        r = allRoutes.find((x) => x.id === (del as any).picklist.route_id) || r;
+      }
+      pt = { ...pt, route: r || null } as any;
+    }
+    if (del) {
+      let pl = (del as any).picklist;
+      if (!pl && (del as any).picklist_id) {
+        pl = allPicklists.find((x) => x.id === (del as any).picklist_id);
+      }
+      if (pl && !pl.route && pl.route_id) {
+        pl = { ...pl, route: allRoutes.find((r) => r.id === pl.route_id) || null };
+      }
+      del = { ...del, picklist: pl || null } as any;
+    }
+
+    merged[i] = {
+      ...p,
+      party: pt || null,
+      worker: w || null,
+      delivery: del || null,
+    };
+  }
+
   return merged;
 }
 

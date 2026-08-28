@@ -33,16 +33,18 @@ export function RoleRedirect() {
     );
   }
 
-  if (role === 'worker') {
-    return <Navigate to="/w" replace />;
-  }
+  if (role === 'worker') return <Navigate to="/w" replace />;
+  if (role === 'master') return <Navigate to="/master" replace />;
   return <Navigate to="/admin" replace />;
 }
 
-/** Ensures only admin/owner can access admin routes. */
+/** Ensures only admin/owner can access admin routes.
+ *  Master users are redirected to their own dashboard — they do not
+ *  share the Admin layout (though they can see all data in Master pages). */
 export function AdminGuard() {
   const { role } = useAuth();
   if (role === 'worker') return <Navigate to="/w" replace />;
+  if (role === 'master') return <Navigate to="/master" replace />;
   return <Outlet />;
 }
 
@@ -50,5 +52,16 @@ export function AdminGuard() {
 export function WorkerGuard() {
   const { role } = useAuth();
   if (role === 'owner') return <Navigate to="/admin" replace />;
+  if (role === 'master') return <Navigate to="/master" replace />;
+  return <Outlet />;
+}
+
+/** Ensures only the Master role can access /master/* routes.
+ *  Any attempt by owner/worker to manually navigate here is blocked. */
+export function MasterGuard() {
+  const { role } = useAuth();
+  if (role === 'worker') return <Navigate to="/w" replace />;
+  if (role === 'owner') return <Navigate to="/admin" replace />;
+  // role === 'master' falls through
   return <Outlet />;
 }

@@ -5,8 +5,14 @@ import {
   Plus, Search, Phone, Mail, Edit2, Trash2, Target,
   User, MoreVertical, CheckCircle2, XCircle, IndianRupee,
   TrendingUp, Calendar, X, Loader2, Sparkles,
+  MapPin, Truck, ChevronDown, ChevronUp,
 } from 'lucide-react';
 import { getWorkers, createWorker, updateWorker, deleteWorker } from '../services/workerService';
+import { getRoutes } from '@/features/routes/services/routeService';
+import { getPicklists } from '@/features/picklists/services/picklistService';
+import { getDeliveries } from '@/features/deliveries/services/deliveryService';
+import { getPayments } from '@/features/payments/services/paymentService';
+import { getParties } from '@/features/parties/services/partyService';
 import { formatCurrency } from '@/shared/utils/format';
 import { addNotification } from '@/features/notifications/services/notificationService';
 import type { Worker } from '@/lib/database.types';
@@ -19,6 +25,8 @@ const MONTHS = [
 export function WorkersPage() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState('');
+  const [activeTab, setActiveTab] = useState<'cards' | 'routes'>('cards');
+  const [expandedWorkerId, setExpandedWorkerId] = useState<string | null>(null);
 
   // Add/Edit modal
   const [modalOpen, setModalOpen] = useState(false);
@@ -36,6 +44,31 @@ export function WorkersPage() {
   const { data: workers = [], isLoading, error } = useQuery({
     queryKey: ['workers'],
     queryFn: getWorkers,
+  });
+
+  const { data: routes = [] } = useQuery({
+    queryKey: ['routes'],
+    queryFn: getRoutes,
+  });
+
+  const { data: picklists = [] } = useQuery({
+    queryKey: ['picklists'],
+    queryFn: getPicklists,
+  });
+
+  const { data: deliveries = [] } = useQuery({
+    queryKey: ['deliveries'],
+    queryFn: getDeliveries,
+  });
+
+  const { data: payments = [] } = useQuery({
+    queryKey: ['payments'],
+    queryFn: getPayments,
+  });
+
+  const { data: parties = [] } = useQuery({
+    queryKey: ['parties'],
+    queryFn: getParties,
   });
 
   const createMutation = useMutation({
@@ -211,8 +244,129 @@ export function WorkersPage() {
     );
   }
 
+  // Helper: compute total market done by worker as per their routes
+  function getWorkerMarketStats(worker: Worker) {
+    const workerPicklists = picklists.filter(
+      (pl) => pl.worker_id === worker.id || (pl.worker as any)?.id === worker.id
+    );
+    const workerDeliveries = deliveries.filter(
+      (d) => d.worker_id === worker.id || (d.worker as any)?.id === worker.id
+    );
+    const workerPayments = payments.filter(
+      (p) => p.worker_id === worker.id || (p as any)?.received_by_worker_id === worker.id
+    );
+
+    // Identify all routes for this worker
+    const assignedRoutes = routes.filter((r) => {
+      const isAssigned = r.assigned_worker_id === worker.id;
+      const hasPicklist = workerPicklists.some((pl) => pl.route_id === r.id || pl.route?.code === r.code);
+      const hasDelivery = workerDeliveries.some(
+        (d) => d.picklist?.route_id === r.id || (d.party && d.party.route_id === r.id)
+      );
+      return isAssigned || hasPicklist || hasDelivery;
+    });
+
+    const routeList = assignedRoutes.length > 0
+      ? assignedRoutes
+      : routes.filter((r) => workerPicklists.some((pl) => pl.route_id === r.id));
+
+    // Per-route breakdown
+    const routeBreakdown = routeList.map((r) => {
+      const rPicklists = picklists.filter((pl) => pl.route_id === r.id || pl.route?.code === r.code);
+      const rParties = parties.filter((p) => p.route_id === r.id || p.route?.code === r.code);
+      const rPartyIds = new Set(rParties.map((p) => p.id));
+      const rDeliveries = deliveries.filter(
+        (d) => rPartyIds.has(d.party_id) || d.picklist?.route_id === r.id
+      );
+
+      const routeMarketSales =
+        rPicklists.reduce((sum, pl) => sum + Number(pl.total_amount || 0), 0) ||
+        rDeliveries.reduce((sum, d) => sum + Number(d.delivered_amount || d.total_amount || 0), 0) ||
+        rParties.reduce((sum, p) => sum + Number(p.outstanding_amount || 0), 0);
+
+      const routeCash =
+        rPicklists.reduce((sum, pl) => sum + Number(pl.total_cash || 0), 0) ||
+        rDeliveries.reduce((sum, d) => {
+          const pt = parties.find((p) => p.id === d.party_id);
+          const isCredit = (pt && Number(pt.outstanding_amount || 0) > 0) || d.payment_mode === 'credit';
+          if (!isCredit && (d.status === 'delivered' || Number(d.collected_amount || 0) > 0)) {
+            return sum + Number(d.collected_amount || d.delivered_amount || d.total_amount || 0);
+          }
+          return sum;
+        }, 0);
+
+      const routeCheque =
+        rPicklists.reduce((sum, pl) => sum + Number(pl.total_cheque || 0), 0) ||
+        workerPayments
+          .filter((p) => (p.payment_mode === 'cheque' || p.payment_mode === 'upi') && (p.delivery?.picklist?.route_id === r.id || p.party?.route_id === r.id))
+          .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+      const routeCredit =
+        rPicklists.reduce((sum, pl) => sum + Number(pl.total_credit || 0), 0) ||
+        rDeliveries.reduce((sum, d) => {
+          const pt = parties.find((p) => p.id === d.party_id);
+          const isCredit = (pt && Number(pt.outstanding_amount || 0) > 0) || d.payment_mode === 'credit';
+          if (isCredit) {
+            return sum + Number(d.delivered_amount || d.total_amount || pt?.outstanding_amount || 0);
+          }
+          return sum;
+        }, 0);
+
+      const completedCount = rDeliveries.filter((d) => d.status === 'delivered').length;
+      const totalDeliveries = rDeliveries.length;
+
+      return {
+        route: r,
+        marketSales: routeMarketSales,
+        cashCollected: routeCash,
+        chequeCollected: routeCheque,
+        creditExtended: routeCredit,
+        totalCollected: routeCash + routeCheque,
+        completedDeliveries: completedCount,
+        totalDeliveries: totalDeliveries,
+        partiesCount: rParties.length,
+      };
+    });
+
+    const totalMarketDone = routeBreakdown.reduce((sum, rb) => sum + rb.marketSales, 0) ||
+      workerPicklists.reduce((sum, pl) => sum + Number(pl.total_amount || 0), 0);
+    const totalCashCollected = routeBreakdown.reduce((sum, rb) => sum + rb.cashCollected, 0) ||
+      workerPayments.filter((p) => p.payment_mode === 'cash').reduce((sum, p) => sum + Number(p.amount || 0), 0);
+    const totalCreditExtended = routeBreakdown.reduce((sum, rb) => sum + rb.creditExtended, 0) ||
+      workerPayments.filter((p) => p.payment_mode === 'credit').reduce((sum, p) => sum + Number(p.amount || 0), 0);
+    const totalChequeCollected = routeBreakdown.reduce((sum, rb) => sum + rb.chequeCollected, 0);
+
+    const target = Number(worker.monthly_target || 50000);
+    const achievementPercent = target > 0 ? Math.min(100, Math.round((totalMarketDone / target) * 100)) : 0;
+
+    return {
+      routes: routeBreakdown,
+      totalMarketDone,
+      totalCashCollected,
+      totalCreditExtended,
+      totalChequeCollected,
+      totalCollected: totalCashCollected + totalChequeCollected,
+      achievementPercent,
+      target,
+    };
+  }
+
   const activeCount = workers.filter((w) => w.status === 'active').length;
   const totalTarget = workers.reduce((s, w) => s + (Number(w.monthly_target) || 50000), 0);
+
+  // Compute aggregate market stats
+  const workerMarketMap = new Map<string, ReturnType<typeof getWorkerMarketStats>>();
+  let totalAllMarketDone = 0;
+  let totalAllCashCollected = 0;
+  let totalAllCreditExtended = 0;
+
+  for (const w of workers) {
+    const stats = getWorkerMarketStats(w);
+    workerMarketMap.set(w.id, stats);
+    totalAllMarketDone += stats.totalMarketDone;
+    totalAllCashCollected += stats.totalCashCollected;
+    totalAllCreditExtended += stats.totalCreditExtended;
+  }
 
   const [year, month] = targetMonth.split('-');
   const selectedMonthLabel = `${MONTHS[parseInt(month) - 1]} ${year}`;
@@ -225,7 +379,7 @@ export function WorkersPage() {
         <div>
           <h1 className="text-xl font-bold text-surface-900 dark:text-white">Salesmen & Staff</h1>
           <p className="text-sm text-surface-500 dark:text-surface-400 mt-0.5">
-            Manage salesmen, assign monthly targets, and track performance
+            Manage salesmen, track market turnover by routes, and assign monthly targets
           </p>
         </div>
         <button
@@ -238,7 +392,8 @@ export function WorkersPage() {
       </div>
 
       {/* ── Summary Stats ───────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+        {/* Total Staff */}
         <div className="bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-2xl p-4 shadow-xs">
           <div className="flex items-center gap-2 mb-2">
             <div className="h-8 w-8 rounded-xl bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 flex items-center justify-center border border-blue-100 dark:border-blue-800/40">
@@ -250,172 +405,431 @@ export function WorkersPage() {
           <div className="text-[11px] text-surface-400 mt-0.5">{activeCount} active</div>
         </div>
 
+        {/* Total Monthly Target */}
+        <div className="bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-2xl p-4 shadow-xs">
+          <div className="flex items-center gap-2 mb-2">
+            <div className="h-8 w-8 rounded-xl bg-amber-50 dark:bg-amber-950/50 text-amber-600 dark:text-amber-400 flex items-center justify-center border border-amber-100 dark:border-amber-800/40">
+              <Target className="h-4 w-4" />
+            </div>
+            <span className="text-xs font-semibold text-surface-500 dark:text-surface-400">Monthly Target</span>
+          </div>
+          <div className="text-2xl font-extrabold text-amber-600 dark:text-amber-400">{formatCurrency(totalTarget)}</div>
+          <div className="text-[11px] text-surface-400 mt-0.5">combined staff target</div>
+        </div>
+
+        {/* Total Market Done */}
+        <div className="bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-2xl p-4 shadow-xs">
+          <div className="flex items-center gap-2 mb-2">
+            <div className="h-8 w-8 rounded-xl bg-indigo-50 dark:bg-indigo-950/50 text-indigo-600 dark:text-indigo-400 flex items-center justify-center border border-indigo-100 dark:border-indigo-800/40">
+              <Truck className="h-4 w-4" />
+            </div>
+            <span className="text-xs font-semibold text-surface-500 dark:text-surface-400">Total Market Done</span>
+          </div>
+          <div className="text-2xl font-extrabold text-indigo-600 dark:text-indigo-400">{formatCurrency(totalAllMarketDone)}</div>
+          <div className="text-[11px] text-surface-400 mt-0.5">
+            {totalTarget > 0 ? Math.round((totalAllMarketDone / totalTarget) * 100) : 0}% of target achieved
+          </div>
+        </div>
+
+        {/* Cash Collected in Market */}
         <div className="bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-2xl p-4 shadow-xs">
           <div className="flex items-center gap-2 mb-2">
             <div className="h-8 w-8 rounded-xl bg-emerald-50 dark:bg-emerald-950/50 text-emerald-600 dark:text-emerald-400 flex items-center justify-center border border-emerald-100 dark:border-emerald-800/40">
               <CheckCircle2 className="h-4 w-4" />
             </div>
-            <span className="text-xs font-semibold text-surface-500 dark:text-surface-400">Active</span>
+            <span className="text-xs font-semibold text-surface-500 dark:text-surface-400">Cash Collected</span>
           </div>
-          <div className="text-2xl font-extrabold text-emerald-600 dark:text-emerald-400">{activeCount}</div>
-          <div className="text-[11px] text-surface-400 mt-0.5">{workers.length - activeCount} inactive</div>
+          <div className="text-2xl font-extrabold text-emerald-600 dark:text-emerald-400">{formatCurrency(totalAllCashCollected)}</div>
+          <div className="text-[11px] text-surface-400 mt-0.5">realized in-hand</div>
         </div>
 
-        <div className="col-span-2 sm:col-span-1 bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-2xl p-4 shadow-xs">
+        {/* Market Credit / Udhar */}
+        <div className="bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-2xl p-4 shadow-xs col-span-2 sm:col-span-1">
           <div className="flex items-center gap-2 mb-2">
-            <div className="h-8 w-8 rounded-xl bg-amber-50 dark:bg-amber-950/50 text-amber-600 dark:text-amber-400 flex items-center justify-center border border-amber-100 dark:border-amber-800/40">
-              <Target className="h-4 w-4" />
+            <div className="h-8 w-8 rounded-xl bg-orange-50 dark:bg-orange-950/50 text-orange-600 dark:text-orange-400 flex items-center justify-center border border-orange-100 dark:border-orange-800/40">
+              <TrendingUp className="h-4 w-4" />
             </div>
-            <span className="text-xs font-semibold text-surface-500 dark:text-surface-400">Total Monthly Target</span>
+            <span className="text-xs font-semibold text-surface-500 dark:text-surface-400">Market Credit (Udhar)</span>
           </div>
-          <div className="text-2xl font-extrabold text-amber-600 dark:text-amber-400">{formatCurrency(totalTarget)}</div>
-          <div className="text-[11px] text-surface-400 mt-0.5">across all salesmen</div>
+          <div className="text-2xl font-extrabold text-orange-600 dark:text-orange-400">{formatCurrency(totalAllCreditExtended)}</div>
+          <div className="text-[11px] text-surface-400 mt-0.5">pending from parties</div>
         </div>
       </div>
 
-      {/* ── Search ──────────────────────────────────────────────────── */}
-      <div className="relative max-w-sm">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-surface-400" />
-        <input
-          type="text"
-          placeholder="Search salesmen by name or phone…"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="w-full h-10 pl-9 pr-4 text-sm border border-surface-300 dark:border-surface-600 rounded-xl bg-white dark:bg-surface-800 text-surface-900 dark:text-surface-100 placeholder:text-surface-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
-        />
+      {/* ── Tabs & Search Bar ───────────────────────────────────────── */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="inline-flex p-1 rounded-xl bg-surface-200/70 dark:bg-surface-800 border border-surface-300/60 dark:border-surface-700 text-xs font-bold">
+          <button
+            onClick={() => setActiveTab('cards')}
+            className={`px-4 py-2 rounded-lg transition-all cursor-pointer ${
+              activeTab === 'cards'
+                ? 'bg-white dark:bg-surface-700 text-surface-900 dark:text-white shadow-xs'
+                : 'text-surface-600 dark:text-surface-400 hover:text-surface-900'
+            }`}
+          >
+            Staff Overview ({workers.length})
+          </button>
+          <button
+            onClick={() => setActiveTab('routes')}
+            className={`px-4 py-2 rounded-lg transition-all cursor-pointer flex items-center gap-1.5 ${
+              activeTab === 'routes'
+                ? 'bg-blue-600 text-white shadow-xs'
+                : 'text-surface-600 dark:text-surface-400 hover:text-blue-600'
+            }`}
+          >
+            <MapPin className="h-3.5 w-3.5" />
+            Market Done by Routes
+          </button>
+        </div>
+
+        {/* Search */}
+        <div className="relative max-w-sm w-full">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-surface-400" />
+          <input
+            type="text"
+            placeholder="Search salesmen by name or phone…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="w-full h-10 pl-9 pr-4 text-sm border border-surface-300 dark:border-surface-600 rounded-xl bg-white dark:bg-surface-800 text-surface-900 dark:text-surface-100 placeholder:text-surface-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
+          />
+        </div>
       </div>
 
-      {/* ── Worker Cards ────────────────────────────────────────────── */}
-      {filtered.length === 0 ? (
-        <div className="bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-2xl p-12 text-center shadow-xs">
-          <div className="h-12 w-12 rounded-xl bg-surface-100 dark:bg-surface-700 flex items-center justify-center mx-auto mb-3">
-            <User className="h-6 w-6 text-surface-400" />
-          </div>
-          <h3 className="text-sm font-semibold text-surface-900 dark:text-white">No salesmen found</h3>
-          <p className="text-xs text-surface-500 dark:text-surface-400 mt-1">
-            {search ? 'Try a different search term.' : 'Add your first salesman to get started.'}
-          </p>
-          {!search && (
-            <button
-              onClick={openCreate}
-              className="mt-4 inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold transition-all cursor-pointer"
-            >
-              <Plus className="h-3.5 w-3.5" /> Add Salesman
-            </button>
+      {/* ── TAB 1: WORKER CARDS ───────────────────────────────────────── */}
+      {activeTab === 'cards' && (
+        <>
+          {filtered.length === 0 ? (
+            <div className="bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-2xl p-12 text-center shadow-xs">
+              <div className="h-12 w-12 rounded-xl bg-surface-100 dark:bg-surface-700 flex items-center justify-center mx-auto mb-3">
+                <User className="h-6 w-6 text-surface-400" />
+              </div>
+              <h3 className="text-sm font-semibold text-surface-900 dark:text-white">No salesmen found</h3>
+              <p className="text-xs text-surface-500 dark:text-surface-400 mt-1">
+                {search ? 'Try a different search term.' : 'Add your first salesman to get started.'}
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
+              {filtered.map((worker) => {
+                const initials = worker.name.split(' ').map((n) => n[0]).join('').toUpperCase().slice(0, 2);
+                const isActive = worker.status === 'active';
+                const marketStats = workerMarketMap.get(worker.id) || getWorkerMarketStats(worker);
+                const isExpanded = expandedWorkerId === worker.id;
+
+                return (
+                  <div
+                    key={worker.id}
+                    className="bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-2xl p-5 shadow-xs hover:shadow-md transition-all flex flex-col gap-4"
+                  >
+                    {/* Card Header */}
+                    <div className="flex items-start justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className="h-11 w-11 rounded-xl bg-gradient-to-br from-blue-600 to-indigo-600 flex items-center justify-center text-white font-bold text-sm shadow-sm flex-shrink-0">
+                          {initials}
+                        </div>
+                        <div>
+                          <div className="font-bold text-surface-900 dark:text-white text-sm leading-tight">{worker.name}</div>
+                          {worker.notes && (
+                            <div className="text-[11px] text-surface-500 dark:text-surface-400 mt-0.5 line-clamp-1">{worker.notes}</div>
+                          )}
+                        </div>
+                      </div>
+                      <span
+                        className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                          isActive
+                            ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800'
+                            : 'bg-surface-100 dark:bg-surface-700 text-surface-500 dark:text-surface-400 border-surface-200 dark:border-surface-600'
+                        }`}
+                      >
+                        {isActive ? <CheckCircle2 className="h-2.5 w-2.5" /> : <XCircle className="h-2.5 w-2.5" />}
+                        {isActive ? 'Active' : 'Inactive'}
+                      </span>
+                    </div>
+
+                    {/* Contact */}
+                    <div className="space-y-1 text-xs text-surface-600 dark:text-surface-400">
+                      {worker.phone && (
+                        <div className="flex items-center gap-2">
+                          <Phone className="h-3.5 w-3.5 text-surface-400 flex-shrink-0" />
+                          <span>{worker.phone}</span>
+                        </div>
+                      )}
+                      {worker.email && (
+                        <div className="flex items-center gap-2">
+                          <Mail className="h-3.5 w-3.5 text-surface-400 flex-shrink-0" />
+                          <span className="truncate">{worker.email}</span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* ── Market Performance as per Routes ─────────────────── */}
+                    <div className="bg-surface-50 dark:bg-surface-850/60 rounded-xl p-3.5 border border-surface-200/80 dark:border-surface-700/80 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-bold uppercase tracking-wider text-surface-500 dark:text-surface-400 flex items-center gap-1.5">
+                          <Truck className="h-3.5 w-3.5 text-blue-500" />
+                          Market Done
+                        </span>
+                        <span className="text-base font-black text-blue-600 dark:text-blue-400">
+                          {formatCurrency(marketStats.totalMarketDone)}
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2 pt-1 border-t border-surface-200/60 dark:border-surface-700/60">
+                        <div>
+                          <span className="text-[10px] uppercase font-bold text-surface-400 block">Cash Collected</span>
+                          <span className="text-xs font-black text-emerald-600 dark:text-emerald-400">
+                            {formatCurrency(marketStats.totalCashCollected)}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[10px] uppercase font-bold text-surface-400 block">Market Credit</span>
+                          <span className="text-xs font-black text-amber-600 dark:text-amber-400">
+                            {formatCurrency(marketStats.totalCreditExtended)}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Target Achievement Bar */}
+                      <div className="space-y-1 pt-1">
+                        <div className="flex items-center justify-between text-[10px]">
+                          <span className="font-semibold text-surface-500 dark:text-surface-400">
+                            Target: {formatCurrency(marketStats.target)}
+                          </span>
+                          <span className="font-black text-surface-800 dark:text-surface-200">
+                            {marketStats.achievementPercent}%
+                          </span>
+                        </div>
+                        <div className="w-full h-1.5 bg-surface-200 dark:bg-surface-700 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-gradient-to-r from-blue-500 to-indigo-600 rounded-full transition-all duration-500"
+                            style={{ width: `${marketStats.achievementPercent}%` }}
+                          />
+                        </div>
+                      </div>
+
+                      {/* Routes Handled */}
+                      {marketStats.routes.length > 0 && (
+                        <div className="pt-2 border-t border-surface-200/60 dark:border-surface-700/60">
+                          <div className="flex items-center justify-between mb-1.5">
+                            <span className="text-[10px] font-bold text-surface-400 uppercase flex items-center gap-1">
+                              <MapPin className="h-3 w-3" />
+                              Routes ({marketStats.routes.length})
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setExpandedWorkerId(isExpanded ? null : worker.id)}
+                              className="text-[10px] font-bold text-blue-600 dark:text-blue-400 hover:underline flex items-center gap-0.5 cursor-pointer"
+                            >
+                              {isExpanded ? 'Hide Routes' : 'View Route Details'}
+                              {isExpanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+                            </button>
+                          </div>
+
+                          <div className="flex flex-wrap gap-1.5">
+                            {marketStats.routes.map((rb) => (
+                              <span
+                                key={rb.route.id}
+                                className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-md bg-white dark:bg-surface-800 text-surface-700 dark:text-surface-300 border border-surface-200 dark:border-surface-700 shadow-2xs"
+                              >
+                                <span className="font-mono text-primary-600 dark:text-primary-400">{rb.route.code}</span>
+                                <span>•</span>
+                                <span className="font-bold text-emerald-600 dark:text-emerald-400">{formatCurrency(rb.marketSales)}</span>
+                              </span>
+                            ))}
+                          </div>
+
+                          {/* Expandable Route Details Table */}
+                          {isExpanded && (
+                            <div className="mt-2.5 overflow-x-auto rounded-xl border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800">
+                              <table className="w-full text-[11px] text-surface-700 dark:text-surface-300">
+                                <thead>
+                                  <tr className="bg-surface-100 dark:bg-surface-750 text-[10px] text-surface-500 border-b border-surface-200 dark:border-surface-700 uppercase font-bold">
+                                    <th className="p-1.5 text-left">Route</th>
+                                    <th className="p-1.5 text-center">Deliveries</th>
+                                    <th className="p-1.5 text-right">Market Done</th>
+                                    <th className="p-1.5 text-right">Cash</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {marketStats.routes.map((rb) => (
+                                    <tr key={rb.route.id} className="border-b border-surface-100 dark:border-surface-800/60">
+                                      <td className="p-1.5 font-semibold text-surface-900 dark:text-white">
+                                        <div className="font-mono text-[9px] text-surface-400">{rb.route.code}</div>
+                                        {rb.route.name}
+                                      </td>
+                                      <td className="p-1.5 text-center font-medium text-[10px]">
+                                        {rb.completedDeliveries} / {rb.totalDeliveries}
+                                      </td>
+                                      <td className="p-1.5 text-right font-black text-blue-600 dark:text-blue-400">
+                                        {formatCurrency(rb.marketSales)}
+                                      </td>
+                                      <td className="p-1.5 text-right font-bold text-emerald-600 dark:text-emerald-400">
+                                        {formatCurrency(rb.cashCollected)}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Actions */}
+                    <div className="flex gap-2 pt-1 mt-auto">
+                      <button
+                        onClick={() => openSetTarget(worker)}
+                        className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-sm transition-all active:scale-[0.97] cursor-pointer"
+                      >
+                        <Target className="h-3.5 w-3.5" />
+                        Give Target
+                      </button>
+
+                      <button
+                        onClick={() => openEdit(worker)}
+                        title="Edit"
+                        className="p-2.5 rounded-xl bg-surface-100 dark:bg-surface-700 hover:bg-surface-200 dark:hover:bg-surface-600 text-surface-600 dark:text-surface-300 transition-all cursor-pointer"
+                      >
+                        <Edit2 className="h-3.5 w-3.5" />
+                      </button>
+
+                      <button
+                        onClick={() => toggleStatus(worker)}
+                        title={isActive ? 'Deactivate' : 'Activate'}
+                        className={`p-2.5 rounded-xl transition-all cursor-pointer ${
+                          isActive
+                            ? 'bg-surface-100 dark:bg-surface-700 hover:bg-danger-50 dark:hover:bg-danger-950/40 text-surface-600 dark:text-surface-300 hover:text-danger-600'
+                            : 'bg-surface-100 dark:bg-surface-700 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 text-surface-600 dark:text-surface-300 hover:text-emerald-600'
+                        }`}
+                      >
+                        {isActive ? <XCircle className="h-3.5 w-3.5" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+                      </button>
+
+                      <button
+                        onClick={() => deleteMutation.mutate(worker.id)}
+                        title="Delete"
+                        className="p-2.5 rounded-xl bg-surface-100 dark:bg-surface-700 hover:bg-danger-50 dark:hover:bg-danger-950/40 text-surface-600 dark:text-surface-300 hover:text-danger-600 transition-all cursor-pointer"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           )}
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        </>
+      )}
+
+      {/* ── TAB 2: TOTAL MARKET DONE AS PER ROUTES (DEDICATED TABLE VIEW) ─ */}
+      {activeTab === 'routes' && (
+        <div className="space-y-6">
           {filtered.map((worker) => {
+            const marketStats = workerMarketMap.get(worker.id) || getWorkerMarketStats(worker);
             const initials = worker.name.split(' ').map((n) => n[0]).join('').toUpperCase().slice(0, 2);
-            const isActive = worker.status === 'active';
+
             return (
               <div
                 key={worker.id}
-                className="bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-2xl p-5 shadow-xs hover:shadow-md transition-all flex flex-col gap-4"
+                className="bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-2xl overflow-hidden shadow-xs"
               >
-                {/* Card Header */}
-                <div className="flex items-start justify-between">
+                {/* Salesman Route Header */}
+                <div className="p-4 bg-surface-50 dark:bg-surface-850 border-b border-surface-200 dark:border-surface-700 flex flex-col md:flex-row md:items-center justify-between gap-3">
                   <div className="flex items-center gap-3">
-                    <div className="h-11 w-11 rounded-xl bg-gradient-to-br from-blue-600 to-indigo-600 flex items-center justify-center text-white font-bold text-sm shadow-sm flex-shrink-0">
+                    <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-blue-600 to-indigo-600 flex items-center justify-center text-white font-bold text-sm shadow-sm flex-shrink-0">
                       {initials}
                     </div>
                     <div>
-                      <div className="font-bold text-surface-900 dark:text-white text-sm leading-tight">{worker.name}</div>
-                      {worker.notes && (
-                        <div className="text-[11px] text-surface-500 dark:text-surface-400 mt-0.5 line-clamp-1">{worker.notes}</div>
-                      )}
-                    </div>
-                  </div>
-                  <span
-                    className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border ${
-                      isActive
-                        ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800'
-                        : 'bg-surface-100 dark:bg-surface-700 text-surface-500 dark:text-surface-400 border-surface-200 dark:border-surface-600'
-                    }`}
-                  >
-                    {isActive ? <CheckCircle2 className="h-2.5 w-2.5" /> : <XCircle className="h-2.5 w-2.5" />}
-                    {isActive ? 'Active' : 'Inactive'}
-                  </span>
-                </div>
-
-                {/* Contact */}
-                <div className="space-y-1.5">
-                  {worker.phone && (
-                    <div className="flex items-center gap-2 text-xs text-surface-600 dark:text-surface-400">
-                      <Phone className="h-3.5 w-3.5 text-surface-400 flex-shrink-0" />
-                      <span>{worker.phone}</span>
-                    </div>
-                  )}
-                  {worker.email && (
-                    <div className="flex items-center gap-2 text-xs text-surface-600 dark:text-surface-400">
-                      <Mail className="h-3.5 w-3.5 text-surface-400 flex-shrink-0" />
-                      <span className="truncate">{worker.email}</span>
-                    </div>
-                  )}
-                  {!worker.phone && !worker.email && (
-                    <span className="text-xs text-surface-400">No contact details</span>
-                  )}
-                </div>
-
-                {/* Monthly Target */}
-                <div className="bg-gradient-to-r from-amber-50 to-orange-50 dark:from-amber-950/20 dark:to-orange-950/20 border border-amber-200/70 dark:border-amber-800/40 rounded-xl p-3 flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <div className="h-7 w-7 rounded-lg bg-amber-500 text-white flex items-center justify-center flex-shrink-0">
-                      <Target className="h-3.5 w-3.5" />
-                    </div>
-                    <div>
-                      <div className="text-[10px] text-amber-700 dark:text-amber-400 font-semibold uppercase tracking-wide">Monthly Target</div>
-                      <div className="text-sm font-extrabold text-amber-800 dark:text-amber-300 leading-tight">
-                        {formatCurrency(worker.monthly_target ?? 50000)}
+                      <div className="flex items-center gap-2">
+                        <h3 className="font-bold text-base text-surface-900 dark:text-white">{worker.name}</h3>
+                        <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-blue-100 text-blue-800 dark:bg-blue-950/60 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
+                          {marketStats.routes.length} {marketStats.routes.length === 1 ? 'Route' : 'Routes'}
+                        </span>
                       </div>
+                      <p className="text-xs text-surface-500 dark:text-surface-400">
+                        {worker.phone ? `Phone: ${worker.phone}` : 'No phone'} • Target: {formatCurrency(marketStats.target)} ({marketStats.achievementPercent}% achieved)
+                      </p>
                     </div>
                   </div>
-                  <TrendingUp className="h-4 w-4 text-amber-400" />
+
+                  {/* Worker Total Market Badges */}
+                  <div className="flex items-center gap-4 flex-wrap">
+                    <div className="text-right">
+                      <span className="text-[10px] uppercase font-bold text-surface-400 block">Total Market Done</span>
+                      <span className="text-base font-black text-blue-600 dark:text-blue-400">{formatCurrency(marketStats.totalMarketDone)}</span>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-[10px] uppercase font-bold text-surface-400 block">Cash In-Hand</span>
+                      <span className="text-base font-black text-emerald-600 dark:text-emerald-400">{formatCurrency(marketStats.totalCashCollected)}</span>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-[10px] uppercase font-bold text-surface-400 block">Market Credit</span>
+                      <span className="text-base font-black text-amber-600 dark:text-amber-400">{formatCurrency(marketStats.totalCreditExtended)}</span>
+                    </div>
+                  </div>
                 </div>
 
-                {/* Actions */}
-                <div className="flex gap-2 pt-1">
-                  {/* Give Target — primary CTA */}
-                  <button
-                    onClick={() => openSetTarget(worker)}
-                    className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-sm transition-all active:scale-[0.97] cursor-pointer"
-                  >
-                    <Target className="h-3.5 w-3.5" />
-                    Give Target
-                  </button>
-
-                  {/* Edit */}
-                  <button
-                    onClick={() => openEdit(worker)}
-                    title="Edit"
-                    className="p-2.5 rounded-xl bg-surface-100 dark:bg-surface-700 hover:bg-surface-200 dark:hover:bg-surface-600 text-surface-600 dark:text-surface-300 transition-all cursor-pointer"
-                  >
-                    <Edit2 className="h-3.5 w-3.5" />
-                  </button>
-
-                  {/* Toggle Status */}
-                  <button
-                    onClick={() => toggleStatus(worker)}
-                    title={isActive ? 'Deactivate' : 'Activate'}
-                    className={`p-2.5 rounded-xl transition-all cursor-pointer ${
-                      isActive
-                        ? 'bg-surface-100 dark:bg-surface-700 hover:bg-danger-50 dark:hover:bg-danger-950/40 text-surface-600 dark:text-surface-300 hover:text-danger-600'
-                        : 'bg-surface-100 dark:bg-surface-700 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 text-surface-600 dark:text-surface-300 hover:text-emerald-600'
-                    }`}
-                  >
-                    {isActive ? <XCircle className="h-3.5 w-3.5" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
-                  </button>
-
-                  {/* Delete */}
-                  <button
-                    onClick={() => deleteMutation.mutate(worker.id)}
-                    title="Delete"
-                    className="p-2.5 rounded-xl bg-surface-100 dark:bg-surface-700 hover:bg-danger-50 dark:hover:bg-danger-950/40 text-surface-600 dark:text-surface-300 hover:text-danger-600 transition-all cursor-pointer"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                </div>
+                {/* Routes Table */}
+                {marketStats.routes.length === 0 ? (
+                  <div className="p-8 text-center text-xs text-surface-400">
+                    No routes assigned to {worker.name} yet. Assign routes in Route Management.
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="dt-table w-full">
+                      <thead>
+                        <tr>
+                          <th>Route Code</th>
+                          <th>Route Name</th>
+                          <th>Parties</th>
+                          <th>Deliveries Done</th>
+                          <th className="text-right">Total Market Billed</th>
+                          <th className="text-right">Cash Collected</th>
+                          <th className="text-right">Market Credit</th>
+                          <th className="text-right">Realization</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {marketStats.routes.map((rb) => {
+                          const realizationRate = rb.marketSales > 0 ? Math.round((rb.cashCollected / rb.marketSales) * 100) : 0;
+                          return (
+                            <tr key={rb.route.id}>
+                              <td className="font-mono text-xs font-bold text-primary-700 dark:text-primary-300">
+                                {rb.route.code}
+                              </td>
+                              <td className="font-semibold text-surface-900 dark:text-white">
+                                {rb.route.name}
+                              </td>
+                              <td className="text-xs text-surface-600 dark:text-surface-400 font-medium">
+                                {rb.partiesCount} stores
+                              </td>
+                              <td>
+                                <span className={`text-xs font-bold ${rb.completedDeliveries === rb.totalDeliveries && rb.totalDeliveries > 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}`}>
+                                  {rb.completedDeliveries} / {rb.totalDeliveries} Completed
+                                </span>
+                              </td>
+                              <td className="text-right font-black text-blue-600 dark:text-blue-400">
+                                {formatCurrency(rb.marketSales)}
+                              </td>
+                              <td className="text-right font-black text-emerald-600 dark:text-emerald-400">
+                                {formatCurrency(rb.cashCollected)}
+                              </td>
+                              <td className="text-right font-black text-amber-600 dark:text-amber-400">
+                                {formatCurrency(rb.creditExtended)}
+                              </td>
+                              <td className="text-right">
+                                <span className="inline-flex items-center gap-1 font-bold text-xs px-2 py-0.5 rounded-md bg-surface-100 dark:bg-surface-700 text-surface-800 dark:text-surface-200">
+                                  {realizationRate}%
+                                </span>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
             );
           })}
