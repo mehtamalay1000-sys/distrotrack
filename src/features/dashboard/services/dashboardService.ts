@@ -56,7 +56,7 @@ export async function getDashboardStats(): Promise<DashboardStats> {
       .filter((p) => getEffectiveDate(p.date, p.created_at) === todayStr)
       .reduce((sum, p) => sum + Number(p.total_amount || 0), 0);
 
-    // Today's Collections: payments collected on today's date
+    // Today's Collections: payments collected on today's date (cash, cheque, upi)
     const todayCollections = payments
       .filter((p) => {
         const isDirectMode = p.payment_mode === 'cash' || p.payment_mode === 'cheque' || p.payment_mode === 'upi';
@@ -78,23 +78,16 @@ export async function getDashboardStats(): Promise<DashboardStats> {
       (d) => d.status === 'delivered' || d.status === 'partial'
     ).length;
 
-    // Total outstanding Udhari for today's deliveries (or active past due deliveries up to today)
-    let totalOutstanding = 0;
-    if (todayDeliveries.length > 0) {
-      totalOutstanding = todayDeliveries
-        .filter((d) => d.status === 'pending' || d.status === 'out_for_delivery' || d.status === 'partial')
-        .reduce((sum, d) => sum + Math.max(0, Number(d.total_amount || 0) - Number(d.collected_amount || 0)), 0);
-    } else {
-      // If no deliveries today, check for past pending deliveries (on or before today, not future)
-      const pastPendingDeliveries = deliveries.filter((d) => {
-        const dDate = getEffectiveDate(d.delivery_date, d.created_at);
-        return dDate && dDate <= todayStr && (d.status === 'pending' || d.status === 'out_for_delivery' || d.status === 'partial');
-      });
-      totalOutstanding = pastPendingDeliveries.reduce(
-        (sum, d) => sum + Math.max(0, Number(d.total_amount || 0) - Number(d.collected_amount || 0)),
-        0
-      );
-    }
+    // Total outstanding Udhari for today's deliveries (credit deliveries + partials + pending)
+    const creditPaymentsToday = payments
+      .filter((p) => p.payment_mode === 'credit' && getEffectiveDate(p.payment_date, p.created_at) === todayStr)
+      .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+    const deliveryUdhariToday = todayDeliveries
+      .filter((d) => d.payment_mode === 'credit' || d.status === 'pending' || d.status === 'out_for_delivery' || d.status === 'partial')
+      .reduce((sum, d) => sum + Math.max(0, Number(d.total_amount || 0) - Number(d.collected_amount || 0)), 0);
+
+    const totalOutstanding = Math.max(creditPaymentsToday, deliveryUdhariToday);
 
     const totalExpensesToday = expenses
       .filter((e) => getEffectiveDate(e.date, e.created_at) === todayStr)
@@ -127,9 +120,15 @@ export async function getDashboardStats(): Promise<DashboardStats> {
       .filter((p) => p.payment_mode !== 'credit')
       .reduce((sum, p) => sum + Number(p.amount || 0), 0);
 
-    const monthlyUdhari = monthlyPayments
+    const creditFromPayments = monthlyPayments
       .filter((p) => p.payment_mode === 'credit')
       .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+    const creditFromDeliveries = deliveries
+      .filter((d) => isCurrentMonth(d.delivery_date || d.created_at) && (d.payment_mode === 'credit' || d.status === 'pending' || d.status === 'out_for_delivery'))
+      .reduce((sum, d) => sum + Math.max(0, Number(d.total_amount || 0) - Number(d.collected_amount || 0)), 0);
+
+    const monthlyUdhari = Math.max(creditFromPayments, creditFromDeliveries);
 
     const monthlyCash = monthlyPayments
       .filter((p) => p.payment_mode === 'cash')

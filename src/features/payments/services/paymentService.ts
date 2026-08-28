@@ -1,5 +1,6 @@
 import { supabase } from '@/lib/supabase';
 import { mockStore, isPaymentLinkedToActiveRoute } from '@/lib/mockStore';
+import { parseEffectiveDateString } from '@/shared/utils/format';
 import type { Payment, PaymentMode } from '@/lib/database.types';
 
 export async function getPayments(): Promise<Payment[]> {
@@ -54,22 +55,24 @@ export async function getPayments(): Promise<Payment[]> {
     for (const d of mockDeliveries) {
       if (d.status === 'delivered' || d.status === 'partial') {
         const isCredit = d.payment_mode === 'credit';
-        const amt = Number(d.collected_amount || (isCredit ? d.delivered_amount || d.total_amount : 0) || 0);
-        if (amt > 0 && d.payment_mode) {
+        const amt = Number(d.collected_amount || (isCredit ? d.delivered_amount || d.total_amount : 0) || d.total_amount || 0);
+        if (amt > 0) {
+          const mode = (d.payment_mode || (d.collected_amount > 0 ? 'cash' : 'credit')) as PaymentMode;
           const existing = merged.find((p) => p.delivery_id === d.id);
           const k = `del_pay_${d.id}`;
           if (!existing && !seenKeys.has(k)) {
             seenKeys.add(k);
-            const partyObj = mockStore.getParties().find((p) => p.id === d.party_id);
-            const workerObj = mockStore.getWorkers().find((w) => w.id === d.worker_id);
+            const partyObj = mockStore.getParties().find((p) => p.id === d.party_id) || d.party;
+            const workerObj = mockStore.getWorkers().find((w) => w.id === d.worker_id) || d.worker;
             merged.push({
               id: k,
               delivery_id: d.id,
               party_id: d.party_id,
-              worker_id: d.worker_id,
+              worker_id: d.worker_id || (workerObj ? workerObj.id : null),
+              received_by_worker_id: d.worker_id || (workerObj ? workerObj.id : null),
               amount: amt,
-              payment_mode: d.payment_mode as PaymentMode,
-              payment_date: d.delivery_date || d.delivered_at?.split('T')[0] || new Date().toISOString().split('T')[0],
+              payment_mode: mode,
+              payment_date: parseEffectiveDateString(d.delivery_date || d.delivered_at || d.created_at),
               status: isCredit ? 'pending' : 'collected',
               party: partyObj
                 ? { ...partyObj, route: mockStore.getRoutes().find((r) => r.id === partyObj.route_id) || null }
@@ -77,8 +80,8 @@ export async function getPayments(): Promise<Payment[]> {
               worker: workerObj || null,
               delivery: d as any,
               notes: d.notes || null,
-              created_at: d.delivered_at || d.created_at,
-              updated_at: d.updated_at,
+              created_at: d.delivered_at || d.created_at || new Date().toISOString(),
+              updated_at: d.updated_at || new Date().toISOString(),
             } as Payment);
           }
         }

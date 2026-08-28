@@ -80,67 +80,33 @@ export function isPaymentLinkedToActiveRoute(
   picklists: Picklist[],
   routes: Route[]
 ): boolean {
-  if (!routes || routes.length === 0) return false;
+  if (!p) return false;
 
-  const activeRouteIds = new Set(routes.map((r) => r.id));
-  const activeRouteCodes = new Set(routes.map((r) => (r.code || '').toLowerCase()));
-
-  // 1. Direct route_id or route_code on payment
-  if ((p as any).route_id) {
-    return activeRouteIds.has((p as any).route_id);
-  }
-  if ((p as any).route_code) {
-    return activeRouteCodes.has(String((p as any).route_code).toLowerCase());
-  }
-
-  // 2. Through delivery
+  // 1. Through delivery: if payment is linked to a delivery that exists in active deliveries
   if (p.delivery_id) {
     const del = deliveries.find((d) => d.id === p.delivery_id);
-    if (!del) {
-      // Delivery was deleted, so this payment is orphaned and should be deleted
-      return false;
-    }
+    if (!del) return false; // Orphaned payment from a deleted delivery
+
     if (del.picklist_id) {
       const pl = picklists.find((x) => x.id === del.picklist_id);
-      if (pl) {
-        if (pl.route_id && activeRouteIds.has(pl.route_id)) return true;
-        if (pl.route?.code && activeRouteCodes.has(pl.route.code.toLowerCase())) return true;
-        if ((pl as any).route_code && activeRouteCodes.has(String((pl as any).route_code).toLowerCase())) return true;
-      }
+      if (!pl) return false; // Picklist was deleted
     }
-    if ((del as any).route_id && activeRouteIds.has((del as any).route_id)) return true;
-    if ((del as any).route_code && activeRouteCodes.has(String((del as any).route_code).toLowerCase())) return true;
-    if (del.party_id) {
-      const pt = parties.find((x) => x.id === del.party_id || x.code === del.party_id);
-      if (pt?.route_id && activeRouteIds.has(pt.route_id)) return true;
-      if (pt?.route?.code && activeRouteCodes.has(pt.route.code.toLowerCase())) return true;
-    }
-    return false;
+    return true;
   }
 
-  // 3. Through payment.delivery embedded object
-  if (p.delivery) {
-    const pl = p.delivery.picklist || picklists.find((x) => x.id === p.delivery?.picklist_id);
-    if (pl) {
-      if (pl.route_id && activeRouteIds.has(pl.route_id)) return true;
-      if (pl.route?.code && activeRouteCodes.has(pl.route.code.toLowerCase())) return true;
-      if ((pl as any).route_code && activeRouteCodes.has(String((pl as any).route_code).toLowerCase())) return true;
-    }
-    if ((p.delivery as any).route_id && activeRouteIds.has((p.delivery as any).route_id)) return true;
-    return false;
-  }
-
-  // 4. Through party (only if party is linked to an active route)
+  // 2. Through party: if party exists in active parties
   if (p.party_id) {
     const pt = parties.find((x) => x.id === p.party_id || x.code === p.party_id) || p.party;
-    if (pt) {
-      if (pt.route_id && activeRouteIds.has(pt.route_id)) return true;
-      if (pt.route?.code && activeRouteCodes.has(pt.route.code.toLowerCase())) return true;
-      if ((pt as any).route_code && activeRouteCodes.has(String((pt as any).route_code).toLowerCase())) return true;
-    }
+    if (!pt) return false;
+    return true;
   }
 
-  return false;
+  // 3. Direct route link
+  if ((p as any).route_id) {
+    return routes.some((r) => r.id === (p as any).route_id);
+  }
+
+  return true;
 }
 
 class MockStore {
