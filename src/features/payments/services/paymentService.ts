@@ -5,6 +5,7 @@ import type { Payment, PaymentMode } from '@/lib/database.types';
 
 export async function getPayments(): Promise<Payment[]> {
   let dbPayments: Payment[] = [];
+  let isDbOnline = false;
 
   try {
     const { data, error } = await supabase
@@ -20,36 +21,74 @@ export async function getPayments(): Promise<Payment[]> {
 
     if (!error && data) {
       dbPayments = data as Payment[];
+      isDbOnline = true;
+    }
+
+    // Also fetch completed deliveries directly from Supabase that may not have direct payment rows yet
+    const { data: dbDeliveries } = await supabase
+      .from('deliveries')
+      .select(`
+        *,
+        party:parties(*, route:routes(*)),
+        worker:workers(*),
+        picklist:picklists(*, route:routes(*)),
+        invoice:invoices(*)
+      `)
+      .in('status', ['delivered', 'partial'])
+      .order('created_at', { ascending: false });
+
+    if (dbDeliveries && dbDeliveries.length > 0) {
+      isDbOnline = true;
+      const existingDelIds = new Set(dbPayments.map((p) => p.delivery_id).filter(Boolean));
+      for (const d of dbDeliveries) {
+        if (existingDelIds.has(d.id)) continue;
+        const isCredit = d.payment_mode === 'credit';
+        const amt = Number(d.collected_amount || (isCredit ? d.delivered_amount || d.total_amount : 0) || d.total_amount || 0);
+        if (amt > 0) {
+          existingDelIds.add(d.id);
+          dbPayments.push({
+            id: `del_pay_${d.id}`,
+            delivery_id: d.id,
+            party_id: d.party_id,
+            worker_id: d.worker_id,
+            received_by_worker_id: d.worker_id,
+            amount: amt,
+            payment_mode: (d.payment_mode || 'cash') as any,
+            payment_date: parseEffectiveDateString(d.delivery_date || d.delivered_at || d.created_at),
+            status: isCredit ? 'pending' : 'collected',
+            party: d.party || null,
+            worker: d.worker || null,
+            delivery: d as any,
+            invoice: d.invoice || null,
+            notes: d.notes || null,
+            created_at: d.delivered_at || d.created_at || new Date().toISOString(),
+            updated_at: d.updated_at || new Date().toISOString(),
+          } as Payment);
+        }
+      }
     }
   } catch {
     // ignore
   }
 
+  // If Supabase is online and accessible, use its data as the authoritative source
+  if (isDbOnline) {
+    return dbPayments;
+  }
+
+  // Offline fallback only:
   const mockPayments = mockStore.getPayments();
   const seenKeys = new Set<string>();
   const merged: Payment[] = [];
 
-  // Add DB payments first
-  for (const p of dbPayments) {
-    const k = p.id || `${p.delivery_id}_${p.party_id}_${p.amount}_${p.payment_mode}`;
-    if (!seenKeys.has(k)) {
-      seenKeys.add(k);
-      merged.push(p);
-    }
-  }
-
-  // Add mockStore payments
   for (const mp of mockPayments) {
     const key = mp.id || `${mp.delivery_id}_${mp.party_id}_${mp.amount}_${mp.payment_mode}`;
-    const keyNoId = `${mp.delivery_id}_${mp.party_id}_${mp.amount}_${mp.payment_mode}`;
-    if (!seenKeys.has(key) && !seenKeys.has(keyNoId)) {
+    if (!seenKeys.has(key)) {
       seenKeys.add(key);
-      seenKeys.add(keyNoId);
       merged.push(mp);
     }
   }
 
-  // Fallback: Check completed deliveries that might not have direct payment rows yet
   try {
     const mockDeliveries = mockStore.getDeliveries();
     for (const d of mockDeliveries) {
@@ -91,66 +130,18 @@ export async function getPayments(): Promise<Payment[]> {
     // ignore
   }
 
-  // Ensure every merged payment has party, worker, delivery, and route populated
   const allParties = mockStore.getParties();
   const allRoutes = mockStore.getRoutes();
-  const allWorkers = mockStore.getWorkers();
   const allDeliveries = mockStore.getDeliveries();
   const allPicklists = mockStore.getPicklists();
 
-  // If there are no active deliveries and no picklists, no route collections should exist
   if (allDeliveries.length === 0 && allPicklists.length === 0) {
     return [];
   }
 
-  const validMerged = merged.filter((p) =>
+  return merged.filter((p) =>
     isPaymentLinkedToActiveRoute(p, allParties, allDeliveries, allPicklists, allRoutes)
   );
-
-  for (let i = 0; i < validMerged.length; i++) {
-    const p = validMerged[i];
-    let pt = p.party;
-    if (!pt || !pt.name || pt.name === 'Unknown') {
-      pt = allParties.find((x) => x.id === p.party_id || x.code === p.party_id) || pt;
-    }
-    let del = p.delivery;
-    if (!del && p.delivery_id) {
-      del = allDeliveries.find((d) => d.id === p.delivery_id) as any;
-    }
-    let w = p.worker;
-    if (!w && (p.worker_id || (p as any).received_by_worker_id)) {
-      w = allWorkers.find((x) => x.id === (p.worker_id || (p as any).received_by_worker_id)) || w;
-    }
-    if (pt) {
-      let r = (pt as any).route;
-      if (!r && (pt as any).route_id) {
-        r = allRoutes.find((x) => x.id === (pt as any).route_id) || r;
-      }
-      if (!r && (del as any)?.picklist?.route_id) {
-        r = allRoutes.find((x) => x.id === (del as any).picklist.route_id) || r;
-      }
-      pt = { ...pt, route: r || null } as any;
-    }
-    if (del) {
-      let pl = (del as any).picklist;
-      if (!pl && (del as any).picklist_id) {
-        pl = allPicklists.find((x) => x.id === (del as any).picklist_id);
-      }
-      if (pl && !pl.route && pl.route_id) {
-        pl = { ...pl, route: allRoutes.find((r) => r.id === pl.route_id) || null };
-      }
-      del = { ...del, picklist: pl || null } as any;
-    }
-
-    validMerged[i] = {
-      ...p,
-      party: pt || null,
-      worker: w || null,
-      delivery: del || null,
-    };
-  }
-
-  return validMerged;
 }
 
 export async function getWorkerPayments(workerId: string, workerName?: string): Promise<Payment[]> {
@@ -169,6 +160,7 @@ export async function getWorkerPayments(workerId: string, workerName?: string): 
     }
     const idList = Array.from(workerIds);
 
+    // 1. Fetch explicit payment rows from Supabase
     const { data, error } = await supabase
       .from('payments')
       .select(`
@@ -184,36 +176,60 @@ export async function getWorkerPayments(workerId: string, workerName?: string): 
     if (!error && data) {
       dbPayments = data as Payment[];
     }
+
+    // 2. Also fetch completed deliveries from Supabase that may not have a payments row yet
+    const { data: deliveriesData } = await supabase
+      .from('deliveries')
+      .select(`
+        *,
+        party:parties(*, route:routes(*)),
+        worker:workers(*),
+        picklist:picklists(*, route:routes(*))
+      `)
+      .in('worker_id', idList)
+      .in('status', ['delivered', 'partial'])
+      .order('created_at', { ascending: false });
+
+    if (deliveriesData && deliveriesData.length > 0) {
+      const existingDeliveryIds = new Set(dbPayments.map((p) => p.delivery_id).filter(Boolean));
+      for (const d of deliveriesData) {
+        if (existingDeliveryIds.has(d.id)) continue; // already has a payment row
+        const amt = Number(d.collected_amount || d.delivered_amount || d.total_amount || 0);
+        if (amt > 0) {
+          dbPayments.push({
+            id: `del_pay_${d.id}`,
+            delivery_id: d.id,
+            party_id: d.party_id,
+            worker_id: d.worker_id,
+            received_by_worker_id: d.worker_id,
+            amount: amt,
+            payment_mode: (d.payment_mode || 'cash') as any,
+            payment_date: d.delivery_date || d.delivered_at?.split('T')[0] || d.created_at?.split('T')[0],
+            status: d.payment_mode === 'credit' ? 'pending' : 'collected',
+            party: d.party || null,
+            worker: d.worker || null,
+            delivery: d as any,
+            notes: d.notes || null,
+            created_at: d.delivered_at || d.created_at || new Date().toISOString(),
+            updated_at: d.updated_at || new Date().toISOString(),
+          } as Payment);
+        }
+      }
+    }
   } catch {
-    // ignore
+    // ignore Supabase errors, fallback to mockStore below
   }
 
-  const mockPayments = mockStore.getPayments().filter(
-    (p) => p.worker_id === workerId || p.received_by_worker_id === workerId || (p.worker && p.worker.id === workerId)
-  );
-
-  const seenKeys = new Set<string>();
-  const merged: Payment[] = [];
-
-  for (const p of dbPayments) {
-    const k = p.id || `${p.delivery_id}_${p.party_id}_${p.amount}_${p.payment_mode}`;
-    if (!seenKeys.has(k)) {
-      seenKeys.add(k);
-      merged.push(p);
-    }
+  // Only include mockStore payments as last resort (when Supabase returned nothing)
+  if (dbPayments.length === 0) {
+    const mockPayments = mockStore.getPayments().filter(
+      (p) => p.worker_id === workerId || (p as any).received_by_worker_id === workerId ||
+             (p.worker && p.worker.id === workerId)
+    );
+    return mockPayments;
   }
 
-  for (const mp of mockPayments) {
-    const key = mp.id || `${mp.delivery_id}_${mp.party_id}_${mp.amount}_${mp.payment_mode}`;
-    const keyNoId = `${mp.delivery_id}_${mp.party_id}_${mp.amount}_${mp.payment_mode}`;
-    if (!seenKeys.has(key) && !seenKeys.has(keyNoId)) {
-      seenKeys.add(key);
-      seenKeys.add(keyNoId);
-      merged.push(mp);
-    }
-  }
-
-  return merged;
+  return dbPayments;
 }
 
 export async function createPayment(input: {

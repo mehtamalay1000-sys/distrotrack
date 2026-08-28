@@ -37,11 +37,14 @@ export function WorkerPaymentsPage() {
     notes: '',
   });
 
-  // Fetch only this worker's payments
-  const { data: payments = [], isLoading, error } = useQuery({
+  // Fetch only this worker's payments — auto-refresh every 30 seconds
+  const { data: payments = [], isLoading, error, isFetching } = useQuery({
     queryKey: ['worker-payments', workerId, workerName],
     queryFn: () => getWorkerPayments(workerId, workerName),
     enabled: !!workerId,
+    refetchInterval: 30_000,          // auto-refresh every 30s
+    refetchIntervalInBackground: false, // pause when tab is hidden
+    staleTime: 20_000,
   });
 
   const { data: allRoutes = [] } = useQuery({ queryKey: ['routes'], queryFn: getRoutes });
@@ -187,9 +190,22 @@ export function WorkerPaymentsPage() {
       <div className="flex items-center justify-between pt-2">
         <div>
           <h1 className="text-lg font-bold text-surface-900 dark:text-white">Route Payments</h1>
-          <p className="text-xs text-surface-500 dark:text-surface-400 mt-0.5">
-            Your collections, paid & remaining balances
-          </p>
+          <div className="flex items-center gap-2 mt-0.5">
+            <p className="text-xs text-surface-500 dark:text-surface-400">
+              Your collections, paid & remaining balances
+            </p>
+            {isFetching ? (
+              <span className="flex items-center gap-1 text-[10px] text-blue-500 font-semibold">
+                <span className="h-1.5 w-1.5 rounded-full bg-blue-500 animate-ping" />
+                Syncing
+              </span>
+            ) : (
+              <span className="flex items-center gap-1 text-[10px] text-emerald-500 font-semibold">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                Live
+              </span>
+            )}
+          </div>
         </div>
         <button
           onClick={openCreate}

@@ -53,6 +53,8 @@ export function WorkerRoutePage() {
     queryKey: ['worker-today-route', workerId, workerName],
     queryFn: () => getWorkerTodayRoute(workerId, workerName),
     enabled: !!workerId,
+    refetchInterval: 30_000,
+    staleTime: 20_000,
   });
 
   const { data: deliveries = [], isLoading: delLoading } = useQuery({

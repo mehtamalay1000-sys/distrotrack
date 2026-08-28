@@ -8,8 +8,11 @@ const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       retry: 1,
-      refetchOnWindowFocus: false,
-      staleTime: 1000 * 60 * 5, // 5 minutes cache
+      refetchOnWindowFocus: true, // Refetch immediately when worker/admin returns to the browser tab or wakes phone
+      refetchOnReconnect: true,   // Refetch immediately when internet reconnects
+      staleTime: 5000,            // 5s fresh window before background refetch
+      refetchInterval: 10000,     // Auto-poll every 10 seconds so worker phone and admin laptop stay in 100% real-time sync without manual refresh
+      refetchIntervalInBackground: false,
     },
   },
 });

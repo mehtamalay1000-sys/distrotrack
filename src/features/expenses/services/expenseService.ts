@@ -4,37 +4,19 @@ import type { Expense } from '@/lib/database.types';
 import { addNotification } from '@/features/notifications/services/notificationService';
 
 export async function getExpenses(): Promise<Expense[]> {
-  let dbExpenses: Expense[] = [];
   try {
     const { data, error } = await supabase
       .from('expenses')
       .select('*, worker:workers(id, name)')
       .order('date', { ascending: false });
     if (!error && data) {
-      dbExpenses = data as Expense[];
+      return data as Expense[];
     }
   } catch {
     // fallback
   }
 
-  // Merge with mockStore expenses so local and synced expenses are both present
-  const mockExpenses = mockStore.getExpenses();
-  const seenIds = new Set<string>();
-  const merged: Expense[] = [];
-
-  for (const e of dbExpenses) {
-    seenIds.add(e.id);
-    merged.push(e);
-  }
-
-  for (const me of mockExpenses) {
-    if (!seenIds.has(me.id)) {
-      seenIds.add(me.id);
-      merged.push(me);
-    }
-  }
-
-  return merged;
+  return mockStore.getExpenses();
 }
 
 export async function getWorkerExpenses(workerId: string, workerName?: string): Promise<Expense[]> {
