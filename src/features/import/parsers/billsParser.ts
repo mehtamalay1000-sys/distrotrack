@@ -41,6 +41,7 @@ export async function parseBills(file: File): Promise<ParsedBillsResult> {
         if (currentInvoice && currentInvoice.invoiceNumber === invNo) {
           currentInvoice.pageCount++;
           console.log(`[BILLS PARSER] Continuation page for invoice ${invNo}`);
+          inItemTable = false;
           continue;
         }
 
@@ -267,13 +268,15 @@ export async function parseBills(file: File): Promise<ParsedBillsResult> {
                 const { paidQty, freeQty } = extractQuantityTokens(remainder);
 
                 if (freeQty > 0 || paidQty > 0) {
-                  const derivedSku = deriveSKUFromDescription(description, srNo);
+                  const masterMatch = findProductMasterByDescription(description);
+                  const finalSku = masterMatch?.sku || deriveSKUFromDescription(description, srNo);
+                  const finalName = masterMatch?.name || description;
 
                   const item: ParsedInvoiceItem = {
-                    sku: derivedSku,
-                    productName: description,
+                    sku: finalSku,
+                    productName: finalName,
                     quantity: paidQty,
-                    freeQuantity: freeQty,
+                    freeQuantity: freeQty > 0 ? freeQty : (paidQty === 0 ? 1 : 0),
                     mrp: 0,
                     rate: 0,
                     amount: 0,
@@ -285,8 +288,8 @@ export async function parseBills(file: File): Promise<ParsedBillsResult> {
                     productName: item.productName,
                     mrp: 0,
                     rate: 0,
-                    quantity: 0,
-                    freeQuantity: freeQty,
+                    quantity: item.quantity,
+                    freeQuantity: item.freeQuantity,
                     amount: 0,
                   });
 

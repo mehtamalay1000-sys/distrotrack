@@ -148,6 +148,15 @@ export function findProductMasterByDescription(desc: string): ProductMasterEntry
     if (dNorm.includes('cdc 40g') && pNorm.includes('cdc 40g')) return true;
     if (dNorm.includes('cmf b 42g') && pNorm.includes('cmf b 42g')) return true;
     if (dNorm.includes('cmf 42g') && pNorm.includes('cmf 42g')) return true;
+    if (dNorm.includes('cib supreme') && pNorm.includes('cib supreme')) return true;
+    if (dNorm.includes('zz (7)') && pNorm.includes('zz (7)')) return true;
+    if (dNorm.includes('sf 11+2zz') && pNorm.includes('sf 11+2zz')) return true;
+    if (dNorm.includes('col tb sens') && pNorm.includes('col tb sens')) return true;
+    if (dNorm.includes('col swarna') && pNorm.includes('col swarna')) return true;
+    if (dNorm.includes('cmf blue 150g') && pNorm.includes('cmf blue 150g')) return true;
+    if (dNorm.includes('cmf red 150g') && pNorm.includes('cmf red 150g')) return true;
+    if (dNorm.includes('col herbal 200g') && pNorm.includes('col herbal 200g')) return true;
+    if (dNorm.includes('colgate sensitive pac') && pNorm.includes('colgate sensitive pack')) return true;
     return false;
   });
 

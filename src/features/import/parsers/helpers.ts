@@ -229,13 +229,16 @@ export function isNonProductLabel(text: string): boolean {
  */
 export function isValidSKU(sku: string): boolean {
   const trimmed = sku.trim();
-  if (!trimmed || trimmed.length < 4 || trimmed.length > 15) return false;
+  if (!trimmed || trimmed.length < 3 || trimmed.length > 30) return false;
 
   // Fast path: if SKU is in the Product Master, it's always valid
   if (getProductMasterSKUs().has(trimmed.toUpperCase())) return true;
 
+  // Accept derived SKUs: COL-XXXXX-X or ITEM-X
+  if (/^COL-/i.test(trimmed) || /^ITEM-/i.test(trimmed)) return true;
+
   // Must be alphanumeric (allow hyphens for some SAP formats)
-  if (!/^[A-Z0-9][A-Z0-9-]{2,14}$/i.test(trimmed)) return false;
+  if (!/^[A-Z0-9][A-Z0-9-]{1,29}$/i.test(trimmed)) return false;
 
   // Explicitly accept known SAP material code patterns:
   // - Pure numeric: 1600908, 61002494
