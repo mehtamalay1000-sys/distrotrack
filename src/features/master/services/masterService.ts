@@ -1,4 +1,6 @@
 import { supabase } from '@/lib/supabase';
+import { getExpenses } from '@/features/expenses/services/expenseService';
+import { getParties } from '@/features/parties/services/partyService';
 import type { MasterAuditLog } from '@/lib/database.types';
 
 // ── Date Helpers ─────────────────────────────────────────────────
@@ -51,10 +53,10 @@ export async function getMasterKPIs(range: DateRange): Promise<MasterKPIs> {
       picklistsRes,
       paymentsRes,
       deliveriesRes,
-      expensesRes,
+      allExpenses,
       workersRes,
       routesRes,
-      partiesRes,
+      partiesList,
       productsRes,
     ] = await Promise.all([
       supabase
@@ -72,33 +74,38 @@ export async function getMasterKPIs(range: DateRange): Promise<MasterKPIs> {
         .select('status, total_amount, collected_amount, delivery_date, created_at')
         .gte('delivery_date', range.from)
         .lte('delivery_date', range.to),
-      supabase
-        .from('expenses')
-        .select('amount, date')
-        .gte('date', range.from)
-        .lte('date', range.to),
+      getExpenses().catch(() => []),
       supabase.from('workers').select('id', { count: 'exact', head: true }).eq('status', 'active'),
       supabase.from('routes').select('id', { count: 'exact', head: true }).eq('status', 'active'),
-      supabase.from('parties').select('id', { count: 'exact', head: true }).eq('status', 'active'),
+      getParties().catch(() => []),
       supabase.from('products').select('id', { count: 'exact', head: true }).eq('status', 'active'),
     ]);
 
     const picklists = picklistsRes.data ?? [];
     const payments = paymentsRes.data ?? [];
     const deliveries = deliveriesRes.data ?? [];
-    const expenses = expensesRes.data ?? [];
+    const parties = partiesList ?? [];
+
+    const periodExpenses = allExpenses.filter((e) => {
+      const d = (e.date || e.created_at || '').split('T')[0];
+      return (!range.from || d >= range.from) && (!range.to || d <= range.to);
+    });
 
     const totalSales = picklists.reduce((s, p) => s + Number(p.total_amount ?? 0), 0);
     const totalCollections = payments.filter(p => p.payment_mode !== 'credit').reduce((s, p) => s + Number(p.amount ?? 0), 0);
     const totalCash = payments.filter(p => p.payment_mode === 'cash').reduce((s, p) => s + Number(p.amount ?? 0), 0);
-    const totalCheque = payments.filter(p => p.payment_mode === 'cheque').reduce((s, p) => s + Number(p.amount ?? 0), 0);
+    const totalCheque = payments.filter(p => p.payment_mode === 'cheque' || p.payment_mode === 'upi').reduce((s, p) => s + Number(p.amount ?? 0), 0);
     const totalCredit = payments.filter(p => p.payment_mode === 'credit').reduce((s, p) => s + Number(p.amount ?? 0), 0);
-    const totalExpenses = expenses.reduce((s, e) => s + Number(e.amount ?? 0), 0);
+    const totalExpenses = periodExpenses.reduce((s, e) => s + Number(e.amount ?? 0), 0);
     const completedDeliveries = deliveries.filter(d => d.status === 'delivered' || d.status === 'partial').length;
     const pendingDeliveries = deliveries.filter(d => d.status === 'pending' || d.status === 'out_for_delivery').length;
-    const outstandingAmount = deliveries
+
+    // Outstanding: Party balances + credit deliveries
+    const partyOutstanding = parties.reduce((s, p) => s + Number(p.outstanding_amount || 0), 0);
+    const deliveryOutstanding = deliveries
       .filter(d => d.status === 'pending' || d.status === 'out_for_delivery' || d.status === 'partial')
       .reduce((s, d) => s + Math.max(0, Number(d.total_amount ?? 0) - Number(d.collected_amount ?? 0)), 0);
+    const outstandingAmount = partyOutstanding > 0 ? partyOutstanding : (totalCredit || deliveryOutstanding);
 
     return {
       totalSales,
@@ -112,7 +119,7 @@ export async function getMasterKPIs(range: DateRange): Promise<MasterKPIs> {
       pendingDeliveries,
       activeWorkers: workersRes.count ?? 0,
       activeRoutes: routesRes.count ?? 0,
-      totalParties: partiesRes.count ?? 0,
+      totalParties: parties.length,
       totalProducts: productsRes.count ?? 0,
       totalPicklists: picklists.length,
       outstandingAmount,
@@ -404,13 +411,11 @@ export async function getMasterPayments(range: DateRange) {
 }
 
 export async function getMasterExpenses(range: DateRange) {
-  const { data } = await supabase
-    .from('expenses')
-    .select('*, worker:workers(name)')
-    .gte('date', range.from)
-    .lte('date', range.to)
-    .order('date', { ascending: false });
-  return data ?? [];
+  const all = await getExpenses().catch(() => []);
+  return all.filter((e) => {
+    const d = (e.date || e.created_at || '').split('T')[0];
+    return (!range.from || d >= range.from) && (!range.to || d <= range.to);
+  });
 }
 
 export async function getMasterParties() {

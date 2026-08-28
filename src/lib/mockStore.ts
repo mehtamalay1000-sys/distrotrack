@@ -70,7 +70,92 @@ const INITIAL_PRODUCTS: Product[] = SAP_PRODUCT_MASTER.map((entry, idx) => ({
 const INITIAL_PICKLISTS: Picklist[] = [];
 const INITIAL_DELIVERIES: Delivery[] = [];
 const INITIAL_PAYMENTS: Payment[] = [];
-const INITIAL_EXPENSES: Expense[] = [];
+const INITIAL_EXPENSES: Expense[] = [
+  {
+    id: 'exp-seed-1',
+    expense_number: 'EXP-1001',
+    category: 'Fuel & Vehicle',
+    amount: 1250,
+    date: '2026-08-28',
+    description: 'Van 1 daily fuel',
+    worker_id: null,
+    worker_name: 'Balu Murtadak',
+    route_id: null,
+    visible_to_worker: true,
+    created_at: '2026-08-28T09:00:00.000Z',
+    updated_at: '2026-08-28T09:00:00.000Z',
+  },
+  {
+    id: 'exp-seed-2',
+    expense_number: 'EXP-1002',
+    category: 'Fuel & Vehicle',
+    amount: 1500,
+    date: '2026-08-27',
+    description: 'Van 2 Sangamner route fuel',
+    worker_id: null,
+    worker_name: 'Mahindra Rashinkar',
+    route_id: null,
+    visible_to_worker: true,
+    created_at: '2026-08-27T08:30:00.000Z',
+    updated_at: '2026-08-27T08:30:00.000Z',
+  },
+  {
+    id: 'exp-seed-3',
+    expense_number: 'EXP-1003',
+    category: 'Worker Allowance',
+    amount: 350,
+    date: '2026-08-27',
+    description: 'Tea & lunch daily staff allowance',
+    worker_id: null,
+    worker_name: 'Balu Murtadak',
+    route_id: null,
+    visible_to_worker: true,
+    created_at: '2026-08-27T13:00:00.000Z',
+    updated_at: '2026-08-27T13:00:00.000Z',
+  },
+  {
+    id: 'exp-seed-4',
+    expense_number: 'EXP-1004',
+    category: 'Loading / Unloading',
+    amount: 600,
+    date: '2026-08-26',
+    description: 'Warehouse vehicle loading labour',
+    worker_id: null,
+    worker_name: null,
+    route_id: null,
+    visible_to_worker: false,
+    created_at: '2026-08-26T07:45:00.000Z',
+    updated_at: '2026-08-26T07:45:00.000Z',
+  },
+  {
+    id: 'exp-seed-5',
+    expense_number: 'EXP-1005',
+    category: 'Fuel & Vehicle',
+    amount: 2100,
+    date: '2026-08-25',
+    description: 'Van 1 weekly diesel top-up',
+    worker_id: null,
+    worker_name: 'Balu Murtadak',
+    route_id: null,
+    visible_to_worker: true,
+    created_at: '2026-08-25T08:00:00.000Z',
+    updated_at: '2026-08-25T08:00:00.000Z',
+  },
+  {
+    id: 'exp-seed-6',
+    expense_number: 'EXP-1006',
+    category: 'Misc Repair',
+    amount: 300,
+    date: '2026-08-20',
+    description: 'Van 2 tyre puncture & service',
+    worker_id: null,
+    worker_name: 'Mahindra Rashinkar',
+    route_id: null,
+    visible_to_worker: true,
+    created_at: '2026-08-20T11:00:00.000Z',
+    updated_at: '2026-08-20T11:00:00.000Z',
+  },
+];
 
 class MockStore {
   private workers: Worker[] = [];
@@ -122,7 +207,7 @@ class MockStore {
         this.picklists = parsed.picklists || INITIAL_PICKLISTS;
         this.deliveries = parsed.deliveries || INITIAL_DELIVERIES;
         this.payments = parsed.payments || INITIAL_PAYMENTS;
-        this.expenses = parsed.expenses || INITIAL_EXPENSES;
+        this.expenses = parsed.expenses && parsed.expenses.length > 0 ? parsed.expenses : [...INITIAL_EXPENSES];
         // Deduplicate picklistItems to prevent doubled quantities
         const rawItems: PicklistItem[] = parsed.picklistItems || [];
         const seenKeys = new Set<string>();

@@ -4,18 +4,37 @@ import type { Expense } from '@/lib/database.types';
 import { addNotification } from '@/features/notifications/services/notificationService';
 
 export async function getExpenses(): Promise<Expense[]> {
+  let dbExpenses: Expense[] = [];
   try {
     const { data, error } = await supabase
       .from('expenses')
-      .select('*, worker:workers(id, name), route:routes(id, name)')
+      .select('*, worker:workers(id, name)')
       .order('date', { ascending: false });
-    if (error || !data) {
-      return mockStore.getExpenses();
+    if (!error && data) {
+      dbExpenses = data as Expense[];
     }
-    return data as Expense[];
   } catch {
-    return mockStore.getExpenses();
+    // fallback
   }
+
+  // Merge with mockStore expenses so local and synced expenses are both present
+  const mockExpenses = mockStore.getExpenses();
+  const seenIds = new Set<string>();
+  const merged: Expense[] = [];
+
+  for (const e of dbExpenses) {
+    seenIds.add(e.id);
+    merged.push(e);
+  }
+
+  for (const me of mockExpenses) {
+    if (!seenIds.has(me.id)) {
+      seenIds.add(me.id);
+      merged.push(me);
+    }
+  }
+
+  return merged;
 }
 
 export async function getWorkerExpenses(workerId: string, workerName?: string): Promise<Expense[]> {
@@ -37,69 +56,65 @@ export async function createExpense(input: {
   route_id?: string;
   visible_to_worker?: boolean;
 }): Promise<Expense> {
+  let savedExpense: Expense | null = null;
+
   try {
+    const corePayload = {
+      category: input.category,
+      amount: input.amount,
+      date: input.date,
+      description: input.description ?? null,
+      worker_id: input.worker_id || null,
+    };
+
     const { data, error } = await supabase
       .from('expenses')
-      .insert({
-        category: input.category,
-        amount: input.amount,
-        date: input.date,
-        description: input.description ?? null,
-        worker_id: input.worker_id || null,
+      .insert(corePayload)
+      .select()
+      .single();
+
+    if (!error && data) {
+      savedExpense = {
+        ...(data as Expense),
         worker_name: input.worker_name || null,
         route_id: input.route_id || null,
         visible_to_worker: input.visible_to_worker ?? false,
-      })
-      .select()
-      .single();
-    let savedExpense: Expense;
-    if (error || !data) {
-      savedExpense = mockStore.saveExpense(input);
-    } else {
-      mockStore.saveExpense(data as Expense);
-      savedExpense = data as Expense;
+      };
+      mockStore.saveExpense(savedExpense);
     }
-
-    // Trigger Realtime Notifications
-    try {
-      addNotification({
-        recipient_role: 'admin',
-        type: 'expense',
-        title: `Expense Logged: ₹${input.amount}`,
-        message: `${input.worker_name || 'Worker'} logged ₹${Number(input.amount).toLocaleString('en-IN')} for ${input.category} (${input.description || 'No description'}).`,
-        link: '/admin/expenses',
-      });
-
-      if (input.worker_id) {
-        addNotification({
-          recipient_role: 'worker',
-          recipient_worker_id: input.worker_id,
-          type: 'expense',
-          title: `Expense Recorded: ₹${input.amount}`,
-          message: `Your expense of ₹${Number(input.amount).toLocaleString('en-IN')} for ${input.category} was recorded.`,
-          link: '/w/expenses',
-        });
-      }
-    } catch (err) {
-      console.error('Failed to dispatch expense notification:', err);
-    }
-
-    return savedExpense;
   } catch {
-    const saved = mockStore.saveExpense(input);
-    try {
-      addNotification({
-        recipient_role: 'admin',
-        type: 'expense',
-        title: `Expense Logged: ₹${input.amount}`,
-        message: `${input.worker_name || 'Worker'} logged ₹${Number(input.amount).toLocaleString('en-IN')} for ${input.category}.`,
-        link: '/admin/expenses',
-      });
-    } catch {
-      // ignore
-    }
-    return saved;
+    // fallback
   }
+
+  if (!savedExpense) {
+    savedExpense = mockStore.saveExpense(input);
+  }
+
+  // Trigger Realtime Notifications
+  try {
+    addNotification({
+      recipient_role: 'admin',
+      type: 'expense',
+      title: `Expense Logged: ₹${input.amount}`,
+      message: `${input.worker_name || 'Worker'} logged ₹${Number(input.amount).toLocaleString('en-IN')} for ${input.category} (${input.description || 'No description'}).`,
+      link: '/admin/expenses',
+    });
+
+    if (input.worker_id) {
+      addNotification({
+        recipient_role: 'worker',
+        recipient_worker_id: input.worker_id,
+        type: 'expense',
+        title: `Expense Recorded: ₹${input.amount}`,
+        message: `Your expense of ₹${Number(input.amount).toLocaleString('en-IN')} for ${input.category} was recorded.`,
+        link: '/w/expenses',
+      });
+    }
+  } catch (err) {
+    console.error('Failed to dispatch expense notification:', err);
+  }
+
+  return savedExpense;
 }
 
 export async function deleteExpense(id: string): Promise<void> {
