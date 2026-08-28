@@ -234,6 +234,54 @@ export async function getDeliveryDetail(deliveryId: string): Promise<Delivery | 
     }
   }
 
+  // Stage E: If items are still empty or invoice is missing, search invoices by party or amount
+  if (items.length === 0 || !delivery.invoice) {
+    try {
+      const partyId = delivery.party_id || delivery.party?.id;
+      if (partyId) {
+        const { data: invList } = await supabase
+          .from('invoices')
+          .select('*, items:invoice_items(*)')
+          .eq('party_id', partyId);
+
+        let foundInv = invList && invList.length > 0 ? invList[0] : null;
+
+        if (!foundInv && delivery.total_amount > 0) {
+          const { data: amtInvs } = await supabase
+            .from('invoices')
+            .select('*, items:invoice_items(*)')
+            .gte('net_amount', delivery.total_amount - 5)
+            .lte('net_amount', delivery.total_amount + 5);
+          if (amtInvs && amtInvs.length > 0) {
+            foundInv = amtInvs[0];
+          }
+        }
+
+        if (foundInv) {
+          delivery.invoice = foundInv;
+          delivery.invoice_id = foundInv.id;
+          if (items.length === 0 && foundInv.items && foundInv.items.length > 0) {
+            items = foundInv.items.map((ii: any) => ({
+              id: ii.id,
+              delivery_id: delivery!.id,
+              product_id: ii.product_id,
+              sku: ii.sku,
+              product_name: ii.product_name,
+              ordered_qty: ii.quantity,
+              delivered_qty: ii.quantity,
+              free_quantity: ii.free_quantity || 0,
+              rate: ii.rate,
+              amount: ii.amount,
+              notes: null,
+            }));
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   delivery.items = items;
   return delivery;
 }
