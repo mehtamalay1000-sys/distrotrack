@@ -4,6 +4,7 @@ import {
   isNonProductLabel, isValidSKU,
 } from './helpers';
 import { findProductMasterByDescription } from '@/features/products/data/productMaster';
+import { getLocalDateString } from '@/shared/utils/format';
 import type { ParsedBillsResult, ParsedInvoice, ParsedInvoiceItem } from './types';
 
 /**
@@ -26,13 +27,55 @@ export async function parseBills(file: File): Promise<ParsedBillsResult> {
   for (const page of pages) {
     console.log(`[BILLS PARSER] --- Scanning Page ${page.pageNumber} (${page.lines.length} lines) ---`);
 
+    // Pre-extract page metadata so Bill To (which appears before Invoice No) is never lost
+    let pageInvNo = '';
+    let pageBillTo = '';
+    let pageRetCode = '';
+    let pageInvDate = '';
+    let pageRoute = '';
+    let pageSalesRep = '';
+
+    for (let i = 0; i < page.lines.length; i++) {
+      const l = normalizeText(page.lines[i]);
+      const invM = l.match(/(?:Invoice\s*No\.?|Doc\s*No\.?)\s*[:.-]?\s*([A-Z0-9_-]{5,25})/i);
+      if (invM && !pageInvNo) pageInvNo = invM[1].trim();
+
+      const retM = l.match(/Ret\.?\s*Code\s*:?\s*([A-Z0-9]+)/i);
+      if (retM && !pageRetCode) pageRetCode = normalizeCode(retM[1]);
+
+      const dateM = l.match(/Invoice\s*Date\s*:\s*(\d{2}[\./-]\d{2}[\./-]\d{4})/i);
+      if (dateM && !pageInvDate) {
+        const parts = dateM[1].split(/[\./-]/);
+        if (parts.length === 3) {
+          pageInvDate = `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
+        }
+      }
+
+      const routeM = l.match(/Route\s*:\s*(.+)/i);
+      if (routeM && !pageRoute) pageRoute = routeM[1].trim();
+
+      const srM = l.match(/SalesRep\s*:\s*(.+)/i);
+      if (srM && !pageSalesRep) pageSalesRep = srM[1].trim();
+
+      const btM = l.match(/Bill\s*To\s*:\s*(.*)/i);
+      if (btM && !pageBillTo) {
+        let n = btM[1].replace(/_,,/g, '').trim();
+        if (!n && i + 1 < page.lines.length) {
+          n = normalizeText(page.lines[i + 1]).replace(/_,,/g, '').trim();
+        }
+        if (n && !/^tel:/i.test(n) && !/^gstin/i.test(n)) {
+          pageBillTo = n;
+        }
+      }
+    }
+
     for (let lineIdx = 0; lineIdx < page.lines.length; lineIdx++) {
       const rawLine = page.lines[lineIdx];
       const line = normalizeText(rawLine);
 
       // 1. Detect NEW Invoice Header
       // e.g. "Invoice No. : A37A506290" or "TAX Invoice"
-      const invNoMatch = line.match(/Invoice\s*No\.?\s*:?\s*([A-Z0-9_-]{6,20})/i);
+      const invNoMatch = line.match(/(?:Invoice\s*No\.?|Doc\s*No\.?)\s*[:.-]?\s*([A-Z0-9_-]{5,25})/i);
 
       if (invNoMatch) {
         const invNo = invNoMatch[1].trim();
@@ -40,6 +83,8 @@ export async function parseBills(file: File): Promise<ParsedBillsResult> {
         // Check if this is the continuation page of the existing invoice
         if (currentInvoice && currentInvoice.invoiceNumber === invNo) {
           currentInvoice.pageCount++;
+          if (!currentInvoice.partyName && pageBillTo) currentInvoice.partyName = pageBillTo;
+          if (!currentInvoice.partyCode && pageRetCode) currentInvoice.partyCode = pageRetCode;
           console.log(`[BILLS PARSER] Continuation page for invoice ${invNo}`);
           inItemTable = false;
           continue;
@@ -55,11 +100,11 @@ export async function parseBills(file: File): Promise<ParsedBillsResult> {
         inItemTable = false;
         currentInvoice = {
           invoiceNumber: invNo,
-          date: new Date().toISOString().split('T')[0],
-          partyCode: '',
-          partyName: '',
-          routeCode: '',
-          salesRep: '',
+          date: pageInvDate || getLocalDateString(),
+          partyCode: pageRetCode || '',
+          partyName: pageBillTo || '',
+          routeCode: pageRoute || '',
+          salesRep: pageSalesRep || '',
           items: [],
           totalAmount: 0,
           taxAmount: 0,
@@ -67,7 +112,7 @@ export async function parseBills(file: File): Promise<ParsedBillsResult> {
           pageCount: 1,
           rawText: line,
         };
-        console.log(`[BILLS PARSER] New invoice started: ${invNo}`);
+        console.log(`[BILLS PARSER] New invoice started: ${invNo} for party "${pageBillTo}" (${pageRetCode})`);
         continue;
       }
 
@@ -110,8 +155,6 @@ export async function parseBills(file: File): Promise<ParsedBillsResult> {
         if (srMatch) currentInvoice.salesRep = srMatch[1].trim();
 
         // === ITEM TABLE BOUNDARY DETECTION ===
-
-        // Detect item table header
         if (!inItemTable) {
           if (isProductTableHeader(line)) {
             inItemTable = true;

@@ -121,7 +121,17 @@ export async function getDeliveryDetail(deliveryId: string): Promise<Delivery | 
 
   if (!delivery) return null;
 
-  // 3. Ensure items array is populated with real items ONLY
+  // Resolve real party name if party.name was stored as a code (e.g. 'C000727222' or '22228')
+  if (delivery.party && (!delivery.party.name || /^[CS]?0*\d+$/i.test(delivery.party.name.trim()))) {
+    const codeDigits = (delivery.party.code || delivery.party.name || '').replace(/[^0-9]/g, '');
+    const allParties = mockStore.getParties();
+    const realParty = allParties.find(
+      (p) => p.code.replace(/[^0-9]/g, '') === codeDigits && p.name && !/^[CS]?0*\d+$/i.test(p.name)
+    );
+    if (realParty) {
+      delivery.party.name = realParty.name;
+    }
+  }
   let items = delivery.items || [];
 
   // Stage A: Try loading from Supabase delivery_items by delivery_id

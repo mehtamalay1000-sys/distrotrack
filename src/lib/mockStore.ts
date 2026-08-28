@@ -575,11 +575,23 @@ class MockStore {
 
   // ── Deliveries ─────────────────────────────────────────────────────
   getDeliveries(): Delivery[] {
-    return this.deliveries.map((d) => ({
-      ...d,
-      party: this.parties.find((p) => p.id === d.party_id) || null,
-      worker: this.workers.find((w) => w.id === d.worker_id) || null,
-    }));
+    return this.deliveries.map((d) => {
+      let party = this.parties.find((p) => p.id === d.party_id) || null;
+      if (party && (!party.name || /^[CS]?0*\d+$/i.test(party.name.trim()))) {
+        const codeDigits = (party.code || party.name || '').replace(/[^0-9]/g, '');
+        const realParty = this.parties.find(
+          (p) => p.code.replace(/[^0-9]/g, '') === codeDigits && p.name && !/^[CS]?0*\d+$/i.test(p.name)
+        );
+        if (realParty) {
+          party = { ...party, name: realParty.name };
+        }
+      }
+      return {
+        ...d,
+        party,
+        worker: this.workers.find((w) => w.id === d.worker_id) || null,
+      };
+    });
   }
   saveDelivery(dData: Partial<Delivery>): Delivery {
     const existingIdx = this.deliveries.findIndex((d) => d.id === dData.id);

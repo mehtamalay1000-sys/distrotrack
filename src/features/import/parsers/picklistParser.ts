@@ -114,47 +114,57 @@ export async function parsePicklist(file: File): Promise<ParsedPicklist> {
         // Match invoice table row:
         // Pattern 1: SrNo + ShipTo (S...) + CustomerCode (C...) + Party Name + InvoiceNo (A37...) + numeric values...
         // e.g. "1 S000022228 C000727249 RAJESH KIRANA A37A506290 1542.85 -24.20 0.00 75.94 1594.59 0.00 0.00 1595.00"
+        let custCode = '';
+        let custName = '';
+        let invoiceNo = '';
+        let netPayable = 0;
+
         const invRowMatch = line.match(/^(\d{1,3})\s+([A-Z0-9]{6,14})\s+([A-Z0-9]{6,14})\s+(.+?)\s+([A-Z0-9]{6,15})\s+([\d\s.-]+)$/);
-
         if (invRowMatch) {
-          const custCode = normalizeCode(invRowMatch[3]);
-          const custName = invRowMatch[4].trim();
+          custCode = normalizeCode(invRowMatch[3]);
+          custName = invRowMatch[4].trim();
+          invoiceNo = invRowMatch[5];
           const numTokens = invRowMatch[6].trim().match(/-?[\d]+(?:\.[\d]+)?/g) || [];
-          const netPayable = numTokens.length > 0 ? parseNumber(numTokens[numTokens.length - 1]) : 0;
-
-          if (custCode && custName && !custName.toLowerCase().includes('total')) {
-            if (!partyMap.has(custCode)) {
-              partyMap.set(custCode, {
-                partyCode: custCode,
-                partyName: custName,
-                items: [],
-                totalAmount: netPayable,
-              });
-              console.log(`[PICKLIST PARSER] Extracted Party: ${custCode} - "${custName}" (Invoice ${invRowMatch[5]}, Net ₹${netPayable})`);
-            } else {
-              const party = partyMap.get(custCode)!;
-              if (netPayable > 0) party.totalAmount = netPayable;
-            }
-            continue;
+          netPayable = numTokens.length > 0 ? parseNumber(numTokens[numTokens.length - 1]) : 0;
+        } else {
+          // Pattern 2: SrNo + [Optional SalesRep S...] + CustomerCode (C...) + Party Name + InvoiceNo + numbers
+          const invRowMatch2 = line.match(/^(\d{1,3})\s+(?:[A-Z0-9]{6,14}\s+)?([C][A-Z0-9]{6,12})\s+(.+?)\s+([A-Z0-9]{6,15})\s+([\d\s.-]+)$/i);
+          if (invRowMatch2) {
+            custCode = normalizeCode(invRowMatch2[2]);
+            custName = invRowMatch2[3].trim();
+            invoiceNo = invRowMatch2[4];
+            const numTokens = invRowMatch2[5].trim().match(/-?[\d]+(?:\.[\d]+)?/g) || [];
+            netPayable = numTokens.length > 0 ? parseNumber(numTokens[numTokens.length - 1]) : 0;
           }
         }
 
-        // Pattern 2: SrNo + CustomerCode (C... / P...) + Party Name + InvoiceNo + numbers
-        const invRowMatch2 = line.match(/^(\d{1,3})\s+([CS][A-Z0-9]{6,12})\s+(.+?)\s+([A-Z0-9]{6,15})\s+([\d\s.-]+)$/);
-        if (invRowMatch2) {
-          const custCode = normalizeCode(invRowMatch2[2]);
-          const custName = invRowMatch2[3].trim();
-          const numTokens = invRowMatch2[5].trim().match(/-?[\d]+(?:\.[\d]+)?/g) || [];
-          const netPayable = numTokens.length > 0 ? parseNumber(numTokens[numTokens.length - 1]) : 0;
+        // Clean any leading Customer Code that got stuck in custName
+        if (/^[CS]\d{6,12}\s+/i.test(custName)) {
+          const parts = custName.split(/\s+/);
+          const realCode = normalizeCode(parts[0]);
+          const realName = parts.slice(1).join(' ').trim();
+          if (realName) {
+            custCode = realCode;
+            custName = realName;
+          }
+        }
 
-          if (custCode && custName && !custName.toLowerCase().includes('total') && !partyMap.has(custCode)) {
+        // Ensure party is recorded with canonical party name (never a customer code)
+        if (custCode && custName && !custName.toLowerCase().includes('total') && !/^[CS]0*\d+$/i.test(custName)) {
+          if (!partyMap.has(custCode)) {
             partyMap.set(custCode, {
               partyCode: custCode,
               partyName: custName,
               items: [],
               totalAmount: netPayable,
             });
-            console.log(`[PICKLIST PARSER] Extracted Party (P2): ${custCode} - "${custName}" (Net ₹${netPayable})`);
+            console.log(`[PICKLIST PARSER] Extracted Party: ${custCode} - "${custName}" (Invoice ${invoiceNo}, Net ₹${netPayable})`);
+          } else {
+            const party = partyMap.get(custCode)!;
+            if (netPayable > 0) party.totalAmount = netPayable;
+            if (custName && (!party.partyName || /^[CS]0*\d+$/i.test(party.partyName))) {
+              party.partyName = custName;
+            }
           }
         }
       }

@@ -60,10 +60,13 @@ export function matchInvoices(picklist: ParsedPicklist, bills: ParsedBillsResult
     if (matchedInvoice) {
       matchedInvoiceNumbers.add(matchedInvoice.invoiceNumber);
 
-      // Enrich matchedInvoice partyName and partyCode if missing or 'Unknown Customer'
-      if (!matchedInvoice.partyName || matchedInvoice.partyName === 'Unknown Customer') {
+      // Enrich matchedInvoice partyName and partyCode if missing, 'Unknown Customer', or pure code
+      if (party.partyName && (!matchedInvoice.partyName || matchedInvoice.partyName === 'Unknown Customer' || /^[CS]?0*\d+$/i.test(matchedInvoice.partyName))) {
         matchedInvoice.partyName = party.partyName;
+      } else if (matchedInvoice.partyName && (!party.partyName || party.partyName === 'Unknown Customer' || /^[CS]?0*\d+$/i.test(party.partyName))) {
+        party.partyName = matchedInvoice.partyName;
       }
+
       if (!matchedInvoice.partyCode || matchedInvoice.partyCode === 'UNKNOWN') {
         matchedInvoice.partyCode = party.partyCode;
       }
