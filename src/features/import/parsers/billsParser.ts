@@ -87,7 +87,9 @@ export async function parseBills(file: File): Promise<ParsedBillsResult> {
           if (!currentInvoice.partyCode && pageRetCode) currentInvoice.partyCode = pageRetCode;
           console.log(`[BILLS PARSER] Continuation page for invoice ${invNo}`);
           inItemTable = false;
-          continue;
+          // Don't 'continue' — fall through so the rest of this page's lines are processed
+          // and the item table header can re-activate inItemTable = true
+
         }
 
         // Save previous invoice if exists
