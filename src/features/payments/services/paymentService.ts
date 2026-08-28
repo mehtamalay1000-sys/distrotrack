@@ -95,8 +95,19 @@ export async function getPayments(): Promise<Payment[]> {
   const allDeliveries = mockStore.getDeliveries();
   const allPicklists = mockStore.getPicklists();
 
-  for (let i = 0; i < merged.length; i++) {
-    const p = merged[i];
+  // If there are no active deliveries and no picklists, no route collections should exist
+  if (allDeliveries.length === 0 && allPicklists.length === 0) {
+    return [];
+  }
+
+  const activeDeliveryIds = new Set(allDeliveries.map((d) => d.id));
+  const validMerged = merged.filter((p) => {
+    if (p.delivery_id && !activeDeliveryIds.has(p.delivery_id)) return false;
+    return true;
+  });
+
+  for (let i = 0; i < validMerged.length; i++) {
+    const p = validMerged[i];
     let pt = p.party;
     if (!pt || !pt.name || pt.name === 'Unknown') {
       pt = allParties.find((x) => x.id === p.party_id || x.code === p.party_id) || pt;
@@ -130,7 +141,7 @@ export async function getPayments(): Promise<Payment[]> {
       del = { ...del, picklist: pl || null } as any;
     }
 
-    merged[i] = {
+    validMerged[i] = {
       ...p,
       party: pt || null,
       worker: w || null,
@@ -138,7 +149,7 @@ export async function getPayments(): Promise<Payment[]> {
     };
   }
 
-  return merged;
+  return validMerged;
 }
 
 export async function getWorkerPayments(workerId: string, workerName?: string): Promise<Payment[]> {

@@ -208,6 +208,17 @@ class MockStore {
         this.deliveries = parsed.deliveries || INITIAL_DELIVERIES;
         this.payments = parsed.payments || INITIAL_PAYMENTS;
         this.expenses = parsed.expenses && parsed.expenses.length > 0 ? parsed.expenses : [...INITIAL_EXPENSES];
+
+        // Integrity cleanup: if all picklists & deliveries were deleted, wipe route payments
+        if (this.picklists.length === 0 && this.deliveries.length === 0) {
+          this.payments = [];
+        } else {
+          const activeDeliveryIds = new Set(this.deliveries.map((d) => d.id));
+          this.payments = this.payments.filter((p) => {
+            if (p.delivery_id && !activeDeliveryIds.has(p.delivery_id)) return false;
+            return true;
+          });
+        }
         // Deduplicate picklistItems to prevent doubled quantities
         const rawItems: PicklistItem[] = parsed.picklistItems || [];
         const seenKeys = new Set<string>();
@@ -351,50 +362,85 @@ class MockStore {
   deleteRoute(id: string) {
     const route = this.routes.find((r) => r.id === id);
     const routeCode = route?.code;
+    const routeName = route?.name;
 
-    // Find all picklists associated with this route (by route_id or route code)
+    // Find all picklists associated with this route (by route_id or route code or route name)
     const picklistIds = new Set(
       this.picklists
-        .filter((pl) => pl.route_id === id || (routeCode && pl.route?.code === routeCode))
+        .filter(
+          (pl) =>
+            pl.route_id === id ||
+            (routeCode && pl.route?.code?.toLowerCase() === routeCode.toLowerCase()) ||
+            (routeName && pl.route?.name?.toLowerCase() === routeName.toLowerCase()) ||
+            (routeCode && (pl as any).route_code?.toLowerCase() === routeCode.toLowerCase())
+        )
         .map((pl) => pl.id)
     );
 
     // Find all parties associated with this route
     const partyIds = new Set(
-      this.parties.filter((p) => p.route_id === id).map((p) => p.id)
+      this.parties
+        .filter(
+          (p) =>
+            p.route_id === id ||
+            (routeCode && (p as any).route_code?.toLowerCase() === routeCode.toLowerCase()) ||
+            (routeCode && p.route?.code?.toLowerCase() === routeCode.toLowerCase())
+        )
+        .map((p) => p.id)
     );
 
-    // Find all deliveries linked to these picklists or parties
+    // Find all deliveries linked to these picklists, parties, or route directly
     const deliveryIds = new Set(
       this.deliveries
-        .filter((d) => (d.picklist_id && picklistIds.has(d.picklist_id)) || (d.party_id && partyIds.has(d.party_id)))
+        .filter(
+          (d) =>
+            (d.picklist_id && picklistIds.has(d.picklist_id)) ||
+            (d.party_id && partyIds.has(d.party_id)) ||
+            (d as any).route_id === id ||
+            (routeCode && (d as any).route_code?.toLowerCase() === routeCode.toLowerCase())
+        )
         .map((d) => d.id)
     );
 
     // Filter out expenses linked to this route by route_id or route name/code
-    const routeName = route?.name?.toLowerCase();
-    const rCode = routeCode?.toLowerCase();
+    const routeNameLower = routeName?.toLowerCase();
+    const rCodeLower = routeCode?.toLowerCase();
 
     this.expenses = this.expenses.filter((e) => {
       if (e.route_id === id) return false;
-      const desc = e.description?.toLowerCase() || '';
-      if (routeName && desc.includes(routeName)) return false;
-      if (rCode && desc.includes(rCode)) return false;
+      const desc = (e.description || '').toLowerCase();
+      if (routeNameLower && desc.includes(routeNameLower)) return false;
+      if (rCodeLower && desc.includes(rCodeLower)) return false;
       return true;
     });
 
-    // Cascade filter out from local state
+    // Delete ALL payments belonging to this route, its deliveries, or its parties
     this.payments = this.payments.filter((p) => {
       if (p.delivery_id && deliveryIds.has(p.delivery_id)) return false;
       if (p.party_id && partyIds.has(p.party_id)) return false;
+      if ((p as any).route_id === id) return false;
+      if (routeCode && (p as any).route_code?.toLowerCase() === routeCode.toLowerCase()) return false;
       return true;
     });
+
     this.routes = this.routes.filter((r) => r.id !== id);
     this.picklists = this.picklists.filter((pl) => !picklistIds.has(pl.id));
     this.picklistItems = this.picklistItems.filter((pli) => !picklistIds.has(pli.picklist_id));
     this.deliveries = this.deliveries.filter((d) => !deliveryIds.has(d.id));
     this.deliveryItems = this.deliveryItems.filter((dli) => !deliveryIds.has(dli.delivery_id));
     this.parties = this.parties.filter((p) => !partyIds.has(p.id));
+
+    // Also purge orphan payments: if a payment references a delivery or route that no longer exists
+    const remainingDeliveryIds = new Set(this.deliveries.map((d) => d.id));
+    this.payments = this.payments.filter((p) => {
+      if (p.delivery_id && !remainingDeliveryIds.has(p.delivery_id)) return false;
+      return true;
+    });
+
+    // If there are no routes left or no picklists and deliveries left, wipe all route payments
+    if (this.routes.length === 0 || (this.picklists.length === 0 && this.deliveries.length === 0)) {
+      this.payments = [];
+    }
 
     this.saveToStorage();
   }
@@ -525,6 +571,12 @@ class MockStore {
     this.picklistItems = this.picklistItems.filter((pli) => pli.picklist_id !== id);
     this.deliveries = this.deliveries.filter((d) => !deliveryIds.has(d.id));
     this.deliveryItems = this.deliveryItems.filter((dli) => !deliveryIds.has(dli.delivery_id));
+    this.payments = this.payments.filter((p) => !p.delivery_id || !deliveryIds.has(p.delivery_id));
+
+    // If no picklists and no deliveries remain, clear all payments
+    if (this.picklists.length === 0 && this.deliveries.length === 0) {
+      this.payments = [];
+    }
 
     this.saveToStorage();
   }
@@ -534,6 +586,7 @@ class MockStore {
     this.picklistItems = [];
     this.deliveries = [];
     this.deliveryItems = [];
+    this.payments = [];
     this.parties.forEach((p) => {
       p.outstanding_amount = 0;
     });
@@ -645,6 +698,7 @@ class MockStore {
   deleteDelivery(id: string) {
     this.deliveries = this.deliveries.filter((d) => d.id !== id);
     this.deliveryItems = this.deliveryItems.filter((i) => i.delivery_id !== id);
+    this.payments = this.payments.filter((p) => p.delivery_id !== id);
     this.saveToStorage();
   }
   updatePicklistItem(id: string, updates: Partial<PicklistItem>) {
@@ -661,6 +715,26 @@ class MockStore {
 
   // ── Payments ───────────────────────────────────────────────────────
   getPayments(): Payment[] {
+    // If no picklists and no deliveries exist in the store, all route payments are purged
+    if (this.picklists.length === 0 && this.deliveries.length === 0) {
+      if (this.payments.length > 0) {
+        this.payments = [];
+        this.saveToStorage();
+      }
+      return [];
+    }
+
+    const activeDelIds = new Set(this.deliveries.map((d) => d.id));
+    const validPayments = this.payments.filter((p) => {
+      if (p.delivery_id && !activeDelIds.has(p.delivery_id)) return false;
+      return true;
+    });
+
+    if (validPayments.length !== this.payments.length) {
+      this.payments = validPayments;
+      this.saveToStorage();
+    }
+
     return this.payments.map((pay) => {
       const partyObj = this.parties.find((p) => p.id === pay.party_id || p.code === pay.party_id) || null;
       const workerObj = this.workers.find((w) => w.id === (pay.worker_id || pay.received_by_worker_id)) || null;
