@@ -31,7 +31,8 @@ export interface Worker {
   pin: string | null;
   status: WorkerStatus;
   notes: string | null;
-  monthly_target?: number;
+  /** Monthly sales target in INR. Added in migration 002. */
+  monthly_target: number;
   created_at: string;
   updated_at: string;
 }
@@ -137,7 +138,8 @@ export interface PicklistItem {
   sku: string;
   product_name: string;
   quantity: number;
-  free_quantity?: number;
+  /** Free/scheme quantity. Added in migration 002. */
+  free_quantity: number;
   rate: number;
   amount: number;
   sap_line_data: string | null;
@@ -173,7 +175,8 @@ export interface InvoiceItem {
   sku: string;
   product_name: string;
   quantity: number;
-  free_quantity?: number;
+  /** Free/scheme quantity. Added in migration 002. */
+  free_quantity: number;
   mrp: number;
   rate: number;
   amount: number;
@@ -194,6 +197,8 @@ export interface Delivery {
   total_amount: number;
   delivered_amount: number;
   collected_amount: number;
+  /** Value of goods returned (partial delivery). Added in migration 002. */
+  returned_amount: number;
   payment_mode: string | null;
   notes: string | null;
   created_at: string;
@@ -215,7 +220,8 @@ export interface DeliveryItem {
   product_name: string;
   ordered_qty: number;
   delivered_qty: number;
-  free_quantity?: number;
+  /** Free/scheme quantity. Added in migration 002. */
+  free_quantity: number;
   rate: number;
   amount: number;
   notes: string | null;
@@ -223,16 +229,19 @@ export interface DeliveryItem {
 
 export interface Payment {
   id: string;
+  /** Auto-generated reference number (convenience field). */
   payment_number?: string;
   delivery_id: string | null;
   party_id: string;
   invoice_id: string | null;
   worker_id: string | null;
-  received_by_worker_id?: string | null;
+  /** Worker who physically received the payment (may differ from delivery worker). Added in migration 002. */
+  received_by_worker_id: string | null;
   amount: number;
   payment_mode: PaymentMode;
   cheque_number: string | null;
-  reference_number?: string | null;
+  /** UPI UTR, cheque reference, or other payment reference. Added in migration 002. */
+  reference_number: string | null;
   cheque_date: string | null;
   cheque_bank: string | null;
   notes: string | null;
@@ -250,16 +259,21 @@ export interface Payment {
 
 export interface Expense {
   id: string;
+  /** Auto-generated reference number (convenience field, not in DB). */
   expense_number?: string;
   category: string;
   amount: number;
   date: string;
   description: string | null;
-  receipt_url?: string | null;
+  /** URL of uploaded receipt image. Added in migration 002. */
+  receipt_url: string | null;
   worker_id: string | null;
+  /** Convenience: worker's display name, derived by joining workers table. Not stored in DB. */
   worker_name?: string | null;
-  route_id?: string | null;
-  visible_to_worker?: boolean;
+  /** Route this expense belongs to. Added in migration 002. */
+  route_id: string | null;
+  /** Whether this expense is visible to the worker's dashboard. Added in migration 002. */
+  visible_to_worker: boolean;
   created_at: string;
   updated_at: string;
   // Joined
@@ -280,6 +294,10 @@ export interface MasterAuditLog {
   status: 'success' | 'failure' | 'warning';
   detail: string | null;
   ip_hint: string | null;
+  /** Business entity type affected (e.g. 'invoice', 'delivery', 'payment'). Added in migration 002. */
+  entity_type: string | null;
+  /** ID of the affected business entity. Added in migration 002. */
+  entity_id: string | null;
 }
 
 // ── Database type for Supabase client ───────────────────────────────

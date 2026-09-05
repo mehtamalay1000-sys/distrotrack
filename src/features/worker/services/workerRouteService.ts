@@ -339,7 +339,7 @@ export async function getDeliveryDetail(deliveryId: string): Promise<Delivery | 
 // ── Route Lifecycle ──────────────────────────────────────────────
 
 /** Start a route — sets picklist to in_progress, records start time */
-export async function startRoute(picklistId: string): Promise<void> {
+export async function startRoute(picklistId: string, workerId?: string, workerName?: string): Promise<void> {
   const now = new Date().toISOString();
   const { error } = await supabase
     .from('picklists')
@@ -356,6 +356,23 @@ export async function startRoute(picklistId: string): Promise<void> {
     .update({ status: 'out_for_delivery' })
     .eq('picklist_id', picklistId)
     .eq('status', 'pending');
+
+  // Audit log: route started
+  try {
+    await supabase.rpc('log_system_event', {
+      p_user_id: workerId || '',
+      p_user_name: workerName || 'Worker',
+      p_role: 'worker',
+      p_module: 'route',
+      p_action: 'route_started',
+      p_status: 'success',
+      p_detail: `Route/Picklist ${picklistId} started`,
+      p_entity_type: 'picklist',
+      p_entity_id: picklistId,
+    });
+  } catch (auditErr) {
+    console.warn('[AUDIT] Failed to log route_started event:', auditErr);
+  }
 }
 
 /** End a route — finalize picklist, compute totals */
@@ -448,6 +465,23 @@ export async function endRoute(picklistId: string): Promise<void> {
       total_credit: totalCredit,
     });
   }
+
+  // Audit log: route completed with financial summary
+  try {
+    await supabase.rpc('log_system_event', {
+      p_user_id: '',
+      p_user_name: 'Worker',
+      p_role: 'worker',
+      p_module: 'route',
+      p_action: 'route_completed',
+      p_status: 'success',
+      p_detail: `Route ${picklistId} completed: ${completedParties} deliveries, ₹${totalCollected} collected (Cash ₹${totalCash}, Cheque ₹${totalCheque}, Credit ₹${totalCredit})`,
+      p_entity_type: 'picklist',
+      p_entity_id: picklistId,
+    });
+  } catch (auditErr) {
+    console.warn('[AUDIT] Failed to log route_completed event:', auditErr);
+  }
 }
 
 // ── Delivery Workflow ────────────────────────────────────────────
@@ -476,6 +510,32 @@ export interface CompleteDeliveryInput {
 export async function completePartyDelivery(input: CompleteDeliveryInput): Promise<void> {
   const now = new Date().toISOString();
   const todayStr = getLocalDateString();
+
+  // ── IDEMPOTENCY GUARD ──────────────────────────────────────────
+  // If this delivery is already completed or partially delivered,
+  // do NOT create a second payment record. This prevents duplicate
+  // payments when the worker taps the button twice or a network retry fires.
+  try {
+    const { data: currentDelivery } = await supabase
+      .from('deliveries')
+      .select('status')
+      .eq('id', input.deliveryId)
+      .maybeSingle();
+
+    if (currentDelivery && (currentDelivery.status === 'delivered' || currentDelivery.status === 'partial')) {
+      console.warn(`[DELIVERY] Delivery ${input.deliveryId} is already ${currentDelivery.status} — skipping duplicate completion.`);
+      throw new Error(
+        `This delivery has already been recorded as "${currentDelivery.status}". ` +
+        `Refresh the page to see the latest status.`
+      );
+    }
+  } catch (idempotencyErr) {
+    if (idempotencyErr instanceof Error && idempotencyErr.message.startsWith('This delivery')) {
+      throw idempotencyErr; // Re-throw our own idempotency error
+    }
+    // Network error on the check — log and continue (delivery status check is best-effort)
+    console.warn('[DELIVERY] Could not check delivery status for idempotency:', idempotencyErr);
+  }
 
   // 1. Update delivery items with delivered quantities
   for (const item of input.deliveredItems) {
@@ -683,8 +743,25 @@ export async function completePartyDelivery(input: CompleteDeliveryInput): Promi
           link: '/w/route',
         });
       }
-    } catch (err) {
-      console.error('Failed to dispatch delivery notification:', err);
+
+      // 9. Audit log: delivery completed
+      try {
+        await supabase.rpc('log_system_event', {
+          p_user_id: input.workerId,
+          p_user_name: workerName,
+          p_role: 'worker',
+          p_module: 'delivery',
+          p_action: 'delivery_completed',
+          p_status: 'success',
+          p_detail: `Delivery to ${partyName} — ₹${input.payment.amount} via ${input.payment.mode}`,
+          p_entity_type: 'delivery',
+          p_entity_id: input.deliveryId,
+        });
+      } catch (auditErr) {
+        console.warn('[AUDIT] Failed to log delivery_completed event:', auditErr);
+      }
+    } catch (notifyErr) {
+      console.error('Failed to dispatch delivery notification:', notifyErr);
     }
   }
 

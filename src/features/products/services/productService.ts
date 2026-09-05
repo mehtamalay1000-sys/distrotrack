@@ -506,6 +506,8 @@ export async function clearAllSalesAnalyticsData(): Promise<void> {
     await supabase.from('delivery_items').delete().neq('id', '00000000-0000-0000-0000-000000000000');
     await supabase.from('deliveries').delete().neq('id', '00000000-0000-0000-0000-000000000000');
     await supabase.from('picklists').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+    await supabase.from('payments').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+    await supabase.from('parties').update({ outstanding_amount: 0 }).neq('id', '00000000-0000-0000-0000-000000000000');
   } catch {
     // fallback
   }

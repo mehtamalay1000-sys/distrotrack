@@ -47,6 +47,9 @@ export async function createExpense(input: {
       date: input.date,
       description: input.description ?? null,
       worker_id: input.worker_id || null,
+      // These columns were added in migration 002 — now safe to include in DB payload
+      route_id: input.route_id || null,
+      visible_to_worker: input.visible_to_worker ?? false,
     };
 
     const { data, error } = await supabase
@@ -59,14 +62,13 @@ export async function createExpense(input: {
       savedExpense = {
         ...(data as Expense),
         worker_name: input.worker_name || null,
-        route_id: input.route_id || null,
-        visible_to_worker: input.visible_to_worker ?? false,
       };
       mockStore.saveExpense(savedExpense);
     }
   } catch {
     // fallback
   }
+
 
   if (!savedExpense) {
     savedExpense = mockStore.saveExpense(input);

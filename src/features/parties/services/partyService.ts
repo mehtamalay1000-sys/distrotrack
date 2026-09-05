@@ -4,14 +4,28 @@ import type { Party } from '@/lib/database.types';
 
 export async function getParties(): Promise<Party[]> {
   try {
-    const { data, error } = await supabase
-      .from('parties')
-      .select('*, route:routes(id, name, code)')
-      .order('name');
-    if (error || !data) {
-      return mockStore.getParties();
+    let allParties: Party[] = [];
+    let from = 0;
+    const PAGE_SIZE = 1000;
+
+    while (true) {
+      const { data, error } = await supabase
+        .from('parties')
+        .select('*, route:routes(id, name, code)')
+        .order('name')
+        .range(from, from + PAGE_SIZE - 1);
+
+      if (error || !data) {
+        if (allParties.length > 0) return allParties;
+        return mockStore.getParties();
+      }
+
+      allParties = allParties.concat(data as Party[]);
+      if (data.length < PAGE_SIZE) break;
+      from += PAGE_SIZE;
     }
-    return data as Party[];
+
+    return allParties;
   } catch {
     return mockStore.getParties();
   }

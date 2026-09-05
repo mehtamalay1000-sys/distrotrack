@@ -10,6 +10,12 @@ import { addNotification } from '@/features/notifications/services/notificationS
 /**
  * Commits a fully validated SAP import to Supabase database (or local store).
  * Creates Picklist, Picklist Items, Invoices, Invoice Items, Parties, Products, and Deliveries.
+ *
+ * IDEMPOTENCY GUARDS:
+ * - Picklist: Throws a clear error if a picklist with this number already exists.
+ *   Re-importing the same PDF is blocked at the DB level (unique constraint on picklist_number).
+ * - Invoice: Skips duplicate invoices (unique constraint on invoice_number), logs a warning.
+ * - Delivery: Skips if a delivery for this picklist+party already exists.
  */
 export async function confirmImportToDatabase(
   picklist: ParsedPicklist,
@@ -19,6 +25,32 @@ export async function confirmImportToDatabase(
 ): Promise<Picklist> {
   // Use the explicitly provided delivery date, falling back to the picklist's parsed date
   const effectiveDate = deliveryDate || picklist.date;
+
+  // ── IDEMPOTENCY GUARD: Check if this picklist was already imported ──
+  // This is the single most important duplicate-prevention check.
+  // A second import of the same PDF must never silently create a second record.
+  try {
+    const { data: existingPicklist } = await supabase
+      .from('picklists')
+      .select('id, picklist_number, date, status')
+      .eq('picklist_number', picklist.picklistNumber)
+      .maybeSingle();
+
+    if (existingPicklist) {
+      throw new Error(
+        `DUPLICATE IMPORT BLOCKED: Picklist "${picklist.picklistNumber}" was already imported on ${existingPicklist.date} (status: ${existingPicklist.status}). ` +
+        `To re-import, first delete the existing picklist from the Admin panel, or use a corrected PDF with a different picklist number.`
+      );
+    }
+  } catch (err) {
+    // Re-throw our own duplicate error immediately
+    if (err instanceof Error && err.message.startsWith('DUPLICATE IMPORT BLOCKED')) {
+      throw err;
+    }
+    // For network errors: log and continue (the DB unique constraint will still catch it)
+    console.warn('[IMPORT] Could not pre-check for duplicate picklist:', err);
+  }
+
   // 1. Ensure Route exists or get first active route
   let routeId: string | null = null;
   try {
@@ -122,68 +154,81 @@ export async function confirmImportToDatabase(
 
     let invoiceId: string | null = null;
     if (pair.invoice) {
+      // Check if this invoice number was already imported (duplicate invoice guard)
       try {
-        const { data: invRecord } = await supabase
+        const { data: existingInvoice } = await supabase
           .from('invoices')
-          .insert({
-            invoice_number: pair.invoice.invoiceNumber,
-            picklist_id: picklistRecord.id,
-            party_id: party.id,
-            route_code: pair.invoice.routeCode || picklist.routeCode,
-            sales_rep: pair.invoice.salesRep || null,
-            date: effectiveDate,
-            total_amount: pair.invoice.totalAmount,
-            tax_amount: pair.invoice.taxAmount,
-            net_amount: pair.invoice.netAmount,
-            status: 'pending',
-            sap_raw_data: pair.invoice.rawText,
-          })
-          .select('id')
-          .single();
+          .select('id, invoice_number')
+          .eq('invoice_number', pair.invoice.invoiceNumber)
+          .maybeSingle();
 
-        if (invRecord) {
-          invoiceId = invRecord.id;
-          for (const item of pair.invoice.items) {
-            // Validate product before upserting to database
-            const validationError = validateProductRow({
-              sku: item.sku,
-              productName: item.productName,
-              mrp: item.mrp,
-              rate: item.rate,
-              quantity: item.quantity,
-              amount: item.amount,
-            });
-            if (validationError) {
-              console.warn(`[IMPORT] Skipping invalid invoice item: ${validationError}`, item);
-              continue;
+        if (existingInvoice) {
+          console.warn(`[IMPORT] Skipping duplicate invoice: ${pair.invoice.invoiceNumber} already exists (id: ${existingInvoice.id})`);
+          invoiceId = existingInvoice.id;
+        } else {
+          const { data: invRecord } = await supabase
+            .from('invoices')
+            .insert({
+              invoice_number: pair.invoice.invoiceNumber,
+              picklist_id: picklistRecord.id,
+              party_id: party.id,
+              route_code: pair.invoice.routeCode || picklist.routeCode,
+              sales_rep: pair.invoice.salesRep || null,
+              date: effectiveDate,
+              total_amount: pair.invoice.totalAmount,
+              tax_amount: pair.invoice.taxAmount,
+              net_amount: pair.invoice.netAmount,
+              status: 'pending',
+              sap_raw_data: pair.invoice.rawText,
+            })
+            .select('id')
+            .single();
+
+          if (invRecord) {
+            invoiceId = invRecord.id;
+            for (const item of pair.invoice.items) {
+              // Validate product before upserting to database
+              const validationError = validateProductRow({
+                sku: item.sku,
+                productName: item.productName,
+                mrp: item.mrp,
+                rate: item.rate,
+                quantity: item.quantity,
+                amount: item.amount,
+              });
+              if (validationError) {
+                console.warn(`[IMPORT] Skipping invalid invoice item: ${validationError}`, item);
+                continue;
+              }
+
+              // Lookup-first: find existing product by SKU, or create if validated
+              let product = await lookupProductBySku(item.sku);
+              if (product) {
+                console.log(`[IMPORT] Invoice item: SKU ${item.sku} → matched Product Master "${product.name}"`);
+              } else {
+                console.log(`[IMPORT] Invoice item: SKU ${item.sku} → not in master, creating new product "${item.productName}"`);
+                product = await upsertProductBySku(item.sku, item.productName, item.mrp, item.rate);
+              }
+
+              // Store document-specific MRP/rate/free_quantity on the line item, NOT on the product master
+              await supabase.from('invoice_items').insert({
+                invoice_id: invoiceId,
+                product_id: product.id,
+                sku: item.sku,
+                product_name: item.productName,
+                quantity: item.quantity,
+                free_quantity: item.freeQuantity || 0,
+                mrp: item.mrp,
+                rate: item.rate,
+                amount: item.amount,
+                tax_amount: item.taxAmount,
+              });
             }
-
-            // Lookup-first: find existing product by SKU, or create if validated
-            let product = await lookupProductBySku(item.sku);
-            if (product) {
-              console.log(`[IMPORT] Invoice item: SKU ${item.sku} → matched Product Master "${product.name}"`);
-            } else {
-              console.log(`[IMPORT] Invoice item: SKU ${item.sku} → not in master, creating new product "${item.productName}"`);
-              product = await upsertProductBySku(item.sku, item.productName, item.mrp, item.rate);
-            }
-
-            // Store document-specific MRP/rate/free_quantity on the line item, NOT on the product master
-            await supabase.from('invoice_items').insert({
-              invoice_id: invoiceId,
-              product_id: product.id,
-              sku: item.sku,
-              product_name: item.productName,
-              quantity: item.quantity,
-              free_quantity: item.freeQuantity || 0,
-              mrp: item.mrp,
-              rate: item.rate,
-              amount: item.amount,
-              tax_amount: item.taxAmount,
-            });
           }
         }
-      } catch {
-        // Continue fallback
+      } catch (invErr) {
+        console.error(`[IMPORT] Error processing invoice ${pair.invoice.invoiceNumber}:`, invErr);
+        // Continue with other pairs — one failed invoice should not block the rest
       }
     }
 
@@ -246,24 +291,37 @@ export async function confirmImportToDatabase(
       }
     }
 
-    // Create delivery workload
+    // Create delivery workload — with duplicate guard
     let deliveryId: string | null = null;
     try {
-      const { data: delRecord } = await supabase.from('deliveries').insert({
-        picklist_id: picklistRecord.id,
-        party_id: party.id,
-        worker_id: assignedWorkerId || null,
-        invoice_id: invoiceId,
-        status: 'pending',
-        sequence_order: seq,
-        total_amount: pair.picklistParty?.totalAmount || pair.invoice?.netAmount || 0,
-        delivery_date: effectiveDate,
-        notes: `Generated from SAP Picklist ${picklist.picklistNumber}`,
-      }).select('id').single();
+      // Check if a delivery for this picklist+party already exists (idempotency)
+      const { data: existingDelivery } = await supabase
+        .from('deliveries')
+        .select('id')
+        .eq('picklist_id', picklistRecord.id)
+        .eq('party_id', party.id)
+        .maybeSingle();
 
-      if (delRecord) deliveryId = delRecord.id;
-    } catch {
-      // Fallback
+      if (existingDelivery) {
+        console.warn(`[IMPORT] Delivery for party ${pair.partyCode} on picklist ${picklist.picklistNumber} already exists (id: ${existingDelivery.id}) — skipping.`);
+        deliveryId = existingDelivery.id;
+      } else {
+        const { data: delRecord } = await supabase.from('deliveries').insert({
+          picklist_id: picklistRecord.id,
+          party_id: party.id,
+          worker_id: assignedWorkerId || null,
+          invoice_id: invoiceId,
+          status: 'pending',
+          sequence_order: seq,
+          total_amount: pair.picklistParty?.totalAmount || pair.invoice?.netAmount || 0,
+          delivery_date: effectiveDate,
+          notes: `Generated from SAP Picklist ${picklist.picklistNumber}`,
+        }).select('id').single();
+
+        if (delRecord) deliveryId = delRecord.id;
+      }
+    } catch (delErr) {
+      console.error(`[IMPORT] Error creating delivery for party ${pair.partyCode}:`, delErr);
     }
 
     const mockDel = mockStore.saveDelivery({

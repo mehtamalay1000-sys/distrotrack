@@ -571,6 +571,7 @@ class MockStore {
         total_amount: Number(dData.total_amount || 0),
         delivered_amount: Number(dData.delivered_amount || 0),
         collected_amount: Number(dData.collected_amount || 0),
+        returned_amount: Number(dData.returned_amount || 0),
         payment_mode: dData.payment_mode || null,
         notes: dData.notes || null,
         created_at: new Date().toISOString(),

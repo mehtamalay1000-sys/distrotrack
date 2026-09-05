@@ -76,6 +76,7 @@ CREATE POLICY "Allow anon select" ON master_audit_log FOR SELECT TO anon USING (
 
 
 -- ── 3. log_system_event RPC  ──────────────────────────────────────
+DROP FUNCTION IF EXISTS log_system_event(text, text, text, text, text, text, text);
 CREATE OR REPLACE FUNCTION log_system_event(
   p_user_id   text,
   p_user_name text,
@@ -106,6 +107,7 @@ GRANT EXECUTE ON FUNCTION log_system_event(text, text, text, text, text, text, t
 -- ── 4. check_master_pin RPC  ──────────────────────────────────────
 -- Checks if the provided PIN matches the hashed master PIN (9129).
 -- Uses search_path = public, extensions so crypt() is always found.
+DROP FUNCTION IF EXISTS check_master_pin(text);
 CREATE OR REPLACE FUNCTION check_master_pin(p_pin text)
 RETURNS boolean
 LANGUAGE plpgsql
@@ -140,6 +142,7 @@ GRANT EXECUTE ON FUNCTION check_master_pin(text) TO authenticated;
 
 
 -- ── 5. verify_admin_pin RPC (Alternative Unified RPC) ──────────────
+DROP FUNCTION IF EXISTS verify_admin_pin(uuid, text);
 CREATE OR REPLACE FUNCTION verify_admin_pin(
   p_user_id uuid,
   p_pin     text
@@ -198,3 +201,44 @@ $$;
 REVOKE ALL ON FUNCTION verify_admin_pin(uuid, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION verify_admin_pin(uuid, text) TO anon;
 GRANT EXECUTE ON FUNCTION verify_admin_pin(uuid, text) TO authenticated;
+
+
+-- ── 6. set_master_pin RPC / Utility ───────────────────────────────
+-- Allows setting or updating the master PIN securely via bcrypt.
+DROP FUNCTION IF EXISTS set_master_pin(text);
+CREATE OR REPLACE FUNCTION set_master_pin(p_pin text)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, extensions
+AS $$
+DECLARE
+  v_clean text;
+BEGIN
+  v_clean := TRIM(p_pin);
+  IF v_clean IS NULL OR length(v_clean) < 4 THEN
+    RAISE EXCEPTION 'Master PIN must be at least 4 digits/characters';
+  END IF;
+
+  BEGIN
+    INSERT INTO master_config (id, master_pin, created_at)
+    VALUES (1, extensions.crypt(v_clean, extensions.gen_salt('bf', 10)), now())
+    ON CONFLICT (id) DO UPDATE
+      SET master_pin = extensions.crypt(v_clean, extensions.gen_salt('bf', 10)),
+          created_at = now();
+  EXCEPTION WHEN OTHERS THEN
+    INSERT INTO master_config (id, master_pin, created_at)
+    VALUES (1, crypt(v_clean, gen_salt('bf', 10)), now())
+    ON CONFLICT (id) DO UPDATE
+      SET master_pin = crypt(v_clean, gen_salt('bf', 10)),
+          created_at = now();
+  END;
+
+  RETURN 'Master PIN updated successfully';
+END;
+$$;
+
+REVOKE ALL ON FUNCTION set_master_pin(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION set_master_pin(text) FROM anon;
+GRANT EXECUTE ON FUNCTION set_master_pin(text) TO authenticated;
+GRANT EXECUTE ON FUNCTION set_master_pin(text) TO service_role;
