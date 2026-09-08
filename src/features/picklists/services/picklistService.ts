@@ -85,7 +85,6 @@ export async function deletePicklist(id: string): Promise<void> {
 
     const deliveryIds = (delRecords || []).map((d) => d.id);
     if (deliveryIds.length > 0) {
-      await supabase.from('payments').delete().in('delivery_id', deliveryIds);
       await supabase.from('delivery_items').delete().in('delivery_id', deliveryIds);
       await supabase.from('deliveries').delete().in('id', deliveryIds);
     }

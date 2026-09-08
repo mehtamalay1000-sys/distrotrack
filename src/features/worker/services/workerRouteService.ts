@@ -1,6 +1,6 @@
 import { supabase } from '@/lib/supabase';
 import { mockStore } from '@/lib/mockStore';
-import type { Picklist, Delivery, PaymentMode, PicklistItem } from '@/lib/database.types';
+import type { Picklist, Delivery, PaymentMode, PicklistItem, RouteStockCheck, RouteReturnItemInput } from '@/lib/database.types';
 import { addNotification } from '@/features/notifications/services/notificationService';
 import { getLocalDateString } from '@/shared/utils/format';
 
@@ -167,6 +167,11 @@ export async function getDeliveryDetail(deliveryId: string): Promise<Delivery | 
           ordered_qty: ii.quantity,
           delivered_qty: ii.quantity,
           free_quantity: ii.free_quantity || 0,
+          delivered_free_qty: 0,
+          returned_qty: 0,
+          returned_free_qty: 0,
+          damaged_qty: 0,
+          damaged_free_qty: 0,
           rate: ii.rate,
           amount: ii.amount,
           notes: null,
@@ -196,6 +201,11 @@ export async function getDeliveryDetail(deliveryId: string): Promise<Delivery | 
           ordered_qty: pli.quantity,
           delivered_qty: pli.quantity,
           free_quantity: pli.free_quantity || 0,
+          delivered_free_qty: 0,
+          returned_qty: 0,
+          returned_free_qty: 0,
+          damaged_qty: 0,
+          damaged_free_qty: 0,
           rate: pli.rate,
           amount: pli.amount,
           notes: null,
@@ -249,6 +259,11 @@ export async function getDeliveryDetail(deliveryId: string): Promise<Delivery | 
           ordered_qty: pli.quantity,
           delivered_qty: pli.quantity,
           free_quantity: pli.free_quantity || 0,
+          delivered_free_qty: 0,
+          returned_qty: 0,
+          returned_free_qty: 0,
+          damaged_qty: 0,
+          damaged_free_qty: 0,
           rate: pli.rate,
           amount: pli.amount,
           notes: null,
@@ -275,6 +290,11 @@ export async function getDeliveryDetail(deliveryId: string): Promise<Delivery | 
             ordered_qty: pli.quantity,
             delivered_qty: pli.quantity,
             free_quantity: pli.free_quantity || 0,
+            delivered_free_qty: 0,
+            returned_qty: 0,
+            returned_free_qty: 0,
+            damaged_qty: 0,
+            damaged_free_qty: 0,
             rate: pli.rate,
             amount: pli.amount,
             notes: null,
@@ -338,41 +358,37 @@ export async function getDeliveryDetail(deliveryId: string): Promise<Delivery | 
 
 // ── Route Lifecycle ──────────────────────────────────────────────
 
-/** Start a route — sets picklist to in_progress, records start time */
-export async function startRoute(picklistId: string, workerId?: string, workerName?: string): Promise<void> {
-  const now = new Date().toISOString();
-  const { error } = await supabase
-    .from('picklists')
-    .update({
-      status: 'in_progress',
-      started_at: now,
-    })
-    .eq('id', picklistId);
-  if (error) throw new Error(`Failed to start route: ${error.message}`);
+/** Start a route — atomically moves physical stock from warehouse to vehicle via start_route_with_load */
+export async function startRoute(picklistId: string, workerId?: string, _workerName?: string): Promise<void> {
+  const { error } = await supabase.rpc('start_route_with_load', {
+    p_picklist_id: picklistId,
+    p_worker_id: workerId || null,
+  });
 
-  // Set all pending deliveries to out_for_delivery
-  await supabase
-    .from('deliveries')
-    .update({ status: 'out_for_delivery' })
-    .eq('picklist_id', picklistId)
-    .eq('status', 'pending');
-
-  // Audit log: route started
-  try {
-    await supabase.rpc('log_system_event', {
-      p_user_id: workerId || '',
-      p_user_name: workerName || 'Worker',
-      p_role: 'worker',
-      p_module: 'route',
-      p_action: 'route_started',
-      p_status: 'success',
-      p_detail: `Route/Picklist ${picklistId} started`,
-      p_entity_type: 'picklist',
-      p_entity_id: picklistId,
-    });
-  } catch (auditErr) {
-    console.warn('[AUDIT] Failed to log route_started event:', auditErr);
+  if (error) {
+    throw new Error(`Failed to start route: ${error.message}`);
   }
+
+  // Sync mockStore
+  const pl = mockStore.getPicklists().find((p) => p.id === picklistId);
+  if (pl) {
+    mockStore.savePicklist({
+      ...pl,
+      status: 'in_progress',
+      started_at: new Date().toISOString(),
+      worker_id: workerId || pl.worker_id,
+    });
+  }
+
+  // Update mock deliveries status to out_for_delivery
+  mockStore.getDeliveries()
+    .filter((d) => d.picklist_id === picklistId && d.status === 'pending')
+    .forEach((d) => {
+      mockStore.saveDelivery({
+        id: d.id,
+        status: 'out_for_delivery',
+      });
+    });
 }
 
 /** End a route — finalize picklist, compute totals */
@@ -397,6 +413,7 @@ export async function endRoute(picklistId: string): Promise<void> {
 
   let totalCollected = 0;
   let totalCash = 0;
+  let totalUpi = 0;
   let totalCheque = 0;
   let totalCredit = 0;
   let completedParties = 0;
@@ -414,7 +431,8 @@ export async function endRoute(picklistId: string): Promise<void> {
       for (const p of d.payments) {
         const amt = Number(p.amount || 0);
         if (p.payment_mode === 'cash') totalCash += amt;
-        else if (p.payment_mode === 'cheque' || p.payment_mode === 'upi') totalCheque += amt;
+        else if (p.payment_mode === 'upi') totalUpi += amt;
+        else if (p.payment_mode === 'cheque') totalCheque += amt;
         else if (p.payment_mode === 'credit') totalCredit += amt;
       }
     } else {
@@ -422,7 +440,10 @@ export async function endRoute(picklistId: string): Promise<void> {
       if (d.payment_mode === 'cash') {
         const amt = dCollected > 0 ? dCollected : dDelivered;
         totalCash += amt;
-      } else if (d.payment_mode === 'cheque' || d.payment_mode === 'upi') {
+      } else if (d.payment_mode === 'upi') {
+        const amt = dCollected > 0 ? dCollected : dDelivered;
+        totalUpi += amt;
+      } else if (d.payment_mode === 'cheque') {
         const amt = dCollected > 0 ? dCollected : dDelivered;
         totalCheque += amt;
       } else if (d.payment_mode === 'credit') {
@@ -431,7 +452,7 @@ export async function endRoute(picklistId: string): Promise<void> {
     }
   }
 
-  totalCollected = totalCash + totalCheque;
+  totalCollected = totalCash + totalUpi + totalCheque;
 
   // Update Supabase
   try {
@@ -443,6 +464,7 @@ export async function endRoute(picklistId: string): Promise<void> {
         completed_parties: completedParties,
         total_collected: totalCollected,
         total_cash: totalCash,
+        total_upi: totalUpi,
         total_cheque: totalCheque,
         total_credit: totalCredit,
       })
@@ -461,6 +483,7 @@ export async function endRoute(picklistId: string): Promise<void> {
       completed_parties: completedParties,
       total_collected: totalCollected,
       total_cash: totalCash,
+      total_upi: totalUpi,
       total_cheque: totalCheque,
       total_credit: totalCredit,
     });
@@ -475,7 +498,7 @@ export async function endRoute(picklistId: string): Promise<void> {
       p_module: 'route',
       p_action: 'route_completed',
       p_status: 'success',
-      p_detail: `Route ${picklistId} completed: ${completedParties} deliveries, ₹${totalCollected} collected (Cash ₹${totalCash}, Cheque ₹${totalCheque}, Credit ₹${totalCredit})`,
+      p_detail: `Route ${picklistId} completed: ${completedParties} deliveries, ₹${totalCollected} collected (Cash ₹${totalCash}, UPI ₹${totalUpi}, Cheque ₹${totalCheque}, Credit ₹${totalCredit})`,
       p_entity_type: 'picklist',
       p_entity_id: picklistId,
     });
@@ -486,139 +509,86 @@ export async function endRoute(picklistId: string): Promise<void> {
 
 // ── Delivery Workflow ────────────────────────────────────────────
 
+export interface CompleteDeliveryItemInput {
+  delivery_item_id: string;
+  delivered_qty: number;
+  delivered_free_qty: number;
+  returned_qty: number;
+  returned_free_qty: number;
+  damaged_qty: number;
+  damaged_free_qty: number;
+}
+
 export interface CompleteDeliveryInput {
   deliveryId: string;
   picklistId: string;
   partyId: string;
   invoiceId: string | null;
   workerId: string;
-  deliveredItems: {
-    id: string;
-    delivered_qty: number;
-  }[];
+  deliveredItems: CompleteDeliveryItemInput[];
   payment: {
     mode: PaymentMode;
     amount: number;
+    reference_number?: string;
     cheque_number?: string;
     cheque_date?: string;
     cheque_bank?: string;
     notes?: string;
   };
+  payments?: Array<{
+    mode: PaymentMode;
+    amount: number;
+    reference_number?: string;
+    cheque_number?: string;
+    cheque_date?: string;
+    cheque_bank?: string;
+    notes?: string;
+  }>;
 }
 
-/** Complete a party delivery — update items, create payment, update delivery status */
-export async function completePartyDelivery(input: CompleteDeliveryInput): Promise<void> {
-  const now = new Date().toISOString();
-  const todayStr = getLocalDateString();
+/** Complete a party delivery atomically using RPC complete_delivery_with_ledger */
+export async function completePartyDelivery(input: CompleteDeliveryInput): Promise<any> {
+  const { data, error } = await supabase.rpc('complete_delivery_with_ledger', {
+    p_delivery_id: input.deliveryId,
+    p_worker_id: input.workerId,
+    p_items: input.deliveredItems,
+    p_payment_mode: input.payment.mode,
+    p_payment_amount: input.payment.amount,
+    p_reference_number: input.payment.reference_number || null,
+    p_cheque_number: input.payment.cheque_number || null,
+    p_cheque_date: input.payment.cheque_date || null,
+    p_cheque_bank: input.payment.cheque_bank || null,
+    p_notes: input.payment.notes || null,
+    p_payments: input.payments && input.payments.length > 0 ? input.payments : null,
+  });
 
-  // ── IDEMPOTENCY GUARD ──────────────────────────────────────────
-  // If this delivery is already completed or partially delivered,
-  // do NOT create a second payment record. This prevents duplicate
-  // payments when the worker taps the button twice or a network retry fires.
-  try {
-    const { data: currentDelivery } = await supabase
-      .from('deliveries')
-      .select('status')
-      .eq('id', input.deliveryId)
-      .maybeSingle();
-
-    if (currentDelivery && (currentDelivery.status === 'delivered' || currentDelivery.status === 'partial')) {
-      console.warn(`[DELIVERY] Delivery ${input.deliveryId} is already ${currentDelivery.status} — skipping duplicate completion.`);
-      throw new Error(
-        `This delivery has already been recorded as "${currentDelivery.status}". ` +
-        `Refresh the page to see the latest status.`
-      );
-    }
-  } catch (idempotencyErr) {
-    if (idempotencyErr instanceof Error && idempotencyErr.message.startsWith('This delivery')) {
-      throw idempotencyErr; // Re-throw our own idempotency error
-    }
-    // Network error on the check — log and continue (delivery status check is best-effort)
-    console.warn('[DELIVERY] Could not check delivery status for idempotency:', idempotencyErr);
+  if (error) {
+    throw new Error(`Delivery completion failed: ${error.message}`);
   }
 
-  // 1. Update delivery items with delivered quantities
+  // Sync mockStore as fallback
   for (const item of input.deliveredItems) {
-    await supabase
-      .from('delivery_items')
-      .update({ delivered_qty: item.delivered_qty })
-      .eq('id', item.id);
+    mockStore.updateDeliveryItem(item.delivery_item_id, {
+      delivered_qty: item.delivered_qty,
+      delivered_free_qty: item.delivered_free_qty,
+      returned_qty: item.returned_qty,
+      returned_free_qty: item.returned_free_qty,
+      damaged_qty: item.damaged_qty,
+      damaged_free_qty: item.damaged_free_qty,
+    });
   }
 
-  // 2. Calculate delivered amount
-  const { data: updatedItems } = await supabase
-    .from('delivery_items')
-    .select('*')
-    .eq('delivery_id', input.deliveryId);
+  const resultStatus = data?.status || 'delivered';
+  const finalDeliveredAmount = data?.delivered_amount || input.payment.amount;
 
-  let deliveredAmount = 0;
-  let allDelivered = true;
-  if (updatedItems) {
-    for (const item of updatedItems) {
-      deliveredAmount += Number(item.delivered_qty) * Number(item.rate);
-      if (Number(item.delivered_qty) < Number(item.ordered_qty)) {
-        allDelivered = false;
-      }
-    }
-  }
-
-  // 2.5 Get existing delivery to preserve its scheduled delivery_date
-  let targetDeliveryDate = todayStr;
-  try {
-    const { data: exDel } = await supabase
-      .from('deliveries')
-      .select('delivery_date, total_amount')
-      .eq('id', input.deliveryId)
-      .maybeSingle();
-    if (exDel?.delivery_date) {
-      targetDeliveryDate = exDel.delivery_date;
-    }
-  } catch {
-    // fallback
-  }
-
-  const mockDel = mockStore.getDeliveries().find((d) => d.id === input.deliveryId);
-  if (mockDel?.delivery_date) {
-    targetDeliveryDate = mockDel.delivery_date;
-  }
-
-  const finalDeliveredAmount = deliveredAmount > 0 ? deliveredAmount : (mockDel?.total_amount || 0);
-
-  // 3. Update delivery record
-  const deliveryStatus = allDelivered ? 'delivered' : 'partial';
-  await supabase
-    .from('deliveries')
-    .update({
-      status: deliveryStatus,
-      delivered_at: now,
-      delivery_date: targetDeliveryDate,
-      delivered_amount: finalDeliveredAmount,
-      collected_amount: input.payment.mode === 'credit' ? 0 : input.payment.amount,
-      payment_mode: input.payment.mode,
-    })
-    .eq('id', input.deliveryId);
-
-  // 4. Create payment record in Supabase and sync with mockStore
-  try {
-    await supabase
-      .from('payments')
-      .insert({
-        delivery_id: input.deliveryId,
-        party_id: input.partyId,
-        invoice_id: input.invoiceId,
-        worker_id: input.workerId,
-        amount: input.payment.amount,
-        payment_mode: input.payment.mode,
-        payment_date: targetDeliveryDate,
-        cheque_number: input.payment.cheque_number || null,
-        cheque_date: input.payment.cheque_date || null,
-        cheque_bank: input.payment.cheque_bank || null,
-        notes: input.payment.notes || null,
-        status: input.payment.mode === 'credit' ? 'pending' : 'collected',
-      });
-  } catch {
-    // ignore
-  }
+  mockStore.saveDelivery({
+    id: input.deliveryId,
+    status: resultStatus,
+    delivered_at: new Date().toISOString(),
+    delivered_amount: finalDeliveredAmount,
+    collected_amount: input.payment.mode === 'credit' ? 0 : input.payment.amount,
+    payment_mode: input.payment.mode,
+  });
 
   mockStore.savePayment({
     delivery_id: input.deliveryId,
@@ -627,87 +597,13 @@ export async function completePartyDelivery(input: CompleteDeliveryInput): Promi
     worker_id: input.workerId,
     amount: input.payment.amount,
     payment_mode: input.payment.mode,
-    payment_date: targetDeliveryDate,
+    payment_date: getLocalDateString(),
     cheque_number: input.payment.cheque_number,
     cheque_date: input.payment.cheque_date,
     cheque_bank: input.payment.cheque_bank,
     notes: input.payment.notes,
     status: input.payment.mode === 'credit' ? 'pending' : 'collected',
   });
-
-  mockStore.saveDelivery({
-    id: input.deliveryId,
-    status: deliveryStatus,
-    delivered_at: now,
-    delivery_date: targetDeliveryDate,
-    delivered_amount: finalDeliveredAmount,
-    collected_amount: input.payment.mode === 'credit' ? 0 : input.payment.amount,
-    payment_mode: input.payment.mode,
-  });
-
-  // 5. Update party outstanding if credit
-  if (input.payment.mode === 'credit' && input.payment.amount > 0) {
-    const { data: party } = await supabase
-      .from('parties')
-      .select('outstanding_amount')
-      .eq('id', input.partyId)
-      .single();
-
-    if (party) {
-      await supabase
-        .from('parties')
-        .update({
-          outstanding_amount: Number(party.outstanding_amount || 0) + input.payment.amount,
-        })
-        .eq('id', input.partyId);
-    }
-  }
-
-  // 6. Update picklist completed_parties count
-  const { count } = await supabase
-    .from('deliveries')
-    .select('id', { count: 'exact', head: true })
-    .eq('picklist_id', input.picklistId)
-    .in('status', ['delivered', 'partial']);
-
-  if (count !== null) {
-    // Also update running totals
-    const { data: allPayments } = await supabase
-      .from('payments')
-      .select('amount, payment_mode')
-      .in('delivery_id', 
-        (await supabase.from('deliveries').select('id').eq('picklist_id', input.picklistId)).data?.map(d => d.id) || []
-      );
-
-    let totalCollected = 0, totalCash = 0, totalCheque = 0, totalCredit = 0;
-    if (allPayments) {
-      for (const p of allPayments) {
-        const amt = Number(p.amount || 0);
-        totalCollected += amt;
-        if (p.payment_mode === 'cash') totalCash += amt;
-        else if (p.payment_mode === 'cheque') totalCheque += amt;
-        else if (p.payment_mode === 'credit') totalCredit += amt;
-      }
-    }
-
-    await supabase
-      .from('picklists')
-      .update({
-        completed_parties: count,
-        total_collected: totalCollected,
-        total_cash: totalCash,
-        total_cheque: totalCheque,
-        total_credit: totalCredit,
-      })
-      .eq('id', input.picklistId);
-  }
-
-    if (input.invoiceId) {
-      await supabase
-        .from('invoices')
-        .update({ status: deliveryStatus === 'delivered' ? 'delivered' : 'partial' })
-        .eq('id', input.invoiceId);
-    }
 
     // 8. Trigger Realtime Notification
     try {
@@ -764,6 +660,102 @@ export async function completePartyDelivery(input: CompleteDeliveryInput): Promi
       console.error('Failed to dispatch delivery notification:', notifyErr);
     }
   }
+
+// ── Stage 4B Route Stock Check & Reconciliation ───────────────────
+
+/** Query authoritative vehicle stock balance for picklist run from inventory ledger */
+export async function getRouteStockCheck(picklistId: string): Promise<RouteStockCheck> {
+  const { data, error } = await supabase.rpc('check_route_stock', {
+    p_picklist_id: picklistId,
+  });
+
+  if (error) {
+    throw new Error(`Failed to check route stock: ${error.message}`);
+  }
+
+  return data as RouteStockCheck;
+}
+
+/** Atomically close route with physical return and reconciliation */
+export async function closeRouteReconciliation(
+  picklistId: string,
+  workerId: string,
+  returnItems: RouteReturnItemInput[]
+): Promise<any> {
+  const { data, error } = await supabase.rpc('close_route_with_reconciliation', {
+    p_picklist_id: picklistId,
+    p_worker_id: workerId,
+    p_return_items: returnItems,
+  });
+
+  if (error) {
+    throw new Error(`Route reconciliation failed: ${error.message}`);
+  }
+
+  // Sync mockStore
+  const pl = mockStore.getPicklists().find((p) => p.id === picklistId);
+  if (pl) {
+    mockStore.savePicklist({
+      ...pl,
+      status: 'completed',
+      completed_at: new Date().toISOString(),
+    });
+  }
+
+  return data;
+}
+
+export interface RouteFinancialReconciliationInput {
+  picklistId: string;
+  workerId: string;
+  actualCash: number;
+  expenses?: Array<{
+    category: string;
+    amount: number;
+    description?: string;
+    payment_method?: string;
+  }>;
+  discrepancyAuthorized?: boolean;
+  discrepancyReason?: string;
+  actorId?: string;
+}
+
+/** Atomically reconcile route finances (cash, upi, cheque, credit, expenses, discrepancy) */
+export async function reconcileRouteFinances(
+  input: RouteFinancialReconciliationInput
+): Promise<any> {
+  const { data, error } = await supabase.rpc('reconcile_and_close_route_finances', {
+    p_picklist_id: input.picklistId,
+    p_worker_id: input.workerId,
+    p_actual_cash: input.actualCash,
+    p_expenses: input.expenses && input.expenses.length > 0 ? input.expenses : [],
+    p_discrepancy_authorized: input.discrepancyAuthorized ?? false,
+    p_discrepancy_reason: input.discrepancyReason || null,
+    p_actor_id: input.actorId || input.workerId,
+  });
+
+  if (error) {
+    throw new Error(`Financial reconciliation failed: ${error.message}`);
+  }
+
+  if (input.discrepancyAuthorized) {
+    try {
+      await supabase.rpc('log_system_event', {
+        p_user_id: input.actorId || input.workerId,
+        p_user_name: 'Admin',
+        p_role: 'admin',
+        p_module: 'reconciliation',
+        p_action: 'cash_discrepancy_authorized',
+        p_status: 'warning',
+        p_detail: `Cash discrepancy authorized via PIN for picklist ${input.picklistId}. Reason: ${input.discrepancyReason || 'Authorized'}`,
+        p_entity_type: 'picklist',
+        p_entity_id: input.picklistId,
+      });
+    } catch {}
+  }
+
+  return data;
+}
 
 // ── Salesman Performance & Metrics ────────────────────────────────
 

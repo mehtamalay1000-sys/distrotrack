@@ -69,11 +69,14 @@ export async function deleteProduct(id: string): Promise<void> {
 
 /**
  * Pure lookup by SKU — returns existing product or null.
- * Does NOT create a new product. Checks Supabase first, then mockStore.
+ * Does NOT create or mutate a product. Checks Supabase first, then mockStore.
+ * Normalizes SAP leading zeroes so variations of the same SKU match reliably.
  */
 export async function lookupProductBySku(sku: string): Promise<Product | null> {
   const normalizedSku = sku.trim();
   if (!normalizedSku) return null;
+
+  const unpaddedSku = normalizedSku.replace(/^0+/, '');
 
   // 1. Try Supabase
   try {
@@ -81,15 +84,26 @@ export async function lookupProductBySku(sku: string): Promise<Product | null> {
       .from('products')
       .select('*')
       .eq('sku', normalizedSku)
-      .single();
+      .maybeSingle();
     if (data) return data as Product;
+
+    if (unpaddedSku && unpaddedSku !== normalizedSku) {
+      const { data: unpaddedData } = await supabase
+        .from('products')
+        .select('*')
+        .eq('sku', unpaddedSku)
+        .maybeSingle();
+      if (unpaddedData) return unpaddedData as Product;
+    }
   } catch {
     // fallback to mockStore
   }
 
   // 2. Try mockStore
   const mockProducts = mockStore.getProducts();
-  const found = mockProducts.find(p => p.sku === normalizedSku);
+  const found = mockProducts.find(
+    p => p.sku === normalizedSku || (unpaddedSku && p.sku === unpaddedSku)
+  );
   return found || null;
 }
 
@@ -506,7 +520,6 @@ export async function clearAllSalesAnalyticsData(): Promise<void> {
     await supabase.from('delivery_items').delete().neq('id', '00000000-0000-0000-0000-000000000000');
     await supabase.from('deliveries').delete().neq('id', '00000000-0000-0000-0000-000000000000');
     await supabase.from('picklists').delete().neq('id', '00000000-0000-0000-0000-000000000000');
-    await supabase.from('payments').delete().neq('id', '00000000-0000-0000-0000-000000000000');
     await supabase.from('parties').update({ outstanding_amount: 0 }).neq('id', '00000000-0000-0000-0000-000000000000');
   } catch {
     // fallback

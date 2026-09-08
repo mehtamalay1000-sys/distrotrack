@@ -433,10 +433,8 @@ class MockStore {
   saveProduct(prodData: Partial<Product>): Product {
     const existingIdx = this.products.findIndex((p) => p.id === prodData.id || (prodData.sku && p.sku === prodData.sku));
     if (existingIdx >= 0) {
-      const updated = { ...this.products[existingIdx], ...prodData, updated_at: new Date().toISOString() };
-      this.products[existingIdx] = updated;
-      this.saveToStorage();
-      return updated;
+      // Protect existing product master data: preserve canonical name, mrp, rate
+      return this.products[existingIdx];
     } else {
       const created: Product = {
         id: prodData.id || `prod-${Date.now()}`,
@@ -491,8 +489,20 @@ class MockStore {
         completed_at: plData.completed_at || null,
         total_collected: Number(plData.total_collected || 0),
         total_cash: Number(plData.total_cash || 0),
+        total_upi: Number(plData.total_upi || 0),
         total_cheque: Number(plData.total_cheque || 0),
         total_credit: Number(plData.total_credit || 0),
+        expected_cash: plData.expected_cash ?? null,
+        actual_cash_returned: plData.actual_cash_returned ?? null,
+        cash_discrepancy: plData.cash_discrepancy ?? null,
+        total_expenses: plData.total_expenses ?? null,
+        net_cash_deposit: plData.net_cash_deposit ?? null,
+        expected_upi: plData.expected_upi ?? null,
+        expected_cheque: plData.expected_cheque ?? null,
+        expected_credit: plData.expected_credit ?? null,
+        financial_reconciled_at: plData.financial_reconciled_at ?? null,
+        reconciled_by_worker_id: plData.reconciled_by_worker_id ?? null,
+        financial_reconciliation_status: plData.financial_reconciliation_status ?? 'pending',
         notes: plData.notes || null,
         sap_raw_data: plData.sap_raw_data || null,
         created_at: new Date().toISOString(),
@@ -550,7 +560,19 @@ class MockStore {
     });
   }
   saveDelivery(dData: Partial<Delivery>): Delivery {
-    const existingIdx = this.deliveries.findIndex((d) => d.id === dData.id);
+    const existingIdx = this.deliveries.findIndex((d) => {
+      // 1. Match by explicit delivery ID if provided
+      if (dData.id && d.id === dData.id) return true;
+      // 2. If invoice_id exists, delivery identity is strictly invoice_id
+      if (dData.invoice_id) {
+        return d.invoice_id === dData.invoice_id;
+      }
+      // 3. Fallback for picklist-only deliveries (no invoice): identity is (picklist_id + party_id) with no invoice
+      if (dData.picklist_id && dData.party_id) {
+        return d.picklist_id === dData.picklist_id && d.party_id === dData.party_id && !d.invoice_id;
+      }
+      return false;
+    });
     if (existingIdx >= 0) {
       const updated = { ...this.deliveries[existingIdx], ...dData, updated_at: new Date().toISOString() };
       this.deliveries[existingIdx] = updated;
@@ -625,6 +647,11 @@ class MockStore {
       ordered_qty: Number(item.ordered_qty || 0),
       delivered_qty: Number(item.delivered_qty || 0),
       free_quantity: Number(item.free_quantity || 0),
+      delivered_free_qty: Number(item.delivered_free_qty || 0),
+      returned_qty: Number(item.returned_qty || 0),
+      returned_free_qty: Number(item.returned_free_qty || 0),
+      damaged_qty: Number(item.damaged_qty || 0),
+      damaged_free_qty: Number(item.damaged_free_qty || 0),
       rate: Number(item.rate || 0),
       amount: Number(item.amount || 0),
       notes: item.notes || null,
@@ -725,6 +752,12 @@ class MockStore {
       payment_date: payData.payment_date || getLocalDateString(),
       status: payData.status || 'collected',
       notes: payData.notes || null,
+      picklist_id: payData.picklist_id || null,
+      route_id: payData.route_id || null,
+      idempotency_key: payData.idempotency_key || null,
+      reversed_at: payData.reversed_at || null,
+      reversed_by: payData.reversed_by || null,
+      reversal_reason: payData.reversal_reason || null,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
@@ -765,12 +798,25 @@ class MockStore {
       worker_id: expData.worker_id || null,
       worker_name: expData.worker_name || workerObj?.name || null,
       route_id: expData.route_id || null,
+      picklist_id: expData.picklist_id || null,
       category: expData.category || 'other',
       amount: Number(expData.amount || 0),
+      payment_method: expData.payment_method || 'cash',
+      status: expData.status || 'pending',
+      expense_type: expData.expense_type || 'route_operating',
       date: expData.date || getLocalDateString(),
       description: expData.description || null,
       receipt_url: expData.receipt_url || null,
       visible_to_worker: expData.visible_to_worker ?? false,
+      idempotency_key: expData.idempotency_key || null,
+      approved_at: expData.approved_at || null,
+      approved_by: expData.approved_by || null,
+      rejected_at: expData.rejected_at || null,
+      rejected_by: expData.rejected_by || null,
+      rejection_reason: expData.rejection_reason || null,
+      reversed_at: expData.reversed_at || null,
+      reversed_by: expData.reversed_by || null,
+      reversal_reason: expData.reversal_reason || null,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
@@ -778,9 +824,41 @@ class MockStore {
     this.saveToStorage();
     return created;
   }
-  deleteExpense(id: string) {
-    this.expenses = this.expenses.filter((e) => e.id !== id);
+  approveExpense(id: string, actorId?: string): Expense | null {
+    const exp = this.expenses.find((e) => e.id === id);
+    if (!exp) return null;
+    exp.status = 'approved';
+    exp.approved_at = new Date().toISOString();
+    exp.approved_by = actorId || null;
+    exp.updated_at = new Date().toISOString();
     this.saveToStorage();
+    return exp;
+  }
+  rejectExpense(id: string, reason: string, actorId?: string): Expense | null {
+    const exp = this.expenses.find((e) => e.id === id);
+    if (!exp) return null;
+    exp.status = 'rejected';
+    exp.rejected_at = new Date().toISOString();
+    exp.rejected_by = actorId || null;
+    exp.rejection_reason = reason;
+    exp.updated_at = new Date().toISOString();
+    this.saveToStorage();
+    return exp;
+  }
+  reverseExpense(id: string, reason: string, actorId?: string): Expense | null {
+    const exp = this.expenses.find((e) => e.id === id);
+    if (!exp) return null;
+    exp.status = 'reversed';
+    exp.reversed_at = new Date().toISOString();
+    exp.reversed_by = actorId || null;
+    exp.reversal_reason = reason;
+    exp.updated_at = new Date().toISOString();
+    this.saveToStorage();
+    return exp;
+  }
+  // No physical delete - Stage 6 non-physical deletion invariant
+  deleteExpense(_id: string) {
+    console.warn('[mockStore] Physical delete on expenses is prohibited by Stage 6. Use reverseExpense or rejectExpense instead.');
   }
 }
 

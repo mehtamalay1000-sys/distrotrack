@@ -2,7 +2,8 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   Activity, RefreshCw, Filter, CalendarDays,
   LogIn, LogOut, AlertTriangle, CheckCircle2, XCircle,
-  FileText, Truck, CreditCard, User,
+  FileText, Truck, CreditCard, User, ShieldAlert,
+  Database, Cpu,
 } from 'lucide-react';
 import {
   getMasterAuditLog, todayRange, monthRange,
@@ -27,7 +28,10 @@ function moduleIcon(module: string) {
     picklist: <FileText className="h-3.5 w-3.5" />,
     delivery: <Truck className="h-3.5 w-3.5" />,
     payment: <CreditCard className="h-3.5 w-3.5" />,
+    expense: <CreditCard className="h-3.5 w-3.5 text-rose-500" />,
+    import: <Database className="h-3.5 w-3.5 text-indigo-500" />,
     route: <Activity className="h-3.5 w-3.5" />,
+    reconciliation: <ShieldAlert className="h-3.5 w-3.5 text-amber-500" />,
     system: <Activity className="h-3.5 w-3.5" />,
   };
   return map[module?.toLowerCase()] ?? <Activity className="h-3.5 w-3.5" />;
@@ -39,6 +43,7 @@ function actionIcon(action: string, status: string) {
   if (action === 'failed_login') return <AlertTriangle className="h-3.5 w-3.5 text-rose-500" />;
   if (status === 'success') return <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />;
   if (status === 'failure') return <XCircle className="h-3.5 w-3.5 text-rose-500" />;
+  if (status === 'warning') return <AlertTriangle className="h-3.5 w-3.5 text-amber-500" />;
   return <Activity className="h-3.5 w-3.5 text-slate-400" />;
 }
 
@@ -59,6 +64,7 @@ function RoleBadge({ role }: { role: string | null }) {
   const map: Record<string, string> = {
     master: 'bg-indigo-50 text-indigo-700 border-indigo-200',
     owner: 'bg-blue-50 text-blue-700 border-blue-200',
+    admin: 'bg-indigo-50 text-indigo-700 border-indigo-200',
     worker: 'bg-slate-50 text-slate-600 border-slate-200',
     system: 'bg-slate-100 text-slate-500 border-slate-200',
   };
@@ -73,13 +79,187 @@ function RoleBadge({ role }: { role: string | null }) {
 
 function StatCard({ label, count, icon, color }: { label: string; count: number; icon: React.ReactNode; color: string }) {
   return (
-    <div className={`bg-white rounded-xl border border-slate-200 px-4 py-3 flex items-center gap-3`}>
+    <div className="bg-white rounded-xl border border-slate-200 px-4 py-3 flex items-center gap-3">
       <div className={`h-8 w-8 rounded-lg ${color} flex items-center justify-center flex-shrink-0`}>
         {icon}
       </div>
       <div>
         <div className="text-xl font-bold text-slate-900 tabular-nums">{count}</div>
         <div className="text-xs text-slate-500 font-medium">{label}</div>
+      </div>
+    </div>
+  );
+}
+
+// ── Observable Health Matrix ───────────────────────────────────────
+
+function ObservableHealthDeck({
+  dbHealthy,
+  failedLogins,
+  failuresCount,
+  importFailures,
+  anomalies,
+}: {
+  dbHealthy: boolean;
+  failedLogins: number;
+  failuresCount: number;
+  importFailures: number;
+  anomalies: Array<{ type: string; count: number; description: string; severity: 'warning' | 'critical' }>;
+}) {
+  return (
+    <div className="space-y-4 mb-5">
+      <div className="bg-white rounded-xl border border-slate-200 p-4">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <Activity className="h-4 w-4 text-slate-500" />
+            <h2 className="text-xs font-semibold text-slate-700 uppercase tracking-wider">
+              Observable System Health & Telemetry State
+            </h2>
+          </div>
+          <span className="text-xs text-slate-400">Strict evidence-based observability</span>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
+          {/* 1. Database Connection */}
+          <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs font-semibold text-slate-600 flex items-center gap-1.5">
+                <Database className="h-3.5 w-3.5 text-slate-400" /> Database
+              </span>
+              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded uppercase ${
+                dbHealthy ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'
+              }`}>
+                {dbHealthy ? 'HEALTHY' : 'ERROR'}
+              </span>
+            </div>
+            <div className="text-[11px] text-slate-500">
+              PostgreSQL connection verified
+            </div>
+          </div>
+
+          {/* 2. Authentication Pipeline */}
+          <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs font-semibold text-slate-600 flex items-center gap-1.5">
+                <User className="h-3.5 w-3.5 text-slate-400" /> Auth Pipeline
+              </span>
+              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded uppercase ${
+                failedLogins > 0 ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'
+              }`}>
+                {failedLogins > 0 ? 'WARNING' : 'HEALTHY'}
+              </span>
+            </div>
+            <div className="text-[11px] text-slate-500">
+              {failedLogins > 0 ? `${failedLogins} failed attempts` : 'Logins authenticating cleanly'}
+            </div>
+          </div>
+
+          {/* 3. Operational Failures */}
+          <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs font-semibold text-slate-600 flex items-center gap-1.5">
+                <ShieldAlert className="h-3.5 w-3.5 text-slate-400" /> Operations
+              </span>
+              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded uppercase ${
+                failuresCount > 0 ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'
+              }`}>
+                {failuresCount > 0 ? 'WARNING' : 'HEALTHY'}
+              </span>
+            </div>
+            <div className="text-[11px] text-slate-500">
+              {failuresCount > 0 ? `${failuresCount} failures logged` : 'Zero operation failures'}
+            </div>
+          </div>
+
+          {/* 4. Import Pipeline */}
+          <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs font-semibold text-slate-600 flex items-center gap-1.5">
+                <FileText className="h-3.5 w-3.5 text-slate-400" /> Import Health
+              </span>
+              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded uppercase ${
+                importFailures > 0 ? 'bg-rose-100 text-rose-800' : 'bg-emerald-100 text-emerald-800'
+              }`}>
+                {importFailures > 0 ? 'WARNING' : 'HEALTHY'}
+              </span>
+            </div>
+            <div className="text-[11px] text-slate-500">
+              {importFailures > 0 ? `${importFailures} failed imports` : 'Import pipeline operational'}
+            </div>
+          </div>
+
+          {/* 5. Realtime Sync Subsystem */}
+          <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs font-semibold text-slate-600 flex items-center gap-1.5">
+                <Activity className="h-3.5 w-3.5 text-slate-400" /> Sync Daemon
+              </span>
+              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-200 text-slate-700 uppercase">
+                NOT OBSERVABLE
+              </span>
+            </div>
+            <div className="text-[11px] text-slate-500">
+              No standing background sync daemon
+            </div>
+          </div>
+
+          {/* 6. Host Hardware / CPU / RAM */}
+          <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs font-semibold text-slate-600 flex items-center gap-1.5">
+                <Cpu className="h-3.5 w-3.5 text-slate-400" /> Host CPU/RAM
+              </span>
+              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-200 text-slate-700 uppercase">
+                NOT OBSERVABLE
+              </span>
+            </div>
+            <div className="text-[11px] text-slate-500">
+              Serverless cloud — unobservable
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Deterministic Anomaly Radar (Section 11) */}
+      <div className="bg-white rounded-xl border border-slate-200 p-4">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4 text-amber-500" />
+            <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+              Deterministic Anomaly & Threat Radar
+            </h3>
+          </div>
+          <span className="text-xs text-slate-400">Explainable signals only — zero artificial predictions</span>
+        </div>
+
+        {anomalies.length > 0 ? (
+          <div className="space-y-2">
+            {anomalies.map((a, idx) => (
+              <div
+                key={idx}
+                className={`p-3 rounded-lg border flex items-center justify-between ${
+                  a.severity === 'critical' ? 'bg-rose-50 border-rose-200 text-rose-900' : 'bg-amber-50 border-amber-200 text-amber-900'
+                }`}
+              >
+                <div className="flex items-center gap-2 text-xs">
+                  <AlertTriangle className={`h-4 w-4 ${a.severity === 'critical' ? 'text-rose-600' : 'text-amber-600'}`} />
+                  <span className="font-semibold">{a.type}:</span>
+                  <span>{a.description}</span>
+                </div>
+                <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${
+                  a.severity === 'critical' ? 'bg-rose-200 text-rose-800' : 'bg-amber-200 text-amber-800'
+                }`}>
+                  {a.count} OCCURRENCE{a.count > 1 ? 'S' : ''}
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg flex items-center gap-2 text-xs text-emerald-800">
+            <CheckCircle2 className="h-4 w-4 text-emerald-600 flex-shrink-0" />
+            <span>Zero anomalies detected. Authentication, payment operations, and import jobs within normal baseline.</span>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -97,6 +277,7 @@ export function MasterSystemPage() {
   const [customMonth, setCustomMonth] = useState(now.getMonth() + 1);
   const [logs, setLogs] = useState<MasterAuditLog[]>([]);
   const [loading, setLoading] = useState(true);
+  const [dbHealthy, setDbHealthy] = useState(true);
   const [filterRole, setFilterRole] = useState('');
   const [filterModule, setFilterModule] = useState('');
   const [filterStatus, setFilterStatus] = useState('');
@@ -119,9 +300,15 @@ export function MasterSystemPage() {
       ...(filterStatus ? { status: filterStatus } : {}),
       limit: 500,
     };
-    const data = await getMasterAuditLog(filter);
-    setLogs(data);
-    setLoading(false);
+    try {
+      const data = await getMasterAuditLog(filter);
+      setLogs(data);
+      setDbHealthy(true);
+    } catch {
+      setDbHealthy(false);
+    } finally {
+      setLoading(false);
+    }
   }, [preset, customYear, customMonth, filterRole, filterModule, filterStatus]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { load(); }, [load]);
@@ -141,14 +328,64 @@ export function MasterSystemPage() {
   const failedCount = filtered.filter(l => l.action === 'failed_login').length;
   const successCount = filtered.filter(l => l.status === 'success').length;
   const failureCount = filtered.filter(l => l.status === 'failure').length;
+  const importFailuresCount = filtered.filter(l => l.module === 'import' && l.status === 'failure').length;
+
+  // Anomaly & Threat Radar derivation (Deterministic & Explainable)
+  const anomalies = (() => {
+    const list: Array<{ type: string; count: number; description: string; severity: 'warning' | 'critical' }> = [];
+    
+    // 1. Repeated failed logins
+    if (failedCount >= 3) {
+      list.push({
+        type: 'Authentication Anomaly',
+        count: failedCount,
+        description: 'Repeated failed login attempts detected in period. Potential credential guessing.',
+        severity: failedCount >= 5 ? 'critical' : 'warning',
+      });
+    }
+
+    // 2. Failed imports
+    if (importFailuresCount > 0) {
+      list.push({
+        type: 'Import Pipeline Disruption',
+        count: importFailuresCount,
+        description: 'Batch file or bill parsing errors logged during execution.',
+        severity: 'warning',
+      });
+    }
+
+    // 3. Payment anomalies (e.g. reversals, bounces)
+    const bouncedOrReversed = filtered.filter(l => l.action === 'cheque_bounced' || l.action === 'payment_reversed');
+    if (bouncedOrReversed.length > 0) {
+      list.push({
+        type: 'Financial Reversal / Dishonor',
+        count: bouncedOrReversed.length,
+        description: 'Cheques dishonored or payment reversals executed in audit trail.',
+        severity: 'warning',
+      });
+    }
+
+    // 4. Cash discrepancies
+    const cashDiscAuth = filtered.filter(l => l.action === 'cash_discrepancy_authorized');
+    if (cashDiscAuth.length > 0) {
+      list.push({
+        type: 'Cash Discrepancy Authorization',
+        count: cashDiscAuth.length,
+        description: 'Route reconciliation cash discrepancies approved with authorization.',
+        severity: 'warning',
+      });
+    }
+
+    return list;
+  })();
 
   return (
     <div className="p-4 lg:p-6 max-w-7xl mx-auto">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5">
         <div>
-          <h1 className="text-xl font-bold text-slate-900">System & Audit Log</h1>
-          <p className="text-sm text-slate-500 mt-0.5">Activity log — no passwords, tokens, or secrets are recorded</p>
+          <h1 className="text-xl font-bold text-slate-900">System Activity & Audit Log</h1>
+          <p className="text-sm text-slate-500 mt-0.5">Authoritative system audit log — evidence-based observable state</p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           {/* Period presets */}
@@ -163,21 +400,31 @@ export function MasterSystemPage() {
           {preset === 'custom' && (
             <div className="flex gap-1.5">
               <select value={customMonth} onChange={e => setCustomMonth(Number(e.target.value))}
-                className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white text-slate-700">
+                className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white text-slate-700 font-medium">
                 {MONTHS.map((m, i) => <option key={m} value={i + 1}>{m}</option>)}
               </select>
               <select value={customYear} onChange={e => setCustomYear(Number(e.target.value))}
-                className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white text-slate-700">
+                className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white text-slate-700 font-medium">
                 {years.map(y => <option key={y} value={y}>{y}</option>)}
               </select>
             </div>
           )}
           <button onClick={load} disabled={loading}
-            className="p-2 rounded-lg bg-white border border-slate-200 text-slate-500 hover:text-indigo-600 hover:border-indigo-300 transition-colors disabled:opacity-40">
+            className="p-2 rounded-lg bg-white border border-slate-200 text-slate-500 hover:text-indigo-600 hover:border-indigo-300 transition-colors disabled:opacity-40 cursor-pointer"
+            title="Refresh">
             <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
           </button>
         </div>
       </div>
+
+      {/* Observable Health Deck (Section 12 compliance) */}
+      <ObservableHealthDeck
+        dbHealthy={dbHealthy}
+        failedLogins={failedCount}
+        failuresCount={failureCount}
+        importFailures={importFailuresCount}
+        anomalies={anomalies}
+      />
 
       {/* Stats row */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
@@ -205,6 +452,7 @@ export function MasterSystemPage() {
           <option value="">All Roles</option>
           <option value="master">Master</option>
           <option value="owner">Owner</option>
+          <option value="admin">Admin</option>
           <option value="worker">Worker</option>
           <option value="system">System</option>
         </select>
@@ -216,6 +464,8 @@ export function MasterSystemPage() {
           <option value="picklist">Picklist</option>
           <option value="delivery">Delivery</option>
           <option value="payment">Payment</option>
+          <option value="expense">Expense</option>
+          <option value="import">Import</option>
           <option value="route">Route</option>
           <option value="system">System</option>
         </select>
@@ -238,11 +488,11 @@ export function MasterSystemPage() {
         </span>
       </div>
 
-      {/* Notice */}
+      {/* Security notice */}
       <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800 mb-4">
         <AlertTriangle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
         <span>
-          This log contains only application-level events. Passwords, authentication tokens, API keys, and other secrets are never recorded.
+          This log contains only application-level audit events. Passwords, PINs, auth tokens, API keys, and other secrets are never recorded.
         </span>
       </div>
 

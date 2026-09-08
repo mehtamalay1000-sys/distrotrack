@@ -1,10 +1,8 @@
 import { supabase } from '@/lib/supabase';
-import { getPicklists } from '@/features/picklists/services/picklistService';
 import { getDeliveries } from '@/features/deliveries/services/deliveryService';
-import { getPayments } from '@/features/payments/services/paymentService';
-import { getExpenses } from '@/features/expenses/services/expenseService';
 import { getWorkers } from '@/features/workers/services/workerService';
 import { getLocalDateString, parseEffectiveDateString } from '@/shared/utils/format';
+import type { Delivery, Worker, FinancialSummary } from '@/lib/database.types';
 
 export interface DashboardStats {
   todaySales: number;
@@ -13,6 +11,8 @@ export interface DashboardStats {
   pendingDeliveriesCount: number;
   completedDeliveriesCount: number;
   totalExpensesToday: number;
+  cashExpensesToday: number;
+  contributionBeforeCogsToday: number;
   activeWorkersCount: number;
   monthlySales: number;
   monthlyCollections: number;
@@ -27,21 +27,38 @@ export async function getDashboardStats(): Promise<DashboardStats> {
   const currentYear = now.getFullYear();
   const currentMonth = now.getMonth(); // 0-indexed
 
-  /** Check if a date string falls in the current month */
-  function isCurrentMonth(dateStr: string | null | undefined): boolean {
-    if (!dateStr) return false;
-    const cleanStr = parseEffectiveDateString(dateStr);
-    const d = new Date(cleanStr);
-    return d.getFullYear() === currentYear && d.getMonth() === currentMonth;
-  }
+  const monthStartStr = `${currentYear}-${String(currentMonth + 1).padStart(2, '0')}-01`;
+  const lastDay = new Date(currentYear, currentMonth + 1, 0).getDate();
+  const monthEndStr = `${currentYear}-${String(currentMonth + 1).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
 
   try {
-    const [picklists, deliveries, payments, expenses, workers] = await Promise.all([
-      getPicklists().catch(() => []),
-      getDeliveries().catch(() => []),
-      getPayments().catch(() => []),
-      getExpenses().catch(() => []),
-      getWorkers().catch(() => []),
+    // P1/P3: Type RPC responses as FinancialSummary | null to enforce correct key access
+    let todaySummaryRes: FinancialSummary | null = null;
+    let monthSummaryRes: FinancialSummary | null = null;
+
+    try {
+      const { data } = await supabase.rpc('get_financial_summary', {
+        p_start_date: todayStr,
+        p_end_date: todayStr,
+      });
+      todaySummaryRes = data as FinancialSummary | null;
+    } catch {
+      todaySummaryRes = null;
+    }
+
+    try {
+      const { data } = await supabase.rpc('get_financial_summary', {
+        p_start_date: monthStartStr,
+        p_end_date: monthEndStr,
+      });
+      monthSummaryRes = data as FinancialSummary | null;
+    } catch {
+      monthSummaryRes = null;
+    }
+
+    const [deliveries, workers] = await Promise.all([
+      getDeliveries().catch(() => [] as Delivery[]),
+      getWorkers().catch(() => [] as Worker[]),
     ]);
 
     // ── Helper: Effective Date matching ──────────────────────────────
@@ -49,51 +66,20 @@ export async function getDashboardStats(): Promise<DashboardStats> {
       return parseEffectiveDateString(dateStr || createdAtStr);
     };
 
-    // ── Daily Stats (strictly for today's delivery/operations date) ─────
-
-    // Today's Sales: only picklists scheduled for today
-    const todaySales = picklists
-      .filter((p) => getEffectiveDate(p.date, p.created_at) === todayStr)
-      .reduce((sum, p) => sum + Number(p.total_amount || 0), 0);
-
-    // Today's Collections: payments collected on today's date (cash, cheque, upi)
-    const todayCollections = payments
-      .filter((p) => {
-        const isDirectMode = p.payment_mode === 'cash' || p.payment_mode === 'cheque' || p.payment_mode === 'upi';
-        return isDirectMode && getEffectiveDate(p.payment_date, p.created_at) === todayStr;
-      })
-      .reduce((sum, p) => sum + Number(p.amount || 0), 0);
-
     // Deliveries scheduled for today
     const todayDeliveries = deliveries.filter(
-      (d) => getEffectiveDate(d.delivery_date, d.created_at) === todayStr
+      (d: Delivery) => getEffectiveDate(d.delivery_date, d.created_at) === todayStr
     );
 
-    // Pending / Completed counts for today's deliveries
     const pendingDeliveriesCount = todayDeliveries.filter(
-      (d) => d.status === 'pending' || d.status === 'out_for_delivery'
+      (d: Delivery) => d.status === 'pending' || d.status === 'out_for_delivery'
     ).length;
 
     const completedDeliveriesCount = todayDeliveries.filter(
-      (d) => d.status === 'delivered' || d.status === 'partial'
+      (d: Delivery) => d.status === 'delivered' || d.status === 'partial'
     ).length;
 
-    // Total outstanding Udhari for today's deliveries (credit deliveries + partials + pending)
-    const creditPaymentsToday = payments
-      .filter((p) => p.payment_mode === 'credit' && getEffectiveDate(p.payment_date, p.created_at) === todayStr)
-      .reduce((sum, p) => sum + Number(p.amount || 0), 0);
-
-    const deliveryUdhariToday = todayDeliveries
-      .filter((d) => d.payment_mode === 'credit' || d.status === 'pending' || d.status === 'out_for_delivery' || d.status === 'partial')
-      .reduce((sum, d) => sum + Math.max(0, Number(d.total_amount || 0) - Number(d.collected_amount || 0)), 0);
-
-    const totalOutstanding = Math.max(creditPaymentsToday, deliveryUdhariToday);
-
-    const totalExpensesToday = expenses
-      .filter((e) => getEffectiveDate(e.date, e.created_at) === todayStr)
-      .reduce((sum, e) => sum + Number(e.amount || 0), 0);
-
-    let activeWorkersCount = workers.filter((w) => w.status === 'active').length;
+    let activeWorkersCount = workers.filter((w: Worker) => w.status === 'active').length;
     try {
       const { count } = await supabase
         .from('workers')
@@ -106,37 +92,23 @@ export async function getDashboardStats(): Promise<DashboardStats> {
       // fallback
     }
 
-    // ── Monthly Stats ──────────────────────────────────────────────────
+    // ── P1 FIX: Extract using ACTUAL get_financial_summary response keys ──
+    // RPC returns: sales, total_collected, cash, upi, cheque_cleared, cheque_pending,
+    //              credit_extended, expenses, cash_expenses, net_cash, total_outstanding,
+    //              contribution_before_cogs
+    const todaySales = Number(todaySummaryRes?.sales ?? 0);
+    const todayCollections = Number(todaySummaryRes?.total_collected ?? 0);
+    const totalOutstanding = Number(todaySummaryRes?.total_outstanding ?? 0);
+    const totalExpensesToday = Number(todaySummaryRes?.expenses ?? 0);
+    const cashExpensesToday = Number(todaySummaryRes?.cash_expenses ?? 0);
+    const contributionBeforeCogsToday = Number(todaySummaryRes?.contribution_before_cogs ?? 0);
 
-    const monthlySales = picklists
-      .filter((p) => isCurrentMonth(p.date || p.created_at))
-      .reduce((sum, p) => sum + Number(p.total_amount || 0), 0);
-
-    const monthlyPayments = payments.filter(
-      (p) => isCurrentMonth(p.payment_date || p.created_at)
-    );
-
-    const monthlyCollections = monthlyPayments
-      .filter((p) => p.payment_mode !== 'credit')
-      .reduce((sum, p) => sum + Number(p.amount || 0), 0);
-
-    const creditFromPayments = monthlyPayments
-      .filter((p) => p.payment_mode === 'credit')
-      .reduce((sum, p) => sum + Number(p.amount || 0), 0);
-
-    const creditFromDeliveries = deliveries
-      .filter((d) => isCurrentMonth(d.delivery_date || d.created_at) && (d.payment_mode === 'credit' || d.status === 'pending' || d.status === 'out_for_delivery'))
-      .reduce((sum, d) => sum + Math.max(0, Number(d.total_amount || 0) - Number(d.collected_amount || 0)), 0);
-
-    const monthlyUdhari = Math.max(creditFromPayments, creditFromDeliveries);
-
-    const monthlyCash = monthlyPayments
-      .filter((p) => p.payment_mode === 'cash')
-      .reduce((sum, p) => sum + Number(p.amount || 0), 0);
-
-    const monthlyCheque = monthlyPayments
-      .filter((p) => p.payment_mode === 'cheque')
-      .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+    const monthlySales = Number(monthSummaryRes?.sales ?? 0);
+    const monthlyCollections = Number(monthSummaryRes?.total_collected ?? 0);
+    const monthlyUdhari = Number(monthSummaryRes?.credit_extended ?? 0);
+    const monthlyCash = Number(monthSummaryRes?.cash ?? 0);
+    // Cheque: cleared + pending (both cleared and pending cheques are in scope)
+    const monthlyCheque = Number((monthSummaryRes?.cheque_cleared ?? 0) + (monthSummaryRes?.cheque_pending ?? 0));
 
     return {
       todaySales,
@@ -145,6 +117,8 @@ export async function getDashboardStats(): Promise<DashboardStats> {
       pendingDeliveriesCount,
       completedDeliveriesCount,
       totalExpensesToday,
+      cashExpensesToday,
+      contributionBeforeCogsToday,
       activeWorkersCount,
       monthlySales,
       monthlyCollections,
@@ -161,6 +135,8 @@ export async function getDashboardStats(): Promise<DashboardStats> {
       pendingDeliveriesCount: 0,
       completedDeliveriesCount: 0,
       totalExpensesToday: 0,
+      cashExpensesToday: 0,
+      contributionBeforeCogsToday: 0,
       activeWorkersCount: 0,
       monthlySales: 0,
       monthlyCollections: 0,

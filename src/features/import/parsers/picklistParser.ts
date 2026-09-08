@@ -3,7 +3,7 @@ import {
   isProductTableHeader, isTableEndMarker, validateProductRow,
   isNonProductLabel, isValidSKU,
 } from './helpers';
-import type { ParsedPicklist, ParsedPicklistParty, ParsedPicklistItem } from './types';
+import type { ParsedPicklist, ParsedPicklistParty, ParsedPicklistItem, ParsedPicklistLoadItem } from './types';
 
 /**
  * Parses Colgate SAP Picklist PDF across all pages.
@@ -390,6 +390,21 @@ export async function parsePicklist(file: File): Promise<ParsedPicklist> {
   const parties = Array.from(partyMap.values());
   const calculatedTotal = totalValueFromHeader > 0 ? totalValueFromHeader : parties.reduce((sum, p) => sum + p.totalAmount, 0);
 
+  // Stage 4B: Preserve Page 1 aggregate physical load data
+  // In Colgate SAP picklists, Page 1 TotalQty is the total physical pick quantity
+  // (already includes all commercial and scheme/free physical units loaded onto vehicle).
+  // We aggregate duplicate SKUs if present into the clean loadItems manifest.
+  const loadMap = new Map<string, number>();
+  for (const item of allItems) {
+    if (item.sku && item.quantity > 0) {
+      loadMap.set(item.sku, (loadMap.get(item.sku) || 0) + item.quantity);
+    }
+  }
+  const loadItems: ParsedPicklistLoadItem[] = Array.from(loadMap.entries()).map(([sku, quantity]) => ({
+    sku,
+    quantity,
+  }));
+
   return {
     picklistNumber,
     date,
@@ -404,6 +419,7 @@ export async function parsePicklist(file: File): Promise<ParsedPicklist> {
       }
     ],
     items: allItems,
+    loadItems,
     totalAmount: calculatedTotal,
     totalItems: allItems.length,
     pageCount,

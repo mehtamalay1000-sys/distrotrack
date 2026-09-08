@@ -3,12 +3,13 @@ import { useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
-  Plus, CreditCard, DollarSign, Search, Trash2, Filter,
+  Plus, CreditCard, DollarSign, Search, Filter,
   CheckCircle2, Clock, MapPin, ArrowUpRight, ArrowDownRight, Wifi,
+  Eye, RotateCcw, Check, X, ShieldAlert, AlertCircle,
 } from 'lucide-react';
 import { PageHeader, Button, Input, Select, Modal, EmptyState, LoadingState, ErrorState, StatusBadge } from '@/shared/ui';
 import { UPIQRPayment } from '@/shared/ui/UPIQRPayment';
-import { getPayments, createPayment, deletePayment } from '../services/paymentService';
+import { getPayments, createPayment, reversePayment, updateChequeStatus } from '../services/paymentService';
 import { getParties } from '@/features/parties/services/partyService';
 import { getWorkers } from '@/features/workers/services/workerService';
 import { getRoutes } from '@/features/routes/services/routeService';
@@ -25,6 +26,11 @@ export function PaymentsPage() {
   const [showUpiQR, setShowUpiQR] = useState(false);
   const [pendingUpiForm, setPendingUpiForm] = useState<typeof form | null>(null);
   const [upiPartyName, setUpiPartyName] = useState('');
+
+  // Payment inspection & reversal states
+  const [viewingPayment, setViewingPayment] = useState<Payment | null>(null);
+  const [reversingPayment, setReversingPayment] = useState<Payment | null>(null);
+  const [reversalReason, setReversalReason] = useState('');
 
   const prePartyId = searchParams.get('party_id') || '';
   const preDeliveryId = searchParams.get('delivery_id') || '';
@@ -72,14 +78,29 @@ export function PaymentsPage() {
     onError: (e: Error) => toast.error(e.message),
   });
 
-  const deleteMut = useMutation({
-    mutationFn: deletePayment,
+  const reverseMut = useMutation({
+    mutationFn: (args: { paymentId: string; reason: string }) =>
+      reversePayment(args.paymentId, args.reason),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['payments'] });
+      qc.invalidateQueries({ queryKey: ['parties'] });
       qc.invalidateQueries({ queryKey: ['deliveries'] });
+      qc.invalidateQueries({ queryKey: ['dashboard-stats'] });
+      toast.success('Payment successfully reversed with ledger update.');
+      setReversingPayment(null);
+      setReversalReason('');
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const chequeStatusMut = useMutation({
+    mutationFn: (args: { paymentId: string; status: 'cleared' | 'bounced'; notes?: string }) =>
+      updateChequeStatus(args.paymentId, args.status, args.notes),
+    onSuccess: (_, variables) => {
+      qc.invalidateQueries({ queryKey: ['payments'] });
       qc.invalidateQueries({ queryKey: ['parties'] });
       qc.invalidateQueries({ queryKey: ['dashboard-stats'] });
-      toast.success('Payment deleted');
+      toast.success(`Cheque marked as ${variables.status.toUpperCase()}`);
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -386,10 +407,11 @@ export function PaymentsPage() {
                 <th>Party / Customer</th>
                 <th>Route</th>
                 <th>Mode</th>
-                <th>Details</th>
+                <th>Status</th>
+                <th>Details / Instrument</th>
                 <th>Worker</th>
                 <th>Amount</th>
-                <th className="w-12" />
+                <th className="text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -408,13 +430,16 @@ export function PaymentsPage() {
                   matchedRoute?.name ||
                   'Main Route';
 
+                const isReversed = p.status === 'reversed';
+                const isChequePending = p.payment_mode === 'cheque' && p.status === 'pending';
+
                 return (
-                  <tr key={p.id}>
+                  <tr key={p.id} className={isReversed ? 'opacity-60 bg-surface-50/60 dark:bg-surface-900/30' : ''}>
                     <td className="text-xs text-surface-600 dark:text-surface-400 font-medium">
                       {formatDate(p.payment_date)}
                     </td>
                     <td>
-                      <div className="font-bold text-surface-900 dark:text-surface-100">
+                      <div className={`font-bold ${isReversed ? 'line-through text-surface-500' : 'text-surface-900 dark:text-surface-100'}`}>
                         {party ? party.name : 'Unknown Customer'}
                       </div>
                       <div className="font-mono text-[11px] text-surface-400">{party?.code}</div>
@@ -428,14 +453,36 @@ export function PaymentsPage() {
                     <td>
                       <StatusBadge status={p.payment_mode} />
                     </td>
+                    <td>
+                      <span
+                        className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase ${
+                          p.status === 'collected' || p.status === 'cleared'
+                            ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                            : p.status === 'pending'
+                            ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
+                            : p.status === 'bounced'
+                            ? 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
+                            : 'bg-surface-200 text-surface-700 dark:bg-surface-700 dark:text-surface-300'
+                        }`}
+                      >
+                        {p.status}
+                      </span>
+                    </td>
                     <td className="text-xs text-surface-600 dark:text-surface-400">
-                      {p.payment_mode === 'cheque' && (
-                        <div className="font-semibold text-blue-600 dark:text-blue-400">
-                          Cheque #{p.cheque_number} ({p.cheque_bank || 'Bank'})
+                      {p.payment_mode === 'upi' && (
+                        <div className="font-mono font-medium text-blue-600 dark:text-blue-400">
+                          {p.reference_number ? `UPI Ref: ${p.reference_number}` : p.notes || '—'}
                         </div>
                       )}
-                      {p.notes && <div className="text-surface-400">{p.notes}</div>}
-                      {p.payment_mode !== 'cheque' && !p.notes && '—'}
+                      {p.payment_mode === 'cheque' && (
+                        <div className="font-semibold text-purple-600 dark:text-purple-400">
+                          #{p.cheque_number} ({p.cheque_bank || 'Bank'})
+                          {p.cheque_date ? ` • ${formatDate(p.cheque_date)}` : ''}
+                        </div>
+                      )}
+                      {p.payment_mode !== 'upi' && p.payment_mode !== 'cheque' && (
+                        <div>{p.notes || '—'}</div>
+                      )}
                     </td>
                     <td className="text-xs text-surface-600 dark:text-surface-400 font-medium">
                       {p.worker ? p.worker.name : '—'}
@@ -443,23 +490,70 @@ export function PaymentsPage() {
                     <td>
                       <div
                         className={`font-black text-sm ${
-                          isPaid ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'
+                          isReversed
+                            ? 'line-through text-surface-400'
+                            : isPaid
+                            ? 'text-emerald-600 dark:text-emerald-400'
+                            : 'text-amber-600 dark:text-amber-400'
                         }`}
                       >
                         {formatCurrency(p.amount)}
                       </div>
                       <div className="text-[9px] font-bold text-surface-400 uppercase">
-                        {isPaid ? 'Paid' : 'Remaining'}
+                        {isReversed ? 'Void / Reversed' : isPaid ? 'Paid' : 'Remaining'}
                       </div>
                     </td>
-                    <td>
-                      <button
-                        onClick={() => deleteMut.mutate(p.id)}
-                        className="p-1.5 rounded-lg hover:bg-danger-50 dark:hover:bg-danger-950/40 text-surface-400 hover:text-danger-600 transition-colors cursor-pointer"
-                        title="Delete payment record"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
+                    <td className="text-right">
+                      <div className="flex items-center justify-end gap-1.5">
+                        {/* View Payment Details */}
+                        <button
+                          onClick={() => setViewingPayment(p)}
+                          className="p-1.5 rounded-lg hover:bg-surface-100 dark:hover:bg-surface-700 text-surface-500 hover:text-surface-900 transition-colors cursor-pointer"
+                          title="View Payment Details"
+                        >
+                          <Eye className="h-4 w-4" />
+                        </button>
+
+                        {/* Cheque Lifecycle: Clear or Bounce */}
+                        {isChequePending && (
+                          <>
+                            <button
+                              onClick={() =>
+                                chequeStatusMut.mutate({ paymentId: p.id, status: 'cleared' })
+                              }
+                              disabled={chequeStatusMut.isPending}
+                              className="px-2 py-1 rounded bg-emerald-100 hover:bg-emerald-200 text-emerald-800 dark:bg-emerald-950 dark:hover:bg-emerald-900 dark:text-emerald-300 text-[10px] font-bold flex items-center gap-1 cursor-pointer"
+                              title="Mark Cheque Cleared"
+                            >
+                              <Check className="h-3 w-3" /> Clear
+                            </button>
+                            <button
+                              onClick={() =>
+                                chequeStatusMut.mutate({ paymentId: p.id, status: 'bounced' })
+                              }
+                              disabled={chequeStatusMut.isPending}
+                              className="px-2 py-1 rounded bg-rose-100 hover:bg-rose-200 text-rose-800 dark:bg-rose-950 dark:hover:bg-rose-900 dark:text-rose-300 text-[10px] font-bold flex items-center gap-1 cursor-pointer"
+                              title="Mark Cheque Bounced"
+                            >
+                              <X className="h-3 w-3" /> Bounce
+                            </button>
+                          </>
+                        )}
+
+                        {/* Reverse / Void Action */}
+                        {!isReversed && (
+                          <button
+                            onClick={() => {
+                              setReversingPayment(p);
+                              setReversalReason('');
+                            }}
+                            className="p-1.5 rounded-lg hover:bg-amber-50 dark:hover:bg-amber-950/40 text-surface-400 hover:text-amber-600 transition-colors cursor-pointer"
+                            title="Reverse Payment (Append-only Ledger)"
+                          >
+                            <RotateCcw className="h-4 w-4" />
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 );
@@ -575,6 +669,169 @@ export function PaymentsPage() {
           onMarkDone={handleUpiConfirm}
         />
       )}
+
+      {/* ── VIEW PAYMENT DETAILS MODAL ────────────────────────────────────── */}
+      <Modal
+        open={!!viewingPayment}
+        onClose={() => setViewingPayment(null)}
+        title="Payment Audit Details"
+        footer={<Button variant="secondary" onClick={() => setViewingPayment(null)}>Close</Button>}
+      >
+        {viewingPayment && (
+          <div className="space-y-3 text-xs">
+            <div className="p-3 rounded-xl bg-surface-50 dark:bg-surface-900 border border-surface-200 dark:border-surface-700 grid grid-cols-2 gap-2">
+              <div>
+                <span className="text-[10px] uppercase text-surface-400 font-semibold block">Party</span>
+                <span className="font-bold text-sm text-surface-900 dark:text-white">
+                  {viewingPayment.party?.name || parties.find((p) => p.id === viewingPayment.party_id)?.name || 'Unknown'}
+                </span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase text-surface-400 font-semibold block">Amount</span>
+                <span className="font-black text-sm text-emerald-600 dark:text-emerald-400">
+                  {formatCurrency(viewingPayment.amount)}
+                </span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase text-surface-400 font-semibold block">Mode</span>
+                <span className="font-semibold uppercase text-surface-800 dark:text-surface-200">{viewingPayment.payment_mode}</span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase text-surface-400 font-semibold block">Status</span>
+                <span className="font-semibold uppercase text-surface-800 dark:text-surface-200">{viewingPayment.status}</span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase text-surface-400 font-semibold block">Payment Date</span>
+                <span>{formatDate(viewingPayment.payment_date)}</span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase text-surface-400 font-semibold block">Recorded At</span>
+                <span>{formatDate(viewingPayment.created_at)}</span>
+              </div>
+            </div>
+
+            {viewingPayment.payment_mode === 'upi' && (
+              <div className="p-3 rounded-xl bg-blue-50/60 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900/50">
+                <span className="text-[10px] uppercase text-blue-600 font-bold block">UPI Transaction Reference</span>
+                <span className="font-mono text-sm font-bold text-blue-900 dark:text-blue-200">
+                  {viewingPayment.reference_number || 'No reference recorded'}
+                </span>
+              </div>
+            )}
+
+            {viewingPayment.payment_mode === 'cheque' && (
+              <div className="p-3 rounded-xl bg-purple-50/60 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-900/50 space-y-1">
+                <span className="text-[10px] uppercase text-purple-600 font-bold block">Cheque Instrument Details</span>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>Number: <span className="font-mono font-bold">#{viewingPayment.cheque_number || '—'}</span></div>
+                  <div>Bank: <span className="font-bold">{viewingPayment.cheque_bank || '—'}</span></div>
+                  <div>Cheque Date: <span className="font-medium">{viewingPayment.cheque_date ? formatDate(viewingPayment.cheque_date) : '—'}</span></div>
+                  <div>Instrument Status: <span className="font-bold uppercase">{viewingPayment.status}</span></div>
+                </div>
+              </div>
+            )}
+
+            {viewingPayment.status === 'reversed' && (
+              <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 space-y-1">
+                <div className="flex items-center gap-1.5 text-rose-800 dark:text-rose-300 font-bold">
+                  <ShieldAlert className="h-4 w-4 text-rose-600" />
+                  <span>Payment Reversed / Voided</span>
+                </div>
+                <div className="text-[11px] text-rose-700 dark:text-rose-300">
+                  <div>Reason: <span className="font-semibold">{viewingPayment.reversal_reason || 'Not specified'}</span></div>
+                  {viewingPayment.reversed_at && <div>Reversed At: {formatDate(viewingPayment.reversed_at)}</div>}
+                  {viewingPayment.reversed_by && <div>Reversed By: {viewingPayment.reversed_by}</div>}
+                </div>
+              </div>
+            )}
+
+            <div className="text-[10px] text-surface-400 space-y-0.5 pt-1">
+              <div>Payment ID: <span className="font-mono">{viewingPayment.id}</span></div>
+              {viewingPayment.delivery_id && <div>Delivery ID: <span className="font-mono">{viewingPayment.delivery_id}</span></div>}
+              {viewingPayment.invoice_id && <div>Invoice ID: <span className="font-mono">{viewingPayment.invoice_id}</span></div>}
+              {viewingPayment.picklist_id && <div>Picklist ID: <span className="font-mono">{viewingPayment.picklist_id}</span></div>}
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* ── REVERSE PAYMENT CONFIRMATION MODAL ────────────────────────────── */}
+      <Modal
+        open={!!reversingPayment}
+        onClose={() => setReversingPayment(null)}
+        title="Reverse Payment Transaction"
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setReversingPayment(null)}>Cancel</Button>
+            <Button
+              variant="danger"
+              loading={reverseMut.isPending}
+              onClick={() => {
+                if (!reversalReason.trim()) {
+                  toast.error('Please provide a mandatory reason for reversing this payment');
+                  return;
+                }
+                if (reversingPayment) {
+                  reverseMut.mutate({ paymentId: reversingPayment.id, reason: reversalReason.trim() });
+                }
+              }}
+            >
+              Confirm Reversal
+            </Button>
+          </>
+        }
+      >
+        {reversingPayment && (
+          <div className="space-y-3 text-xs">
+            <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 flex items-start gap-2">
+              <AlertCircle className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
+              <div className="text-amber-800 dark:text-amber-300 space-y-1">
+                <div className="font-bold">Append-Only Financial Reversal</div>
+                <div>
+                  This action does NOT delete the payment. It will mark the original transaction as reversed
+                  and create an authorized double-entry reversal in the financial ledger, restoring customer receivable.
+                </div>
+              </div>
+            </div>
+
+            <div className="p-3 rounded-xl bg-surface-50 dark:bg-surface-900 border border-surface-200 dark:border-surface-700 grid grid-cols-2 gap-2">
+              <div>
+                <span className="text-[10px] text-surface-400 uppercase font-semibold">Customer</span>
+                <div className="font-bold text-surface-900 dark:text-white">
+                  {reversingPayment.party?.name || parties.find((p) => p.id === reversingPayment.party_id)?.name}
+                </div>
+              </div>
+              <div>
+                <span className="text-[10px] text-surface-400 uppercase font-semibold">Reversal Amount</span>
+                <div className="font-black text-rose-600 dark:text-rose-400">
+                  {formatCurrency(reversingPayment.amount)}
+                </div>
+              </div>
+              <div>
+                <span className="text-[10px] text-surface-400 uppercase font-semibold">Payment Mode</span>
+                <div className="font-semibold uppercase">{reversingPayment.payment_mode}</div>
+              </div>
+              <div>
+                <span className="text-[10px] text-surface-400 uppercase font-semibold">Original Date</span>
+                <div>{formatDate(reversingPayment.payment_date)}</div>
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <label className="block text-xs font-bold text-surface-700 dark:text-surface-300">
+                Mandatory Reversal Reason *
+              </label>
+              <textarea
+                rows={3}
+                placeholder="e.g. Cheque dishonored, wrong party selected, cash handover dispute..."
+                value={reversalReason}
+                onChange={(e) => setReversalReason(e.target.value)}
+                className="w-full p-2.5 text-xs rounded-xl border border-surface-300 dark:border-surface-600 bg-white dark:bg-surface-800 text-surface-900 dark:text-white outline-none focus:ring-2 focus:ring-rose-500/30"
+              />
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

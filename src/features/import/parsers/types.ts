@@ -18,6 +18,11 @@ export interface ParsedPicklistParty {
   totalAmount: number;
 }
 
+export interface ParsedPicklistLoadItem {
+  sku: string;
+  quantity: number;
+}
+
 export interface ParsedPicklist {
   picklistNumber: string;
   date: string;
@@ -25,6 +30,7 @@ export interface ParsedPicklist {
   routeName: string;
   parties: ParsedPicklistParty[];
   items: ParsedPicklistItem[];
+  loadItems?: ParsedPicklistLoadItem[];
   totalAmount: number;
   totalItems: number;
   pageCount: number;

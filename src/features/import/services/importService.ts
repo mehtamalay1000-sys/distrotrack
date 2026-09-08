@@ -37,10 +37,22 @@ export async function confirmImportToDatabase(
       .maybeSingle();
 
     if (existingPicklist) {
-      throw new Error(
-        `DUPLICATE IMPORT BLOCKED: Picklist "${picklist.picklistNumber}" was already imported on ${existingPicklist.date} (status: ${existingPicklist.status}). ` +
-        `To re-import, first delete the existing picklist from the Admin panel, or use a corrected PDF with a different picklist number.`
-      );
+      const errMsg = `DUPLICATE IMPORT BLOCKED: Picklist "${picklist.picklistNumber}" was already imported on ${existingPicklist.date} (status: ${existingPicklist.status}). ` +
+        `To re-import, first delete the existing picklist from the Admin panel, or use a corrected PDF with a different picklist number.`;
+      try {
+        await supabase.rpc('log_system_event', {
+          p_user_id: assignedWorkerId || '',
+          p_user_name: 'Admin',
+          p_role: 'admin',
+          p_module: 'import',
+          p_action: 'import_blocked_duplicate',
+          p_status: 'failure',
+          p_detail: errMsg,
+          p_entity_type: 'picklist',
+          p_entity_id: existingPicklist.id,
+        });
+      } catch {}
+      throw new Error(errMsg);
     }
   } catch (err) {
     // Re-throw our own duplicate error immediately
@@ -119,6 +131,19 @@ export async function confirmImportToDatabase(
       .single();
 
     if (error || !data) {
+      try {
+        await supabase.rpc('log_system_event', {
+          p_user_id: assignedWorkerId || '',
+          p_user_name: 'Admin',
+          p_role: 'admin',
+          p_module: 'import',
+          p_action: 'import_failed',
+          p_status: 'failure',
+          p_detail: `Failed to persist picklist #${picklist.picklistNumber}: ${error?.message ?? 'Unknown DB error'}`,
+          p_entity_type: 'picklist',
+          p_entity_id: picklist.picklistNumber,
+        });
+      } catch {}
       picklistRecord = mockStore.savePicklist({
         picklist_number: picklist.picklistNumber,
         date: effectiveDate,
@@ -146,6 +171,40 @@ export async function confirmImportToDatabase(
     });
   }
 
+  // Stage 4B: Persist Page 1 load manifest to picklist_load_items
+  if (picklistRecord?.id) {
+    const manifestItems = (picklist.loadItems && picklist.loadItems.length > 0)
+      ? picklist.loadItems
+      : Array.from(
+          picklist.items.reduce((acc, it) => {
+            if (it.sku && it.quantity > 0) {
+              acc.set(it.sku, (acc.get(it.sku) || 0) + it.quantity);
+            }
+            return acc;
+          }, new Map<string, number>()).entries()
+        ).map(([sku, quantity]) => ({ sku, quantity }));
+
+    for (const lItem of manifestItems) {
+      try {
+        let prod = await lookupProductBySku(lItem.sku);
+        if (!prod) {
+          const matchedItem = picklist.items.find((it) => it.sku === lItem.sku);
+          prod = await upsertProductBySku(lItem.sku, matchedItem?.productName || lItem.sku, 0, matchedItem?.rate || 0);
+        }
+        if (prod) {
+          await supabase.from('picklist_load_items').upsert({
+            picklist_id: picklistRecord.id,
+            product_id: prod.id,
+            sku: lItem.sku,
+            loaded_quantity: lItem.quantity,
+          }, { onConflict: 'picklist_id,product_id' });
+        }
+      } catch (loadErr) {
+        console.warn(`[IMPORT] Error saving picklist_load_item for ${lItem.sku}:`, loadErr);
+      }
+    }
+  }
+
   // 3. Process Parties & Products & Deliveries
   for (const pair of matchResult.pairs) {
     if (!pair.partyCode) continue;
@@ -156,20 +215,21 @@ export async function confirmImportToDatabase(
     if (pair.invoice) {
       // Check if this invoice number was already imported (duplicate invoice guard)
       try {
+        const cleanInvNo = pair.invoice.invoiceNumber.trim();
         const { data: existingInvoice } = await supabase
           .from('invoices')
           .select('id, invoice_number')
-          .eq('invoice_number', pair.invoice.invoiceNumber)
+          .eq('invoice_number', cleanInvNo)
           .maybeSingle();
 
         if (existingInvoice) {
-          console.warn(`[IMPORT] Skipping duplicate invoice: ${pair.invoice.invoiceNumber} already exists (id: ${existingInvoice.id})`);
+          console.warn(`[IMPORT] Skipping duplicate invoice: ${cleanInvNo} already exists (id: ${existingInvoice.id})`);
           invoiceId = existingInvoice.id;
         } else {
-          const { data: invRecord } = await supabase
+          const { data: invRecord, error: invError } = await supabase
             .from('invoices')
             .insert({
-              invoice_number: pair.invoice.invoiceNumber,
+              invoice_number: cleanInvNo,
               picklist_id: picklistRecord.id,
               party_id: party.id,
               route_code: pair.invoice.routeCode || picklist.routeCode,
@@ -184,7 +244,9 @@ export async function confirmImportToDatabase(
             .select('id')
             .single();
 
-          if (invRecord) {
+          if (invError) {
+            console.error(`[IMPORT] Error inserting invoice ${cleanInvNo}:`, invError.message);
+          } else if (invRecord) {
             invoiceId = invRecord.id;
             for (const item of pair.invoice.items) {
               // Validate product before upserting to database
@@ -293,20 +355,41 @@ export async function confirmImportToDatabase(
 
     // Create delivery workload — with duplicate guard
     let deliveryId: string | null = null;
-    try {
-      // Check if a delivery for this picklist+party already exists (idempotency)
-      const { data: existingDelivery } = await supabase
-        .from('deliveries')
-        .select('id')
-        .eq('picklist_id', picklistRecord.id)
-        .eq('party_id', party.id)
-        .maybeSingle();
+    let isExistingDelivery = false;
 
-      if (existingDelivery) {
-        console.warn(`[IMPORT] Delivery for party ${pair.partyCode} on picklist ${picklist.picklistNumber} already exists (id: ${existingDelivery.id}) — skipping.`);
-        deliveryId = existingDelivery.id;
+    try {
+      if (invoiceId) {
+        // 1. Invoice-backed delivery: search strictly by invoice_id
+        const { data: delByInv } = await supabase
+          .from('deliveries')
+          .select('id')
+          .eq('invoice_id', invoiceId)
+          .maybeSingle();
+
+        if (delByInv) {
+          deliveryId = delByInv.id;
+          isExistingDelivery = true;
+          console.warn(`[IMPORT] Delivery for invoice ${invoiceId} already exists (id: ${deliveryId}) — skipping creation.`);
+        }
       } else {
-        const { data: delRecord } = await supabase.from('deliveries').insert({
+        // 2. Picklist-only delivery (no invoice): search by picklist_id + party_id
+        const { data: delByParty } = await supabase
+          .from('deliveries')
+          .select('id')
+          .eq('picklist_id', picklistRecord.id)
+          .eq('party_id', party.id)
+          .is('invoice_id', null)
+          .maybeSingle();
+
+        if (delByParty) {
+          deliveryId = delByParty.id;
+          isExistingDelivery = true;
+          console.warn(`[IMPORT] Picklist-only delivery for party ${pair.partyCode} on picklist ${picklist.picklistNumber} already exists (id: ${deliveryId}) — skipping creation.`);
+        }
+      }
+
+      if (!isExistingDelivery) {
+        const { data: delRecord, error: delError } = await supabase.from('deliveries').insert({
           picklist_id: picklistRecord.id,
           party_id: party.id,
           worker_id: assignedWorkerId || null,
@@ -318,13 +401,18 @@ export async function confirmImportToDatabase(
           notes: `Generated from SAP Picklist ${picklist.picklistNumber}`,
         }).select('id').single();
 
-        if (delRecord) deliveryId = delRecord.id;
+        if (delError) {
+          console.error(`[IMPORT] Error creating delivery for party ${pair.partyCode}:`, delError.message);
+        } else if (delRecord) {
+          deliveryId = delRecord.id;
+        }
       }
     } catch (delErr) {
-      console.error(`[IMPORT] Error creating delivery for party ${pair.partyCode}:`, delErr);
+      console.error(`[IMPORT] Error querying/creating delivery for party ${pair.partyCode}:`, delErr);
     }
 
     const mockDel = mockStore.saveDelivery({
+      id: deliveryId || undefined,
       picklist_id: picklistRecord.id,
       party_id: party.id,
       worker_id: assignedWorkerId || null,
@@ -337,36 +425,55 @@ export async function confirmImportToDatabase(
 
     const targetDelId = deliveryId || mockDel.id;
 
-    // Create delivery_items for worker delivery view (prefer invoice.items for exact bill match, fallback to picklistParty.items)
-    const sourceItems = (pair.invoice?.items && pair.invoice.items.length > 0)
-      ? pair.invoice.items
-      : (pair.picklistParty?.items || []);
+    // ── Delivery Items: ONLY insert if this is a NEW delivery ────────
+    // If the delivery already existed, delivery_items already exist.
+    // Re-inserting would duplicate line items for the delivery.
+    if (!isExistingDelivery && targetDelId) {
+      const sourceItems = (pair.invoice?.items && pair.invoice.items.length > 0)
+        ? pair.invoice.items
+        : (pair.picklistParty?.items || []);
 
-    for (const item of sourceItems) {
-      try {
-        await supabase.from('delivery_items').insert({
+      for (const item of sourceItems) {
+        let prod = await lookupProductBySku(item.sku);
+        try {
+          await supabase.from('delivery_items').insert({
+            delivery_id: targetDelId,
+            product_id: prod?.id || null,
+            sku: item.sku,
+            product_name: item.productName,
+            ordered_qty: item.quantity,
+            delivered_qty: 0,
+            delivered_free_qty: 0,
+            returned_qty: 0,
+            returned_free_qty: 0,
+            damaged_qty: 0,
+            damaged_free_qty: 0,
+            free_quantity: item.freeQuantity || 0,
+            rate: item.rate,
+            amount: item.amount,
+          });
+        } catch {
+          // ignore
+        }
+        mockStore.saveDeliveryItem({
           delivery_id: targetDelId,
+          product_id: prod?.id || null,
           sku: item.sku,
           product_name: item.productName,
           ordered_qty: item.quantity,
-          delivered_qty: item.quantity,
+          delivered_qty: 0,
+          delivered_free_qty: 0,
+          returned_qty: 0,
+          returned_free_qty: 0,
+          damaged_qty: 0,
+          damaged_free_qty: 0,
           free_quantity: item.freeQuantity || 0,
           rate: item.rate,
           amount: item.amount,
         });
-      } catch {
-        // ignore
       }
-      mockStore.saveDeliveryItem({
-        delivery_id: targetDelId,
-        sku: item.sku,
-        product_name: item.productName,
-        ordered_qty: item.quantity,
-        delivered_qty: item.quantity,
-        free_quantity: item.freeQuantity || 0,
-        rate: item.rate,
-        amount: item.amount,
-      });
+    } else if (isExistingDelivery) {
+      console.log(`[IMPORT] Delivery ${targetDelId} already exists — delivery_items insertion skipped.`);
     }
   }
 
@@ -398,6 +505,21 @@ export async function confirmImportToDatabase(
         link: '/w/route',
       });
     }
+
+    // Log audit event for successful import
+    try {
+      await supabase.rpc('log_system_event', {
+        p_user_id: assignedWorkerId || '',
+        p_user_name: 'Admin',
+        p_role: 'admin',
+        p_module: 'import',
+        p_action: 'import_completed',
+        p_status: 'success',
+        p_detail: `Picklist #${picklistRecord.picklist_number} imported successfully (${matchResult.pairs.length} stops, ₹${Number(picklist.totalAmount || 0).toLocaleString('en-IN')})`,
+        p_entity_type: 'picklist',
+        p_entity_id: picklistRecord.id,
+      });
+    } catch {}
   } catch (err) {
     console.error('Failed to dispatch import notification:', err);
   }

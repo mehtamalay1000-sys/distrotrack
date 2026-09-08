@@ -67,7 +67,7 @@ export function DashboardPage() {
           icon={<AlertCircle className="h-5 w-5 text-amber-600 dark:text-amber-400" />}
         />
         <StatCard
-          label="Today's Expenses"
+          label="Today's Approved Expenses"
           value={formatCurrency(stats.totalExpensesToday)}
           icon={<Receipt className="h-5 w-5 text-red-500 dark:text-red-400" />}
         />

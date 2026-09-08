@@ -29,3 +29,7 @@ dist-ssr
 *.sln
 *.sw?
 supabase/.temp/
+MASTER_OVERSIGHT_GAP_AUDIT.md
+ARCHITECTURE_AUDIT.md
+STAGE_8_SECURITY_AUDIT.md
+

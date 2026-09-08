@@ -119,14 +119,6 @@ export async function deleteRoute(id: string): Promise<void> {
 
     const delIdList = Array.from(deliveryIds);
 
-    // 5. Delete ALL payments linked to these deliveries OR parties
-    if (delIdList.length > 0) {
-      await supabase.from('payments').delete().in('delivery_id', delIdList);
-    }
-    if (partyIds.length > 0) {
-      await supabase.from('payments').delete().in('party_id', partyIds);
-    }
-
     // 6. Delete delivery items & deliveries
     if (delIdList.length > 0) {
       await supabase.from('delivery_items').delete().in('delivery_id', delIdList);

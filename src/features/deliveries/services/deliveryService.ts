@@ -39,7 +39,6 @@ export async function updateDeliveryStatus(
 
 export async function deleteDelivery(id: string): Promise<void> {
   try {
-    await supabase.from('payments').delete().eq('delivery_id', id);
     await supabase.from('delivery_items').delete().eq('delivery_id', id);
     await supabase.from('deliveries').delete().eq('id', id);
   } catch (err) {

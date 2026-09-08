@@ -287,27 +287,29 @@ export function WorkersPage() {
       const routeCash =
         rPicklists.reduce((sum, pl) => sum + Number(pl.total_cash || 0), 0) ||
         rDeliveries.reduce((sum, d) => {
-          const pt = parties.find((p) => p.id === d.party_id);
-          const isCredit = (pt && Number(pt.outstanding_amount || 0) > 0) || d.payment_mode === 'credit';
-          if (!isCredit && (d.status === 'delivered' || Number(d.collected_amount || 0) > 0)) {
-            return sum + Number(d.collected_amount || d.delivered_amount || d.total_amount || 0);
+          if (d.status === 'delivered' || d.status === 'partial') {
+            return sum + Number(d.collected_amount || 0);
           }
           return sum;
         }, 0);
 
+      const routeUpi =
+        rPicklists.reduce((sum, pl) => sum + Number(pl.total_upi || 0), 0) ||
+        workerPayments
+          .filter((p) => p.payment_mode === 'upi' && p.status !== 'reversed' && p.status !== 'bounced' && (p.delivery?.picklist?.route_id === r.id || p.party?.route_id === r.id))
+          .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
       const routeCheque =
         rPicklists.reduce((sum, pl) => sum + Number(pl.total_cheque || 0), 0) ||
         workerPayments
-          .filter((p) => (p.payment_mode === 'cheque' || p.payment_mode === 'upi') && (p.delivery?.picklist?.route_id === r.id || p.party?.route_id === r.id))
+          .filter((p) => p.payment_mode === 'cheque' && p.status !== 'reversed' && p.status !== 'bounced' && (p.delivery?.picklist?.route_id === r.id || p.party?.route_id === r.id))
           .reduce((sum, p) => sum + Number(p.amount || 0), 0);
 
       const routeCredit =
         rPicklists.reduce((sum, pl) => sum + Number(pl.total_credit || 0), 0) ||
         rDeliveries.reduce((sum, d) => {
-          const pt = parties.find((p) => p.id === d.party_id);
-          const isCredit = (pt && Number(pt.outstanding_amount || 0) > 0) || d.payment_mode === 'credit';
-          if (isCredit) {
-            return sum + Number(d.delivered_amount || d.total_amount || pt?.outstanding_amount || 0);
+          if (d.status === 'delivered' || d.status === 'partial') {
+            return sum + Math.max(0, Number(d.delivered_amount || 0) - Number(d.collected_amount || 0));
           }
           return sum;
         }, 0);
@@ -319,9 +321,10 @@ export function WorkersPage() {
         route: r,
         marketSales: routeMarketSales,
         cashCollected: routeCash,
+        upiCollected: routeUpi,
         chequeCollected: routeCheque,
         creditExtended: routeCredit,
-        totalCollected: routeCash + routeCheque,
+        totalCollected: routeCash + routeUpi + routeCheque,
         completedDeliveries: completedCount,
         totalDeliveries: totalDeliveries,
         partiesCount: rParties.length,
@@ -332,6 +335,8 @@ export function WorkersPage() {
       workerPicklists.reduce((sum, pl) => sum + Number(pl.total_amount || 0), 0);
     const totalCashCollected = routeBreakdown.reduce((sum, rb) => sum + rb.cashCollected, 0) ||
       workerPayments.filter((p) => p.payment_mode === 'cash').reduce((sum, p) => sum + Number(p.amount || 0), 0);
+    const totalUpiCollected = routeBreakdown.reduce((sum, rb) => sum + rb.upiCollected, 0) ||
+      workerPayments.filter((p) => p.payment_mode === 'upi').reduce((sum, p) => sum + Number(p.amount || 0), 0);
     const totalCreditExtended = routeBreakdown.reduce((sum, rb) => sum + rb.creditExtended, 0) ||
       workerPayments.filter((p) => p.payment_mode === 'credit').reduce((sum, p) => sum + Number(p.amount || 0), 0);
     const totalChequeCollected = routeBreakdown.reduce((sum, rb) => sum + rb.chequeCollected, 0);
@@ -343,9 +348,10 @@ export function WorkersPage() {
       routes: routeBreakdown,
       totalMarketDone,
       totalCashCollected,
+      totalUpiCollected,
       totalCreditExtended,
       totalChequeCollected,
-      totalCollected: totalCashCollected + totalChequeCollected,
+      totalCollected: totalCashCollected + totalUpiCollected + totalChequeCollected,
       achievementPercent,
       target,
     };

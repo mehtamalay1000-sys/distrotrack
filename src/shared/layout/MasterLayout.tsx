@@ -8,35 +8,31 @@ import {
   Menu, X, LogOut, ChevronDown, Sun, Moon, Shield,
   Briefcase, ChevronRight,
 } from 'lucide-react';
+import { NotificationBell } from '@/shared/ui';
 
 const navSections: Array<{
   label: string;
   items: Array<{ to: string; label: string; icon: React.ElementType; end?: boolean }>;
 }> = [
   {
-    label: 'Overview',
+    label: 'Executive Control',
     items: [
       { to: '/master', label: 'Dashboard', icon: LayoutDashboard, end: true },
     ],
   },
   {
-    label: 'Business',
+    label: 'Oversight & Intelligence',
     items: [
-      { to: '/master/business', label: 'Business Data', icon: Briefcase },
+      { to: '/master/business', label: 'Business Data & Stock', icon: Briefcase },
+      { to: '/master/workers', label: 'Worker Monitor', icon: Users },
+      { to: '/master/reports', label: 'Analytical Reports', icon: BarChart3 },
       { to: '/master/history', label: 'Historical Analysis', icon: History },
     ],
   },
   {
-    label: 'Operations',
-    items: [
-      { to: '/master/workers', label: 'Worker Monitor', icon: Users },
-    ],
-  },
-  {
-    label: 'System',
+    label: 'Governance & Audit',
     items: [
       { to: '/master/system', label: 'System & Audit Log', icon: Activity },
-      { to: '/master/reports', label: 'Reports', icon: BarChart3 },
     ],
   },
 ];
@@ -181,6 +177,9 @@ export function MasterLayout() {
           </div>
 
           <div className="flex items-center gap-2">
+            {/* Realtime Notification Bell */}
+            <NotificationBell role="admin" />
+
             {/* Master badge */}
             <span className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-indigo-50 border border-indigo-200 text-[11px] font-bold text-indigo-700 uppercase tracking-wide">
               <Shield className="h-3 w-3" />

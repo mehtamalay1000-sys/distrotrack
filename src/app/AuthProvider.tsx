@@ -182,11 +182,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           return { error: 'Incorrect Master PIN. Please try again.' };
         }
 
-        // ── 2. ADMIN LOGIN — uses verify_admin_pin RPC ──────────────
-        // The verify_admin_pin RPC checks both the admin PIN and (as a
-        // second factor) whether the entered PIN is the master PIN,
-        // returning the effective role. This eliminates plain-text
-        // PIN comparisons in frontend code for admin accounts.
+        // ── 2. ADMIN LOGIN — uses verify_admin_pin RPC exclusively ─
+        // SECURITY: Plain-text PINs are NEVER compared in frontend code,
+        // and direct DB queries to pin_users have been removed.
+        // If the RPC fails or is unreachable, login fails closed.
         if (role === 'owner') {
           let rpcResult: VerifyAdminPinResult | null = null;
 
@@ -196,60 +195,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               p_pin: cleanPin,
             });
             if (rpcError) {
-              // RPC unavailable — fall back to direct DB comparison for resilience
-              console.warn('verify_admin_pin RPC error, falling back:', rpcError.message);
-            } else {
-              rpcResult = data as VerifyAdminPinResult;
+              console.error('verify_admin_pin RPC error:', rpcError.message);
+              return { error: 'Authentication service unavailable. Please try again.' };
             }
+            rpcResult = data as VerifyAdminPinResult;
           } catch (rpcErr) {
-            console.warn('verify_admin_pin network error, falling back:', rpcErr);
+            console.error('verify_admin_pin network error:', rpcErr);
+            return { error: 'Connection error. Please check your network and try again.' };
           }
 
-          if (rpcResult) {
-            if (rpcResult.error || !rpcResult.role) {
-              void logEvent(userId, rpcResult.name || 'Unknown', 'owner', 'auth', 'failed_login', 'failure', rpcResult.error || 'PIN mismatch');
-              return { error: rpcResult.error || 'Incorrect PIN. Please try again.' };
-            }
-            // RPC may return 'master' role if master PIN was used on an admin account
-            const effectiveRole = (rpcResult.role === 'master' ? 'master' : 'owner') as UserRole;
-            const pinSession: PinSession = {
-              userId: rpcResult.role === 'master' ? 'master-001' : userId,
-              name: rpcResult.role === 'master' ? 'Master Administrator' : rpcResult.name,
-              role: effectiveRole,
-              phone: null,
-            };
-            applySession(pinSession);
-            void logEvent(pinSession.userId, pinSession.name, effectiveRole, 'auth', 'login', 'success', `${effectiveRole} login via RPC`);
-            return { error: null };
+          if (!rpcResult || rpcResult.error || !rpcResult.role) {
+            const errMessage = rpcResult?.error || 'Incorrect PIN. Please try again.';
+            void logEvent(userId, rpcResult?.name || 'Unknown', 'owner', 'auth', 'failed_login', 'failure', errMessage);
+            return { error: errMessage };
           }
 
-          // Fallback: direct DB query if RPC is unavailable
-          const { data: adminData, error: adminError } = await supabase
-            .from('pin_users')
-            .select('id, name, phone, pin, status')
-            .eq('id', userId)
-            .eq('status', 'active')
-            .single();
-
-          if (adminError || !adminData) {
-            return { error: 'Admin account not found. Please try again.' };
-          }
-
-          const storedPin = String(adminData.pin ?? '').trim();
-          if (storedPin && storedPin === cleanPin) {
-            const pinSession: PinSession = {
-              userId: adminData.id,
-              name: adminData.name,
-              role: 'owner',
-              phone: adminData.phone ?? null,
-            };
-            applySession(pinSession);
-            void logEvent(adminData.id, adminData.name, 'owner', 'auth', 'login', 'success', 'Admin login (fallback path)');
-            return { error: null };
-          }
-
-          void logEvent(userId, adminData.name, 'owner', 'auth', 'failed_login', 'failure', 'Incorrect PIN entered');
-          return { error: 'Incorrect PIN. Please try again.' };
+          // RPC may return 'master' role if master PIN was used on an admin account
+          const effectiveRole = (rpcResult.role === 'master' ? 'master' : 'owner') as UserRole;
+          const pinSession: PinSession = {
+            userId: rpcResult.role === 'master' ? 'master-001' : userId,
+            name: rpcResult.role === 'master' ? 'Master Administrator' : rpcResult.name,
+            role: effectiveRole,
+            phone: null,
+          };
+          applySession(pinSession);
+          void logEvent(pinSession.userId, pinSession.name, effectiveRole, 'auth', 'login', 'success', `${effectiveRole} login via RPC`);
+          return { error: null };
         }
 
         // ── 3. WORKER / SALESMAN LOGIN ──────────────────────────────

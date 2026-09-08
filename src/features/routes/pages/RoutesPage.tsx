@@ -9,10 +9,11 @@ import { getParties } from '@/features/parties/services/partyService';
 import { getDeliveries } from '@/features/deliveries/services/deliveryService';
 import { getPicklists } from '@/features/picklists/services/picklistService';
 import { getPayments, createPayment } from '@/features/payments/services/paymentService';
+import { getRouteProfitability } from '@/features/expenses/services/expenseService';
 import { supabase } from '@/lib/supabase';
 import { mockStore } from '@/lib/mockStore';
 import { formatCurrency } from '@/shared/utils/format';
-import type { Route, PaymentMode } from '@/lib/database.types';
+import type { Route, PaymentMode, RouteProfitabilityItem } from '@/lib/database.types';
 import { AdminRouteEditorModal } from '../components/AdminRouteEditorModal';
 
 export function RoutesPage() {
@@ -32,6 +33,10 @@ export function RoutesPage() {
   const { data: deliveries = [] } = useQuery({ queryKey: ['deliveries'], queryFn: getDeliveries });
   const { data: picklists = [] } = useQuery({ queryKey: ['picklists'], queryFn: getPicklists });
   const { data: payments = [] } = useQuery({ queryKey: ['payments'], queryFn: getPayments });
+  const { data: routeProfitability } = useQuery({
+    queryKey: ['route-profitability'],
+    queryFn: () => getRouteProfitability(),
+  });
 
   const createMut = useMutation({
     mutationFn: createRoute,
@@ -71,13 +76,14 @@ export function RoutesPage() {
       const routePicklists = picklists.filter(pl => pl.route_id === route.id || pl.route?.code === route.code);
 
       let routeTotalCash = 0;
+      let routeTotalUpi = 0;
       let routeTotalCheque = 0;
       let routeTotalCredit = 0;
 
       for (const del of routeDeliveries) {
         const party = parties.find(p => p.id === del.party_id);
         const isCredit = (party && Number(party.outstanding_amount || 0) > 0) || del.payment_mode === 'credit';
-        const billAmt = Number(del.total_amount || del.delivered_amount || 0);
+        const billAmt = Number(del.delivered_amount || del.total_amount || 0);
 
         const mode: PaymentMode = isCredit
           ? 'credit'
@@ -85,7 +91,8 @@ export function RoutesPage() {
         const collectedAmt = isCredit ? 0 : billAmt;
 
         if (mode === 'cash') routeTotalCash += billAmt;
-        else if (mode === 'cheque' || mode === 'upi') routeTotalCheque += billAmt;
+        else if (mode === 'upi') routeTotalUpi += billAmt;
+        else if (mode === 'cheque') routeTotalCheque += billAmt;
         else if (mode === 'credit') routeTotalCredit += billAmt;
 
         const deliveredAt = del.delivered_at || new Date().toISOString();
@@ -113,7 +120,7 @@ export function RoutesPage() {
         });
 
         // Record payment
-        if (billAmt > 0) {
+        if (billAmt > 0 && mode !== 'credit') {
           await createPayment({
             delivery_id: del.id,
             party_id: del.party_id,
@@ -125,7 +132,7 @@ export function RoutesPage() {
       }
 
       // Update route picklists
-      const totalCollected = routeTotalCash + routeTotalCheque;
+      const totalCollected = routeTotalCash + routeTotalUpi + routeTotalCheque;
       for (const pl of routePicklists) {
         try {
           await supabase.from('picklists').update({
@@ -134,6 +141,7 @@ export function RoutesPage() {
             completed_parties: routeDeliveries.length,
             total_collected: totalCollected,
             total_cash: routeTotalCash,
+            total_upi: routeTotalUpi,
             total_cheque: routeTotalCheque,
             total_credit: routeTotalCredit,
           }).eq('id', pl.id);
@@ -272,35 +280,21 @@ export function RoutesPage() {
             const partyIds = new Set(routeParties.map(p => p.id));
 
             // Get picklists for this route
-            const routePicklists = picklists.filter(pl => pl.route_id === route.id || pl.route?.code === route.code);
-            const routeTotalAmount = routePicklists.reduce((sum, pl) => sum + Number(pl.total_amount || 0), 0) ||
-              routeParties.reduce((sum, p) => sum + Number(p.outstanding_amount || 0), 0);
+            const routePicklists = picklists.filter((pl) => pl.route_id === route.id || pl.route?.code === route.code);
+            const rProfit = routeProfitability?.routes?.find((it: RouteProfitabilityItem) => it.route_id === route.id || it.route_code === route.code);
+
+            const routeSales = rProfit ? rProfit.sales : (routePicklists.reduce((sum, pl) => sum + Number(pl.total_amount || 0), 0) ||
+              routeParties.reduce((sum, p) => sum + Number(p.outstanding_amount || 0), 0));
 
             // Get deliveries on this route
             const routeDeliveries = deliveries.filter(d => partyIds.has(d.party_id) || d.picklist?.route_id === route.id);
             const completedCount = routeDeliveries.filter(d => d.status === 'delivered').length;
             const isAllDelivered = routeDeliveries.length > 0 && completedCount === routeDeliveries.length;
 
-            // Calculate cash collected vs credit for this route
-            const routeCashCollected = routePicklists.reduce((s, pl) => s + Number(pl.total_cash || 0), 0) ||
-              routeDeliveries.reduce((sum, d) => {
-                const party = parties.find(p => p.id === d.party_id);
-                const isCredit = (party && Number(party.outstanding_amount || 0) > 0) || d.payment_mode === 'credit';
-                if (!isCredit && (d.status === 'delivered' || isAllDelivered)) {
-                  return sum + Number(d.collected_amount || d.delivered_amount || d.total_amount || 0);
-                }
-                return sum;
-              }, 0);
-
-            const routeCreditAmount = routePicklists.reduce((s, pl) => s + Number(pl.total_credit || 0), 0) ||
-              routeDeliveries.reduce((sum, d) => {
-                const party = parties.find(p => p.id === d.party_id);
-                const isCredit = (party && Number(party.outstanding_amount || 0) > 0) || d.payment_mode === 'credit';
-                if (isCredit && (d.status === 'delivered' || isAllDelivered)) {
-                  return sum + Number(d.delivered_amount || d.total_amount || party?.outstanding_amount || 0);
-                }
-                return sum;
-              }, 0);
+            const routeCashCollected = rProfit ? rProfit.cash_collected : (routePicklists.reduce((s, pl) => s + Number(pl.total_cash || 0), 0));
+            const routeCreditAmount = rProfit ? rProfit.credit_sales : (routePicklists.reduce((s, pl) => s + Number(pl.total_credit || 0), 0));
+            const routeApprovedExpenses = rProfit ? rProfit.approved_expenses : 0;
+            const routeContribution = rProfit ? rProfit.contribution_before_cogs : (routeSales - routeApprovedExpenses);
 
             return (
               <Card key={route.id} className="p-0 overflow-hidden border border-surface-200 dark:border-surface-700">
@@ -338,16 +332,30 @@ export function RoutesPage() {
                       </select>
                     </div>
 
-                    {/* Total Route Amount */}
+                    {/* Delivered Sales */}
                     <div className="text-xs">
-                      <span className="text-surface-400 block uppercase font-medium text-[10px]">Total Route Value</span>
-                      <span className="font-bold text-primary-700 dark:text-primary-400 text-sm">{formatCurrency(routeTotalAmount)}</span>
+                      <span className="text-surface-400 block uppercase font-medium text-[10px]">Delivered Sales</span>
+                      <span className="font-bold text-primary-700 dark:text-primary-400 text-sm">{formatCurrency(routeSales)}</span>
                     </div>
 
                     {/* Cash Collected */}
                     <div className="text-xs">
                       <span className="text-surface-400 block uppercase font-medium text-[10px]">Cash Collected</span>
                       <span className="font-black text-emerald-700 dark:text-emerald-400 text-sm">{formatCurrency(routeCashCollected)}</span>
+                    </div>
+
+                    {/* Approved Expenses */}
+                    {routeApprovedExpenses > 0 && (
+                      <div className="text-xs">
+                        <span className="text-surface-400 block uppercase font-medium text-[10px]">Approved Costs</span>
+                        <span className="font-black text-rose-600 dark:text-rose-400 text-sm">{formatCurrency(routeApprovedExpenses)}</span>
+                      </div>
+                    )}
+
+                    {/* Contribution Before COGS */}
+                    <div className="text-xs">
+                      <span className="text-surface-400 block uppercase font-medium text-[10px]">Contribution Before COGS</span>
+                      <span className="font-black text-indigo-700 dark:text-indigo-400 text-sm">{formatCurrency(routeContribution)}</span>
                     </div>
 
                     {/* Credit / Udhar */}

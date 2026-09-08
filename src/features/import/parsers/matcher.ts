@@ -14,20 +14,26 @@ export function matchInvoices(picklist: ParsedPicklist, bills: ParsedBillsResult
   const pairs: MatchPair[] = [];
   const warnings: string[] = [];
 
-  const invoiceMapByPartyCode = new Map<string, typeof bills.invoices[0]>();
+  const invoiceMapByPartyCode = new Map<string, typeof bills.invoices>();
   const invoiceMapByInvoiceNo = new Map<string, typeof bills.invoices[0]>();
-  const invoiceMapByPartyName = new Map<string, typeof bills.invoices[0]>();
+  const invoiceMapByPartyName = new Map<string, typeof bills.invoices>();
   const matchedInvoiceNumbers = new Set<string>();
 
   for (const inv of bills.invoices) {
     if (inv.partyCode && inv.partyCode !== 'UNKNOWN') {
-      invoiceMapByPartyCode.set(normalizeCode(inv.partyCode), inv);
+      const codeKey = normalizeCode(inv.partyCode);
+      const list = invoiceMapByPartyCode.get(codeKey) || [];
+      list.push(inv);
+      invoiceMapByPartyCode.set(codeKey, list);
     }
     if (inv.invoiceNumber) {
       invoiceMapByInvoiceNo.set(inv.invoiceNumber.toUpperCase(), inv);
     }
     if (inv.partyName) {
-      invoiceMapByPartyName.set(normalizeName(inv.partyName), inv);
+      const nameKey = normalizeName(inv.partyName);
+      const list = invoiceMapByPartyName.get(nameKey) || [];
+      list.push(inv);
+      invoiceMapByPartyName.set(nameKey, list);
     }
   }
 
@@ -37,11 +43,24 @@ export function matchInvoices(picklist: ParsedPicklist, bills: ParsedBillsResult
     const nameKey = normalizeName(party.partyName);
 
     // Primary match: partyCode (Ret. Code e.g. C000727249 / 727249)
-    let matchedInvoice = invoiceMapByPartyCode.get(codeKey);
+    let matchedInvoice: typeof bills.invoices[0] | undefined;
+    const partyInvoices = invoiceMapByPartyCode.get(codeKey);
+    if (partyInvoices && partyInvoices.length > 0) {
+      const available = partyInvoices.filter(inv => !matchedInvoiceNumbers.has(inv.invoiceNumber));
+      if (available.length > 0) {
+        matchedInvoice = available.find(inv => Math.abs(party.totalAmount - inv.netAmount) < 5.0) || available[0];
+      }
+    }
 
     // Secondary fallback: normalized name match
     if (!matchedInvoice && nameKey) {
-      matchedInvoice = invoiceMapByPartyName.get(nameKey);
+      const nameInvoices = invoiceMapByPartyName.get(nameKey);
+      if (nameInvoices && nameInvoices.length > 0) {
+        const available = nameInvoices.filter(inv => !matchedInvoiceNumbers.has(inv.invoiceNumber));
+        if (available.length > 0) {
+          matchedInvoice = available.find(inv => Math.abs(party.totalAmount - inv.netAmount) < 5.0) || available[0];
+        }
+      }
     }
 
     // Tertiary fallback: fuzzy substring name match or closest bill amount

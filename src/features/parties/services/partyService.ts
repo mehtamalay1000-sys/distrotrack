@@ -119,3 +119,17 @@ export async function upsertPartyByCode(code: string, name: string, routeId?: st
     return mockStore.saveParty({ code, name, route_id: routeId });
   }
 }
+
+/** Fetch authoritative customer outstanding balance derived from party_financial_ledger */
+export async function getAuthoritativePartyOutstanding(partyId: string): Promise<number> {
+  try {
+    const { data, error } = await supabase.rpc('get_party_outstanding', { p_party_id: partyId });
+    if (!error && data !== null && data !== undefined) {
+      return Number(data);
+    }
+  } catch (err) {
+    console.warn('[partyService] Failed to load party outstanding from RPC:', err);
+  }
+  const found = mockStore.getParties().find((p) => p.id === partyId);
+  return Number(found?.outstanding_amount || 0);
+}
