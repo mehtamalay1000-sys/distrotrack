@@ -2,7 +2,6 @@ import { createContext, useContext, useEffect, useState, useCallback, type React
 import type { Session, User } from '@supabase/supabase-js';
 import { supabase } from '@/lib/supabase';
 import type { Profile, UserRole, Worker, PinUser } from '@/lib/database.types';
-import { verifySessionIsolation, handleOfflineLogout } from '@/lib/offline';
 
 interface AuthState {
   session: Session | null;
@@ -100,11 +99,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             if (prof) {
               setSession(existingSession);
               setProfile(prof);
-              void verifySessionIsolation(prof.id, prof.worker_id, prof.role);
             } else {
               // Fail closed: authenticated user without valid profile is signed out
               await supabase.auth.signOut();
-              void handleOfflineLogout(true);
               setSession(null);
               setProfile(null);
             }
@@ -135,7 +132,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (!mounted) return;
 
       if (event === 'SIGNED_OUT' || !newSession?.user) {
-        void handleOfflineLogout(true);
         setSession(null);
         setProfile(null);
         setLoading(false);
@@ -155,10 +151,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           if (prof) {
             setSession(newSession);
             setProfile(prof);
-            void verifySessionIsolation(prof.id, prof.worker_id, prof.role);
           } else {
             await supabase.auth.signOut();
-            void handleOfflineLogout(true);
             setSession(null);
             setProfile(null);
           }
@@ -372,7 +366,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch (err) {
       console.error('Error during signOut:', err);
     }
-    void handleOfflineLogout(true);
     setSession(null);
     setProfile(null);
   };

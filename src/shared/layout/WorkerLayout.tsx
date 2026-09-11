@@ -3,9 +3,7 @@ import { useAuth } from '@/app/AuthProvider';
 import { useTheme } from '@/shared/theme/ThemeProvider';
 import { Home, MapPin, Clock, User, LogOut, Sun, Moon, Receipt, CreditCard } from 'lucide-react';
 import { NotificationBell } from '@/shared/ui';
-import { OfflineSyncBanner } from '@/features/worker/components/OfflineSyncBanner';
-import { initializeBackgroundSync } from '@/lib/offline/background/index.ts';
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 
 const tabs = [
   { to: '/w', label: 'Today', icon: Home, end: true },
@@ -21,15 +19,6 @@ export function WorkerLayout() {
   const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
   const [showMenu, setShowMenu] = useState(false);
-
-  useEffect(() => {
-    if (profile?.id && profile?.role === 'worker') {
-      const cleanup = initializeBackgroundSync(profile.id);
-      return () => {
-        cleanup();
-      };
-    }
-  }, [profile?.id, profile?.role]);
 
   const handleSignOut = async () => {
     await signOut();
@@ -89,9 +78,6 @@ export function WorkerLayout() {
 
       {/* Page content — takes remaining vertical space above bottom tabs */}
       <main className="flex-1 overflow-y-auto pb-16">
-        <div className="px-4 pt-2">
-          <OfflineSyncBanner />
-        </div>
         <Outlet />
       </main>
 

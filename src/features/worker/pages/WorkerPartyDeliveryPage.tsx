@@ -20,7 +20,6 @@ import {
   XCircle,
 } from 'lucide-react';
 import { getDeliveryDetail, completePartyDelivery } from '../services/workerRouteService';
-import { completeDeliveryOffline } from '@/lib/offline/worker/index.ts';
 import { formatCurrency } from '@/shared/utils/format';
 import { UPIQRPayment } from '@/shared/ui/UPIQRPayment';
 import type { PaymentMode } from '@/lib/database.types';
@@ -281,24 +280,13 @@ export function WorkerPartyDeliveryPage() {
         payments: splitPaymentsPayload,
       };
 
-      // 1. Atomically commit to IndexedDB and queue outbox event
-      const offlineResult = await completeDeliveryOffline(offlinePayload);
-
-      // 2. Best-effort online completion if currently connected
-      try {
-        await completePartyDelivery(offlinePayload);
-      } catch {
-        // Safe: outbox will replay through Stage 9B when connectivity returns
-      }
-
-      return offlineResult;
+      return await completePartyDelivery(offlinePayload);
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['worker-route-deliveries'] });
       qc.invalidateQueries({ queryKey: ['worker-today-route'] });
       qc.invalidateQueries({ queryKey: ['delivery-detail'] });
-      const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
-      toast.success(isOnline ? 'Delivery recorded in inventory ledger!' : 'Delivery saved locally — awaiting sync');
+      toast.success('Delivery recorded in inventory ledger!');
       navigate('/w/route');
     },
     onError: (e: Error) => toast.error(e.message),

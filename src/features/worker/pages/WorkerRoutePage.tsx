@@ -27,10 +27,6 @@ import {
   closeRouteReconciliation,
   reconcileRouteFinances,
 } from '../services/workerRouteService';
-import {
-  startRouteOffline,
-  requestCloseRouteOffline,
-} from '@/lib/offline/worker/index.ts';
 import { formatCurrency } from '@/shared/utils/format';
 import { supabase } from '@/lib/supabase';
 import type { Delivery, RouteReturnItemInput } from '@/lib/database.types';
@@ -161,20 +157,12 @@ export function WorkerRoutePage() {
 
   const startMut = useMutation({
     mutationFn: async () => {
-      // 1. Commit locally and queue START_ROUTE outbox event
-      await startRouteOffline(picklist!.id, workerId);
-      // 2. Best-effort online call
-      try {
-        await startRoute(picklist!.id, workerId, workerName);
-      } catch {
-        // Safe: outbox will replay when connectivity returns
-      }
+      await startRoute(picklist!.id, workerId, workerName);
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['worker-today-route'] });
       qc.invalidateQueries({ queryKey: ['worker-route-deliveries'] });
-      const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
-      toast.success(isOnline ? 'Route started! Stock loaded onto vehicle.' : 'Route start saved locally — sync pending.');
+      toast.success('Route started! Stock loaded onto vehicle.');
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -182,16 +170,6 @@ export function WorkerRoutePage() {
   const closeRouteMut = useMutation({
     mutationFn: async () => {
       if (!picklist) throw new Error('Missing picklist data');
-
-      const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
-      if (!isOnline) {
-        // Offline route close: queue CLOSE_ROUTE outbox mutation
-        await requestCloseRouteOffline({
-          picklistId: picklist.id,
-          workerId,
-        });
-        return;
-      }
 
       if (!stockCheck) throw new Error('Missing stock check data');
 
