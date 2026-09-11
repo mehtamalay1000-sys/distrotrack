@@ -50,6 +50,9 @@ export interface Profile {
   full_name: string;
   role: UserRole;
   avatar_url: string | null;
+  worker_id?: string | null;
+  pin_user_id?: string | null;
+  phone?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -59,7 +62,8 @@ export interface Worker {
   name: string;
   phone: string | null;
   email: string | null;
-  pin: string | null;
+  /** Deprecated: PIN is never exposed to the client in Stage 8A+ */
+  pin?: string | null;
   status: WorkerStatus;
   notes: string | null;
   /** Monthly sales target in INR. Added in migration 002. */

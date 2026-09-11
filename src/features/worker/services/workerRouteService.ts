@@ -3,6 +3,17 @@ import { mockStore } from '@/lib/mockStore';
 import type { Picklist, Delivery, PaymentMode, PicklistItem, RouteStockCheck, RouteReturnItemInput } from '@/lib/database.types';
 import { addNotification } from '@/features/notifications/services/notificationService';
 import { getLocalDateString } from '@/shared/utils/format';
+import {
+  hydrateWorkerRoute,
+  getCachedWorkerRoute,
+  getWorkerOfflineDelivery,
+} from '@/lib/offline/worker/index.ts';
+import {
+  getAllRecords,
+  getRecord,
+} from '@/lib/offline/db.ts';
+import { OFFLINE_STORES } from '@/lib/offline/stores.ts';
+import type { OfflineParty } from '@/lib/offline/types.ts';
 
 // ── Query Functions ──────────────────────────────────────────────
 
@@ -69,26 +80,102 @@ export async function getWorkerTodayRoute(workerId: string, workerName?: string)
         .limit(1);
 
       if (picklistData && picklistData.length > 0) {
+        void hydrateWorkerRoute(workerId, workerName);
         return picklistData[0] as Picklist;
       }
     }
 
-    // No active route found for this worker
+    // Check offline cache fallback
+    const cached = await getCachedWorkerRoute(workerId);
+    if (cached && cached.picklist) {
+      return {
+        ...cached.picklist,
+        route: cached.route,
+      } as unknown as Picklist;
+    }
+
     return null;
   } catch {
+    const cached = await getCachedWorkerRoute(workerId);
+    if (cached && cached.picklist) {
+      return {
+        ...cached.picklist,
+        route: cached.route,
+      } as unknown as Picklist;
+    }
     return null;
   }
 }
 
 /** Get all deliveries for a picklist, ordered by sequence */
 export async function getRouteDeliveries(picklistId: string): Promise<Delivery[]> {
-  const { data, error } = await supabase
-    .from('deliveries')
-    .select('*, party:parties(*), invoice:invoices(*), items:delivery_items(*)')
-    .eq('picklist_id', picklistId)
-    .order('sequence_order', { ascending: true });
-  if (error || !data) return [];
-  return data as Delivery[];
+  try {
+    const { data, error } = await supabase
+      .from('deliveries')
+      .select('*, party:parties(*), invoice:invoices(*), items:delivery_items(*)')
+      .eq('picklist_id', picklistId)
+      .order('sequence_order', { ascending: true });
+    if (!error && data && data.length > 0) {
+      return data as Delivery[];
+    }
+  } catch {
+    // Offline or network failure: fallback to local IndexedDB
+  }
+
+  // Fallback to IndexedDB offline deliveries
+  try {
+    const allOffline = await getAllRecords<any>(OFFLINE_STORES.DELIVERIES);
+    const matched = allOffline.filter((d) => d.picklistId === picklistId);
+    if (matched.length > 0) {
+      const parties = await getAllRecords<OfflineParty>(OFFLINE_STORES.PARTIES);
+      const partyMap = new Map(parties.map((p) => [p.id, p]));
+
+      return matched.map((d) => {
+        const offParty = partyMap.get(d.partyId);
+        return {
+          id: d.id,
+          picklist_id: d.picklistId,
+          party_id: d.partyId,
+          invoice_id: d.invoiceId,
+          worker_id: d.workerId,
+          status: d.status,
+          delivered_amount: d.deliveredAmount || 0,
+          collected_amount: d.collectedAmount || 0,
+          payment_mode: d.paymentMode || 'cash',
+          notes: d.notes,
+          items: d.items.map((it: any) => ({
+            id: it.deliveryItemId,
+            sku: it.sku,
+            product_name: it.productName,
+            ordered_qty: it.orderedQty,
+            delivered_qty: it.deliveredQty,
+            free_quantity: it.freeQuantity,
+            delivered_free_qty: it.deliveredFreeQty,
+            returned_qty: it.returnedQty,
+            returned_free_qty: it.returnedFreeQty,
+            damaged_qty: it.damagedQty,
+            damaged_free_qty: it.damagedFreeQty,
+            rate: it.rate,
+            amount: it.amount,
+          })),
+          party: offParty
+            ? {
+                id: offParty.id,
+                name: offParty.customerName,
+                code: offParty.customerCode,
+                address: offParty.address,
+                phone: offParty.phone,
+                outstanding_balance: offParty.outstandingAmount,
+              }
+            : undefined,
+        } as unknown as Delivery;
+      });
+    }
+  } catch {
+    // Ignore IndexedDB read error
+  }
+
+  return [];
 }
 
 /** Get a single delivery with all details */
@@ -116,6 +203,55 @@ export async function getDeliveryDetail(deliveryId: string): Promise<Delivery | 
     const found = deliveries.find((d: Delivery) => d.id === deliveryId);
     if (found) {
       delivery = { ...found };
+    }
+  }
+
+  // 3. Fallback to IndexedDB offline store if still not found
+  if (!delivery) {
+    try {
+      const offDeliv = await getWorkerOfflineDelivery(deliveryId);
+      if (offDeliv) {
+        const offParty = await getRecord<OfflineParty>(OFFLINE_STORES.PARTIES, offDeliv.partyId);
+        delivery = {
+          id: offDeliv.id,
+          picklist_id: offDeliv.picklistId,
+          party_id: offDeliv.partyId,
+          invoice_id: offDeliv.invoiceId,
+          worker_id: offDeliv.workerId,
+          status: offDeliv.status as any,
+          delivered_amount: offDeliv.deliveredAmount || 0,
+          collected_amount: offDeliv.collectedAmount || 0,
+          payment_mode: offDeliv.paymentMode as any,
+          notes: offDeliv.notes,
+          items: offDeliv.items.map((it: any) => ({
+            id: it.deliveryItemId,
+            sku: it.sku,
+            product_name: it.productName,
+            ordered_qty: it.orderedQty,
+            delivered_qty: it.deliveredQty,
+            free_quantity: it.freeQuantity,
+            delivered_free_qty: it.deliveredFreeQty,
+            returned_qty: it.returnedQty,
+            returned_free_qty: it.returnedFreeQty,
+            damaged_qty: it.damagedQty,
+            damaged_free_qty: it.damagedFreeQty,
+            rate: it.rate,
+            amount: it.amount,
+          })),
+          party: offParty
+            ? {
+                id: offParty.id,
+                name: offParty.customerName,
+                code: offParty.customerCode,
+                address: offParty.address,
+                phone: offParty.phone,
+                outstanding_balance: offParty.outstandingAmount,
+              }
+            : undefined,
+        } as unknown as Delivery;
+      }
+    } catch {
+      // Ignore
     }
   }
 

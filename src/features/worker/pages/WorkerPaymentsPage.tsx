@@ -7,6 +7,7 @@ import {
   Clock, ArrowUpRight, ArrowDownRight, Loader2, X, Wifi,
 } from 'lucide-react';
 import { getWorkerPayments, createPayment } from '@/features/payments/services/paymentService';
+import { recordPaymentOffline } from '@/lib/offline/worker/index.ts';
 import { getParties } from '@/features/parties/services/partyService';
 import { getRoutes } from '@/features/routes/services/routeService';
 import { formatCurrency, formatDate } from '@/shared/utils/format';
@@ -41,7 +42,8 @@ export function WorkerPaymentsPage() {
   const { data: payments = [], isLoading, error, isFetching } = useQuery({
     queryKey: ['worker-payments', workerId, workerName],
     queryFn: () => getWorkerPayments(workerId, workerName),
-    enabled: !!workerId,
+    // Only fetch after profile is fully resolved; workerId derived from profile.id
+    enabled: !!workerId && !!profile,
     refetchInterval: 30_000,          // auto-refresh every 30s
     refetchIntervalInBackground: false, // pause when tab is hidden
     staleTime: 20_000,
@@ -57,16 +59,37 @@ export function WorkerPaymentsPage() {
   });
 
   const createMut = useMutation({
-    mutationFn: (data: typeof form) =>
-      createPayment({
-        ...data,
-        worker_id: workerId,
-      }),
+    mutationFn: async (data: typeof form) => {
+      // 1. Commit to IndexedDB and queue RECORD_PAYMENT outbox mutation
+      const offlineRes = await recordPaymentOffline({
+        partyId: data.party_id,
+        amount: Number(data.amount),
+        paymentMethod: data.payment_mode,
+        workerId,
+        chequeNumber: data.cheque_number || undefined,
+        chequeDate: data.cheque_date || undefined,
+        chequeBank: data.cheque_bank || undefined,
+        notes: data.notes || undefined,
+      });
+
+      // 2. Best-effort online call if connected
+      try {
+        await createPayment({
+          ...data,
+          worker_id: workerId,
+        });
+      } catch {
+        // Safe: outbox will replay when connectivity returns
+      }
+
+      return offlineRes;
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['worker-payments'] });
       qc.invalidateQueries({ queryKey: ['worker-performance-metrics'] });
       qc.invalidateQueries({ queryKey: ['payments'] });
-      toast.success('Payment collection recorded');
+      const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
+      toast.success(isOnline ? 'Payment collection recorded' : 'Payment saved locally — sync pending');
       closeModal();
     },
     onError: (e: Error) => toast.error(e.message),

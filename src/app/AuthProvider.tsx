@@ -1,24 +1,8 @@
 import { createContext, useContext, useEffect, useState, useCallback, type ReactNode } from 'react';
-
-/** Shape returned by the verify_admin_pin database RPC */
-interface VerifyAdminPinResult {
-  role: string | null;
-  error: string | null;
-  name: string;
-}
 import type { Session, User } from '@supabase/supabase-js';
 import { supabase } from '@/lib/supabase';
 import type { Profile, UserRole, Worker, PinUser } from '@/lib/database.types';
-
-// Session persistence key
-const PIN_SESSION_KEY = 'distrotrack_pin_session';
-
-interface PinSession {
-  userId: string;
-  name: string;
-  role: UserRole;
-  phone: string | null;
-}
+import { verifySessionIsolation, handleOfflineLogout } from '@/lib/offline';
 
 interface AuthState {
   session: Session | null;
@@ -39,45 +23,6 @@ interface AuthState {
 }
 
 const AuthContext = createContext<AuthState | null>(null);
-
-function createMockUser(pinSession: PinSession): User {
-  return {
-    id: pinSession.userId,
-    aud: 'authenticated',
-    role: 'authenticated',
-    email: `${pinSession.name.toLowerCase().replace(/\s+/g, '.')}@distrotrack.local`,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-    app_metadata: {},
-    user_metadata: { full_name: pinSession.name },
-    identities: [],
-    factors: [],
-  };
-}
-
-function createMockProfile(pinSession: PinSession): Profile {
-  return {
-    id: pinSession.userId,
-    email: `${pinSession.name.toLowerCase().replace(/\s+/g, '.')}@distrotrack.local`,
-    full_name: pinSession.name,
-    role: pinSession.role,
-    avatar_url: null,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  };
-}
-
-function createMockSession(pinSession: PinSession): Session {
-  const user = createMockUser(pinSession);
-  return {
-    access_token: `pin-session-${pinSession.userId}`,
-    refresh_token: `pin-refresh-${pinSession.userId}`,
-    token_type: 'bearer',
-    expires_in: 86400,
-    expires_at: Math.floor(Date.now() / 1000) + 86400,
-    user,
-  } as unknown as Session;
-}
 
 /**
  * Fire-and-forget audit event logger.
@@ -107,35 +52,125 @@ async function logEvent(
   }
 }
 
+/**
+ * Resolves the server-trusted Profile associated with the authenticated Supabase user.
+ * Fails closed if the profile does not exist or database query fails.
+ */
+async function fetchProfileForUser(user: User): Promise<Profile | null> {
+  try {
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('id', user.id)
+      .single();
+
+    if (error || !data) {
+      console.error('Failed to resolve server-trusted profile for authenticated identity:', error?.message);
+      return null;
+    }
+    return data as Profile;
+  } catch (err) {
+    console.error('Exception resolving profile:', err);
+    return null;
+  }
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
-  const [isMockSession, setIsMockSession] = useState(false);
 
-  // Restore PIN session from localStorage on mount
+  // Restore authentic Supabase session on mount and subscribe to auth state changes
   useEffect(() => {
-    const stored = localStorage.getItem(PIN_SESSION_KEY);
-    if (stored) {
-      try {
-        const pinSession: PinSession = JSON.parse(stored);
-        setSession(createMockSession(pinSession));
-        setProfile(createMockProfile(pinSession));
-        setIsMockSession(true);
-      } catch {
-        localStorage.removeItem(PIN_SESSION_KEY);
+    let mounted = true;
+    // Guard: prevent onAuthStateChange from double-resolving the initial SIGNED_IN
+    // event that Supabase fires when restoring a persisted session (same session
+    // that getSession() already resolved). Without this, both paths call
+    // fetchProfileForUser concurrently, causing two renders and visual flicker.
+    let sessionInitialized = false;
+
+    // 1. Restore authentic Supabase session
+    supabase.auth
+      .getSession()
+      .then(async ({ data: { session: existingSession } }) => {
+        if (!mounted) return;
+        if (existingSession?.user) {
+          const prof = await fetchProfileForUser(existingSession.user);
+          if (mounted) {
+            if (prof) {
+              setSession(existingSession);
+              setProfile(prof);
+              void verifySessionIsolation(prof.id, prof.worker_id, prof.role);
+            } else {
+              // Fail closed: authenticated user without valid profile is signed out
+              await supabase.auth.signOut();
+              void handleOfflineLogout(true);
+              setSession(null);
+              setProfile(null);
+            }
+          }
+        } else {
+          setSession(null);
+          setProfile(null);
+        }
+        if (mounted) {
+          sessionInitialized = true;
+          setLoading(false);
+        }
+      })
+      .catch((err) => {
+        console.error('Error restoring session:', err);
+        if (mounted) {
+          sessionInitialized = true;
+          setSession(null);
+          setProfile(null);
+          setLoading(false);
+        }
+      });
+
+    // 2. Subscribe to auth state transitions
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(async (event, newSession) => {
+      if (!mounted) return;
+
+      if (event === 'SIGNED_OUT' || !newSession?.user) {
+        void handleOfflineLogout(true);
+        setSession(null);
+        setProfile(null);
+        setLoading(false);
+        return;
       }
-    }
-    setLoading(false);
-  }, []);
 
-  // ── Shared session setter ──────────────────────────────────────
+      if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') {
+        // Skip the initial SIGNED_IN that Supabase fires when restoring a
+        // persisted session — getSession() above has already handled it.
+        // Only process SIGNED_IN events that occur AFTER initialization
+        // (e.g., explicit login calls that set session via signInWithPin).
+        if (event === 'SIGNED_IN' && !sessionInitialized) {
+          return;
+        }
+        const prof = await fetchProfileForUser(newSession.user);
+        if (mounted) {
+          if (prof) {
+            setSession(newSession);
+            setProfile(prof);
+            void verifySessionIsolation(prof.id, prof.worker_id, prof.role);
+          } else {
+            await supabase.auth.signOut();
+            void handleOfflineLogout(true);
+            setSession(null);
+            setProfile(null);
+          }
+          setLoading(false);
+        }
+      }
+    });
 
-  const applySession = useCallback((pinSession: PinSession) => {
-    localStorage.setItem(PIN_SESSION_KEY, JSON.stringify(pinSession));
-    setSession(createMockSession(pinSession));
-    setProfile(createMockProfile(pinSession));
-    setIsMockSession(true);
+    return () => {
+      mounted = false;
+      subscription.unsubscribe();
+    };
   }, []);
 
   // ── PIN-based login ────────────────────────────────────────────
@@ -144,110 +179,102 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     async (userId: string, pin: string, role: UserRole): Promise<{ error: string | null }> => {
       try {
         const cleanPin = String(pin ?? '').trim();
-
-        // ── 1. MASTER LOGIN ─────────────────────────────────────────
-        // SECURITY: Master PIN is NEVER compared in frontend code.
-        // We call the check_master_pin RPC which performs a bcrypt
-        // hash comparison server-side against master_config.
-        // If the RPC fails for any reason, access is DENIED — never granted.
-        if (role === 'master') {
-          let isValidMasterPin = false;
-          try {
-            const { data: pinValid, error: rpcError } = await supabase.rpc('check_master_pin', {
-              p_pin: cleanPin,
-            });
-            if (rpcError) {
-              console.error('check_master_pin RPC error:', rpcError.message);
-              return { error: 'Authentication service unavailable. Please try again.' };
-            }
-            isValidMasterPin = pinValid === true;
-          } catch (rpcErr) {
-            console.error('check_master_pin network error:', rpcErr);
-            return { error: 'Connection error. Please check your network and try again.' };
-          }
-
-          if (isValidMasterPin) {
-            const pinSession: PinSession = {
-              userId: 'master-001',
-              name: 'Master Administrator',
-              role: 'master',
-              phone: null,
-            };
-            applySession(pinSession);
-            void logEvent('master-001', 'Master Administrator', 'master', 'auth', 'login', 'success', 'Master login via RPC');
-            return { error: null };
-          }
-
-          void logEvent('master-001', 'Master Administrator', 'master', 'auth', 'failed_login', 'failure', 'Incorrect Master PIN (RPC check)');
-          return { error: 'Incorrect Master PIN. Please try again.' };
+        if (!cleanPin) {
+          return { error: 'Please enter your PIN.' };
         }
 
-        // ── 2. ADMIN LOGIN — uses verify_admin_pin RPC exclusively ─
-        // SECURITY: Plain-text PINs are NEVER compared in frontend code,
-        // and direct DB queries to pin_users have been removed.
-        // If the RPC fails or is unreachable, login fails closed.
-        if (role === 'owner') {
-          let rpcResult: VerifyAdminPinResult | null = null;
+        // ── 1. MASTER LOGIN ─────────────────────────────────────────
+        // Authenticates against GoTrue with Master credentials
+        if (role === 'master') {
+          const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+            email: 'master@distrotrack.local',
+            password: cleanPin,
+          });
 
-          try {
-            const { data, error: rpcError } = await supabase.rpc('verify_admin_pin', {
-              p_user_id: userId,
-              p_pin: cleanPin,
-            });
-            if (rpcError) {
-              console.error('verify_admin_pin RPC error:', rpcError.message);
-              return { error: 'Authentication service unavailable. Please try again.' };
-            }
-            rpcResult = data as VerifyAdminPinResult;
-          } catch (rpcErr) {
-            console.error('verify_admin_pin network error:', rpcErr);
-            return { error: 'Connection error. Please check your network and try again.' };
+          if (authError || !authData.session || !authData.user) {
+            void logEvent('master-001', 'Master Administrator', 'master', 'auth', 'failed_login', 'failure', 'Incorrect Master PIN');
+            return { error: 'Incorrect Master PIN. Please try again.' };
           }
 
-          if (!rpcResult || rpcResult.error || !rpcResult.role) {
-            const errMessage = rpcResult?.error || 'Incorrect PIN. Please try again.';
-            void logEvent(userId, rpcResult?.name || 'Unknown', 'owner', 'auth', 'failed_login', 'failure', errMessage);
-            return { error: errMessage };
+          const prof = await fetchProfileForUser(authData.user);
+          if (!prof || prof.role !== 'master') {
+            await supabase.auth.signOut();
+            return { error: 'Master profile authorization failed. Contact system administrator.' };
           }
 
-          // RPC may return 'master' role if master PIN was used on an admin account
-          const effectiveRole = (rpcResult.role === 'master' ? 'master' : 'owner') as UserRole;
-          const pinSession: PinSession = {
-            userId: rpcResult.role === 'master' ? 'master-001' : userId,
-            name: rpcResult.role === 'master' ? 'Master Administrator' : rpcResult.name,
-            role: effectiveRole,
-            phone: null,
-          };
-          applySession(pinSession);
-          void logEvent(pinSession.userId, pinSession.name, effectiveRole, 'auth', 'login', 'success', `${effectiveRole} login via RPC`);
+          setSession(authData.session);
+          setProfile(prof);
+          void logEvent(authData.user.id, prof.full_name, 'master', 'auth', 'login', 'success', 'Master authenticated via Supabase Auth');
           return { error: null };
         }
 
-        // ── 3. WORKER / SALESMAN LOGIN ──────────────────────────────
-        if (role === 'worker') {
-          const { data, error } = await supabase
-            .from('workers')
-            .select('id, name, phone, pin')
-            .eq('id', userId)
-            .eq('status', 'active')
-            .single();
+        // ── 2. ADMIN LOGIN ──────────────────────────────────────────
+        // Authenticates against GoTrue with Admin credentials.
+        // Also checks Master PIN if Master oversight is invoked on the Admin screen.
+        if (role === 'owner') {
+          const adminEmail = `admin.${userId}@distrotrack.local`;
+          const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+            email: adminEmail,
+            password: cleanPin,
+          });
 
-          if (error || !data) return { error: 'Worker account not found. Please try again.' };
-          
-          const workerPin = String(data.pin ?? '').trim();
-          if (!workerPin || workerPin !== cleanPin) {
-            void logEvent(userId, data.name, 'worker', 'auth', 'failed_login', 'failure', 'Incorrect PIN entered');
+          if (!authError && authData.session && authData.user) {
+            const prof = await fetchProfileForUser(authData.user);
+            if (!prof || prof.role !== 'owner') {
+              await supabase.auth.signOut();
+              return { error: 'Admin profile authorization failed.' };
+            }
+            setSession(authData.session);
+            setProfile(prof);
+            void logEvent(authData.user.id, prof.full_name, 'owner', 'auth', 'login', 'success', 'Admin authenticated via Supabase Auth');
+            return { error: null };
+          }
+
+          // If Admin PIN didn't match, check if Master PIN was used on Admin screen
+          const { data: masterData, error: masterError } = await supabase.auth.signInWithPassword({
+            email: 'master@distrotrack.local',
+            password: cleanPin,
+          });
+
+          if (!masterError && masterData.session && masterData.user) {
+            const prof = await fetchProfileForUser(masterData.user);
+            if (!prof || prof.role !== 'master') {
+              await supabase.auth.signOut();
+              return { error: 'Master profile authorization failed.' };
+            }
+            setSession(masterData.session);
+            setProfile(prof);
+            void logEvent(masterData.user.id, prof.full_name, 'master', 'auth', 'login', 'success', 'Master authenticated via Admin screen');
+            return { error: null };
+          }
+
+          void logEvent(userId, 'Unknown Admin', 'owner', 'auth', 'failed_login', 'failure', 'Incorrect Admin PIN');
+          return { error: 'Incorrect PIN. Please try again.' };
+        }
+
+        // ── 3. WORKER / SALESMAN LOGIN ──────────────────────────────
+        // Server-side authentication via GoTrue. Plaintext PIN is NEVER queried by browser.
+        if (role === 'worker') {
+          const workerEmail = `worker.${userId}@distrotrack.local`;
+          const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+            email: workerEmail,
+            password: cleanPin,
+          });
+
+          if (authError || !authData.session || !authData.user) {
+            void logEvent(userId, 'Unknown Worker', 'worker', 'auth', 'failed_login', 'failure', 'Incorrect Worker PIN');
             return { error: 'Incorrect PIN. Please try again.' };
           }
 
-          const pinSession: PinSession = {
-            userId: data.id,
-            name: data.name,
-            role: 'worker',
-            phone: data.phone,
-          };
-          applySession(pinSession);
-          void logEvent(data.id, data.name, 'worker', 'auth', 'login', 'success', 'Worker login');
+          const prof = await fetchProfileForUser(authData.user);
+          if (!prof || prof.role !== 'worker') {
+            await supabase.auth.signOut();
+            return { error: 'Worker profile authorization failed.' };
+          }
+
+          setSession(authData.session);
+          setProfile(prof);
+          void logEvent(authData.user.id, prof.full_name, 'worker', 'auth', 'login', 'success', 'Worker authenticated via Supabase Auth');
           return { error: null };
         }
 
@@ -257,10 +284,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return { error: 'Connection error. Please check your network.' };
       }
     },
-    [applySession]
+    []
   );
 
-  // ── Fetch available users ──────────────────────────────────────
+  // ── Fetch available users (public metadata only — NO credentials) ─
 
   const getAvailableWorkers = useCallback(async (): Promise<Pick<Worker, 'id' | 'name' | 'phone'>[]> => {
     try {
@@ -312,11 +339,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // ── Legacy email/password methods ──────────────────────────────
 
   const signIn = async (email: string, password: string) => {
-    if (email.toLowerCase().includes('demo') || password === 'demo123') {
-      const pinSession: PinSession = { userId: 'demo-user-001', name: 'Demo User', role: 'owner', phone: null };
-      applySession(pinSession);
-      return { error: null };
-    }
     try {
       const { error } = await supabase.auth.signInWithPassword({ email, password });
       return { error: error?.message ?? null };
@@ -328,7 +350,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const signUp = async (email: string, password: string, fullName: string) => {
     try {
       const { error } = await supabase.auth.signUp({
-        email, password,
+        email,
+        password,
         options: { data: { full_name: fullName } },
       });
       return { error: error?.message ?? null };
@@ -340,21 +363,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // ── Sign out ───────────────────────────────────────────────────
 
   const signOut = async () => {
-    const stored = localStorage.getItem(PIN_SESSION_KEY);
-    if (stored) {
-      try {
-        const ps: PinSession = JSON.parse(stored);
-        void logEvent(ps.userId, ps.name, ps.role, 'auth', 'logout', 'success', 'User signed out');
-      } catch { /* ignore */ }
+    if (session?.user && profile) {
+      void logEvent(session.user.id, profile.full_name, profile.role, 'auth', 'logout', 'success', 'User signed out');
     }
 
-    localStorage.removeItem(PIN_SESSION_KEY);
-    setIsMockSession(false);
     try {
       await supabase.auth.signOut();
-    } catch {
-      // ignore
+    } catch (err) {
+      console.error('Error during signOut:', err);
     }
+    void handleOfflineLogout(true);
     setSession(null);
     setProfile(null);
   };
@@ -369,7 +387,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         profile,
         role: currentRole,
         loading,
-        isMockSession,
+        isMockSession: false,
         isMaster: currentRole === 'master',
         signIn,
         signUp,

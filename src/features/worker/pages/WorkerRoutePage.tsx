@@ -27,6 +27,10 @@ import {
   closeRouteReconciliation,
   reconcileRouteFinances,
 } from '../services/workerRouteService';
+import {
+  startRouteOffline,
+  requestCloseRouteOffline,
+} from '@/lib/offline/worker/index.ts';
 import { formatCurrency } from '@/shared/utils/format';
 import { supabase } from '@/lib/supabase';
 import type { Delivery, RouteReturnItemInput } from '@/lib/database.types';
@@ -98,7 +102,8 @@ export function WorkerRoutePage() {
   const { data: picklist, isLoading: plLoading } = useQuery({
     queryKey: ['worker-today-route', workerId, workerName],
     queryFn: () => getWorkerTodayRoute(workerId, workerName),
-    enabled: !!workerId,
+    // Only fetch after profile is fully resolved; workerId derived from profile.id
+    enabled: !!workerId && !!profile,
     refetchInterval: 30_000,
     staleTime: 20_000,
   });
@@ -155,18 +160,40 @@ export function WorkerRoutePage() {
   });
 
   const startMut = useMutation({
-    mutationFn: () => startRoute(picklist!.id, workerId, workerName),
+    mutationFn: async () => {
+      // 1. Commit locally and queue START_ROUTE outbox event
+      await startRouteOffline(picklist!.id, workerId);
+      // 2. Best-effort online call
+      try {
+        await startRoute(picklist!.id, workerId, workerName);
+      } catch {
+        // Safe: outbox will replay when connectivity returns
+      }
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['worker-today-route'] });
       qc.invalidateQueries({ queryKey: ['worker-route-deliveries'] });
-      toast.success('Route started! Stock loaded onto vehicle.');
+      const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
+      toast.success(isOnline ? 'Route started! Stock loaded onto vehicle.' : 'Route start saved locally — sync pending.');
     },
     onError: (e: Error) => toast.error(e.message),
   });
 
   const closeRouteMut = useMutation({
     mutationFn: async () => {
-      if (!picklist || !stockCheck) throw new Error('Missing picklist or stock check data');
+      if (!picklist) throw new Error('Missing picklist data');
+
+      const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
+      if (!isOnline) {
+        // Offline route close: queue CLOSE_ROUTE outbox mutation
+        await requestCloseRouteOffline({
+          picklistId: picklist.id,
+          workerId,
+        });
+        return;
+      }
+
+      if (!stockCheck) throw new Error('Missing stock check data');
 
       // 1. Build return items payload
       const returnPayload: RouteReturnItemInput[] = stockCheck.items.map((item) => {
@@ -243,13 +270,19 @@ export function WorkerRoutePage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['worker-today-route'] });
       qc.invalidateQueries({ queryKey: ['worker-recent-routes'] });
+      qc.invalidateQueries({ queryKey: ['worker-performance-metrics'] });
       qc.invalidateQueries({ queryKey: ['worker-expenses'] });
       qc.invalidateQueries({ queryKey: ['expenses'] });
       qc.invalidateQueries({ queryKey: ['picklists'] });
       qc.invalidateQueries({ queryKey: ['payments'] });
-      qc.invalidateQueries({ queryKey: ['dashboard-stats'] });
+      // NOTE: 'dashboard-stats' is intentionally NOT invalidated here.
+      // That query calls the owner/master-only get_financial_summary RPC.
+      // Invalidating it from a Worker session causes a 401 when React Query
+      // attempts a background refetch with the Worker's JWT. The admin
+      // dashboard refreshes itself via its own polling and window-focus refetch.
       setShowCheckIn(false);
-      toast.success('Route closed: Physical stock & finances successfully reconciled!');
+      const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
+      toast.success(isOnline ? 'Route closed: Physical stock & finances successfully reconciled!' : 'Route close requested — waiting for server sync and verification.');
       navigate('/w');
     },
     onError: (e: Error) => toast.error(e.message),

@@ -39,19 +39,22 @@ export function WorkerDashboard() {
   const { data: todayRoute, isLoading: isLoadingRoute } = useQuery({
     queryKey: ['worker-today-route', workerId, workerName],
     queryFn: () => getWorkerTodayRoute(workerId, workerName),
-    enabled: !!workerId,
+    // Only fetch after profile is fully resolved; workerId derived from profile.id
+    enabled: !!workerId && !!profile,
   });
 
   const { data: metrics, isLoading: isLoadingMetrics } = useQuery({
     queryKey: ['worker-performance-metrics', workerId, workerName],
     queryFn: () => getWorkerPerformanceMetrics(workerId, workerName),
-    enabled: !!workerId,
+    // Only fetch after profile is fully resolved; workerId derived from profile.id
+    enabled: !!workerId && !!profile,
   });
 
   const { data: recentRoutes = [] } = useQuery({
     queryKey: ['worker-recent-routes', workerId],
     queryFn: () => getWorkerRecentPicklists(workerId),
-    enabled: !!workerId,
+    // Only fetch after profile is fully resolved; workerId derived from profile.id
+    enabled: !!workerId && !!profile,
   });
 
   const greeting = () => {

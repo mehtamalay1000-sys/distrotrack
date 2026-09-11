@@ -8,6 +8,7 @@ import {
   RotateCcw
 } from 'lucide-react';
 import { getWorkerExpenses, createExpense } from '@/features/expenses/services/expenseService';
+import { createExpenseOffline } from '@/lib/offline/worker/index.ts';
 import { formatCurrency, formatDate, getLocalDateString } from '@/shared/utils/format';
 import type { ExpensePaymentMethod } from '@/lib/database.types';
 
@@ -45,11 +46,31 @@ export function WorkerExpensesPage() {
   });
 
   const createMut = useMutation({
-    mutationFn: createExpense,
+    mutationFn: async (input: any) => {
+      // 1. Commit locally to IndexedDB and queue LOG_EXPENSE outbox mutation
+      const offlineRes = await createExpenseOffline({
+        category: input.category,
+        amount: Number(input.amount),
+        workerId: input.worker_id || workerId,
+        date: input.date,
+        paymentMethod: input.payment_method,
+        description: input.description,
+      });
+
+      // 2. Best-effort online call if connected
+      try {
+        await createExpense(input);
+      } catch {
+        // Safe: outbox will replay when connectivity returns
+      }
+
+      return offlineRes;
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['worker-expenses'] });
       qc.invalidateQueries({ queryKey: ['expenses'] });
-      toast.success('Expense submitted for admin review');
+      const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
+      toast.success(isOnline ? 'Expense submitted for admin review' : 'Expense saved locally — sync pending');
       setModalOpen(false);
       setForm({
         category: WORKER_CATEGORIES[0].value,

@@ -20,6 +20,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { getDeliveryDetail, completePartyDelivery } from '../services/workerRouteService';
+import { completeDeliveryOffline } from '@/lib/offline/worker/index.ts';
 import { formatCurrency } from '@/shared/utils/format';
 import { UPIQRPayment } from '@/shared/ui/UPIQRPayment';
 import type { PaymentMode } from '@/lib/database.types';
@@ -170,7 +171,7 @@ export function WorkerPartyDeliveryPage() {
   };
 
   const completeMut = useMutation({
-    mutationFn: () => {
+    mutationFn: async () => {
       if (!delivery || !profile) throw new Error('Missing delivery or profile data');
 
       const deliveredItemsPayload = items.map((item) => {
@@ -261,7 +262,7 @@ export function WorkerPartyDeliveryPage() {
         }
       }
 
-      return completePartyDelivery({
+      const offlinePayload = {
         deliveryId: delivery.id,
         picklistId: delivery.picklist_id || '',
         partyId: delivery.party_id,
@@ -278,13 +279,26 @@ export function WorkerPartyDeliveryPage() {
           notes: paymentNotes || undefined,
         },
         payments: splitPaymentsPayload,
-      });
+      };
+
+      // 1. Atomically commit to IndexedDB and queue outbox event
+      const offlineResult = await completeDeliveryOffline(offlinePayload);
+
+      // 2. Best-effort online completion if currently connected
+      try {
+        await completePartyDelivery(offlinePayload);
+      } catch {
+        // Safe: outbox will replay through Stage 9B when connectivity returns
+      }
+
+      return offlineResult;
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['worker-route-deliveries'] });
       qc.invalidateQueries({ queryKey: ['worker-today-route'] });
       qc.invalidateQueries({ queryKey: ['delivery-detail'] });
-      toast.success('Delivery recorded in inventory ledger!');
+      const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
+      toast.success(isOnline ? 'Delivery recorded in inventory ledger!' : 'Delivery saved locally — awaiting sync');
       navigate('/w/route');
     },
     onError: (e: Error) => toast.error(e.message),

@@ -1,7 +1,8 @@
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string;
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
+const env = typeof import.meta !== 'undefined' && (import.meta as any).env ? (import.meta as any).env : (typeof process !== 'undefined' ? process.env : {});
+const supabaseUrl = (env?.VITE_SUPABASE_URL || '') as string;
+const supabaseAnonKey = (env?.VITE_SUPABASE_ANON_KEY || '') as string;
 
 if (!supabaseUrl || !supabaseAnonKey) {
   console.warn(
