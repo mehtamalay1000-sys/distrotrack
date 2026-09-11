@@ -31,7 +31,7 @@ async function getWorkerRecentPicklists(workerId: string): Promise<Picklist[]> {
 export function WorkerDashboard() {
   const { profile } = useAuth();
   const navigate = useNavigate();
-  const workerId = profile?.id || '';
+  const workerId = profile?.worker_id || profile?.id || '';
   const workerName = profile?.full_name || '';
 
   const [activeModal, setActiveModal] = useState<'products' | 'routes' | 'target' | null>(null);

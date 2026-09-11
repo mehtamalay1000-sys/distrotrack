@@ -67,7 +67,7 @@ async function getWorkerHistory(workerId: string): Promise<Picklist[]> {
 
 export function WorkerHistoryPage() {
   const { profile } = useAuth();
-  const workerId = profile?.id || '';
+  const workerId = profile?.worker_id || profile?.id || '';
   const [expanded, setExpanded] = useState<string | null>(null);
 
   const { data: routes = [], isLoading } = useQuery({

@@ -27,7 +27,7 @@ export async function getPayments(): Promise<Payment[]> {
       .select(`
         *,
         party:parties(*, route:routes(*)),
-        worker:workers(*),
+        worker:workers!payments_worker_id_fkey(*),
         delivery:deliveries(*, picklist:picklists(*, route:routes(*))),
         invoice:invoices(*),
         picklist:picklists(*),
@@ -77,7 +77,7 @@ export async function getWorkerPayments(workerId: string, workerName?: string): 
       .select(`
         *,
         party:parties(*, route:routes(*)),
-        worker:workers(*),
+        worker:workers!payments_worker_id_fkey(*),
         delivery:deliveries(*, picklist:picklists(*, route:routes(*))),
         invoice:invoices(*),
         picklist:picklists(*),

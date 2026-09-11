@@ -408,17 +408,31 @@ export interface PartyFinancialLedger {
 }
 
 export interface FinancialSummary {
-  sales: number;
-  total_collected: number;
-  cash: number;
-  upi: number;
-  cheque_cleared: number;
-  cheque_pending: number;
-  credit_extended: number;
-  expenses: number;
+  // Supabase get_financial_summary RPC keys
+  total_revenue?: number;
+  total_collected?: number;
+  cash_collected?: number;
+  upi_collected?: number;
+  cheque_collected?: number;
+  pending_cheques?: number;
+  bounced_cheques?: number;
+  total_credit?: number;
+  total_expenses?: number;
   cash_expenses?: number;
-  net_cash: number;
-  total_outstanding: number;
+  bank_expenses?: number;
+  total_outstanding?: number;
+  net_cash_deposit?: number;
+  cash_discrepancy?: number;
+
+  // Legacy / mapped alias keys
+  sales?: number;
+  cash?: number;
+  upi?: number;
+  cheque_cleared?: number;
+  cheque_pending?: number;
+  credit_extended?: number;
+  expenses?: number;
+  net_cash?: number;
   contribution_before_cogs?: number;
 }
 

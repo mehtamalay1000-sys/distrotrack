@@ -43,10 +43,12 @@ export function ImportPage() {
       return confirmImportToDatabase(parsedPicklist, matchResult, assignedWorkerId, deliveryDate);
     },
     onSuccess: (picklistRecord) => {
+      qc.invalidateQueries({ queryKey: ['routes'] });
       qc.invalidateQueries({ queryKey: ['picklists'] });
       qc.invalidateQueries({ queryKey: ['parties'] });
       qc.invalidateQueries({ queryKey: ['products'] });
       qc.invalidateQueries({ queryKey: ['deliveries'] });
+      qc.invalidateQueries({ queryKey: ['worker-today-route'] });
       qc.invalidateQueries({ queryKey: ['dashboard-stats'] });
       toast.success(`Picklist #${picklistRecord.picklist_number} imported successfully!`);
       navigate('/admin/picklists');

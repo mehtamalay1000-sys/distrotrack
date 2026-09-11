@@ -26,7 +26,7 @@ const WORKER_CATEGORIES = [
 export function WorkerExpensesPage() {
   const qc = useQueryClient();
   const { profile } = useAuth();
-  const workerId = profile?.id || '';
+  const workerId = profile?.worker_id || profile?.id || '';
   const workerName = profile?.full_name || '';
 
   const [modalOpen, setModalOpen] = useState(false);

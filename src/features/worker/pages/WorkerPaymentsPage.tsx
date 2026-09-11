@@ -16,7 +16,7 @@ import type { Payment, PaymentMode } from '@/lib/database.types';
 export function WorkerPaymentsPage() {
   const { profile } = useAuth();
   const qc = useQueryClient();
-  const workerId = profile?.id || '';
+  const workerId = profile?.worker_id || profile?.id || '';
   const workerName = profile?.full_name || '';
 
   const [search, setSearch] = useState('');

@@ -92,23 +92,64 @@ export async function getDashboardStats(): Promise<DashboardStats> {
       // fallback
     }
 
-    // ── P1 FIX: Extract using ACTUAL get_financial_summary response keys ──
-    // RPC returns: sales, total_collected, cash, upi, cheque_cleared, cheque_pending,
-    //              credit_extended, expenses, cash_expenses, net_cash, total_outstanding,
-    //              contribution_before_cogs
-    const todaySales = Number(todaySummaryRes?.sales ?? 0);
-    const todayCollections = Number(todaySummaryRes?.total_collected ?? 0);
-    const totalOutstanding = Number(todaySummaryRes?.total_outstanding ?? 0);
-    const totalExpensesToday = Number(todaySummaryRes?.expenses ?? 0);
-    const cashExpensesToday = Number(todaySummaryRes?.cash_expenses ?? 0);
-    const contributionBeforeCogsToday = Number(todaySummaryRes?.contribution_before_cogs ?? 0);
+    // ── Delivery amounts calculation (scheduled vs realized) ──────────
+    const todayDeliveredSales = todayDeliveries
+      .filter((d: Delivery) => d.status === 'delivered' || d.status === 'partial')
+      .reduce((sum: number, d: Delivery) => sum + Number(d.delivered_amount || d.total_amount || 0), 0);
 
-    const monthlySales = Number(monthSummaryRes?.sales ?? 0);
+    const todayScheduledSales = todayDeliveries.reduce(
+      (sum: number, d: Delivery) => sum + Number(d.delivered_amount || d.total_amount || 0),
+      0
+    );
+
+    const monthDeliveries = deliveries.filter((d: Delivery) => {
+      const dt = getEffectiveDate(d.delivery_date, d.created_at);
+      return dt >= monthStartStr && dt <= monthEndStr;
+    });
+
+    const monthDeliveredSales = monthDeliveries
+      .filter((d: Delivery) => d.status === 'delivered' || d.status === 'partial')
+      .reduce((sum: number, d: Delivery) => sum + Number(d.delivered_amount || d.total_amount || 0), 0);
+
+    const monthScheduledSales = monthDeliveries.reduce(
+      (sum: number, d: Delivery) => sum + Number(d.delivered_amount || d.total_amount || 0),
+      0
+    );
+
+    // ── Extract and map stats accurately from RPC & calculated workload ──
+    const rpcTodaySales = Number(todaySummaryRes?.total_revenue ?? todaySummaryRes?.sales ?? 0);
+    const todaySales = todayDeliveredSales > 0 ? todayDeliveredSales : (rpcTodaySales > 0 ? rpcTodaySales : todayScheduledSales);
+
+    const rpcMonthSales = Number(monthSummaryRes?.total_revenue ?? monthSummaryRes?.sales ?? 0);
+    const monthlySales = monthDeliveredSales > 0 ? monthDeliveredSales : (rpcMonthSales > 0 ? rpcMonthSales : monthScheduledSales);
+
+    const todayCollections = Number(todaySummaryRes?.total_collected ?? 0);
+
+    let partyOutstanding = 0;
+    try {
+      const { data: pData } = await supabase.from('parties').select('outstanding_amount');
+      partyOutstanding = (pData || []).reduce((sum, p) => sum + Number(p.outstanding_amount || 0), 0);
+    } catch {
+      // ignore
+    }
+    const rpcOutstanding = Number(todaySummaryRes?.total_outstanding ?? 0);
+    const totalOutstanding = rpcOutstanding > 0 ? rpcOutstanding : partyOutstanding;
+
+    const totalExpensesToday = Number(todaySummaryRes?.total_expenses ?? todaySummaryRes?.expenses ?? 0);
+    const cashExpensesToday = Number(todaySummaryRes?.cash_expenses ?? 0);
+    const contributionBeforeCogsToday = Number(
+      todaySummaryRes?.net_cash_deposit ??
+      todaySummaryRes?.contribution_before_cogs ??
+      (todaySales - totalExpensesToday)
+    );
+
     const monthlyCollections = Number(monthSummaryRes?.total_collected ?? 0);
-    const monthlyUdhari = Number(monthSummaryRes?.credit_extended ?? 0);
-    const monthlyCash = Number(monthSummaryRes?.cash ?? 0);
-    // Cheque: cleared + pending (both cleared and pending cheques are in scope)
-    const monthlyCheque = Number((monthSummaryRes?.cheque_cleared ?? 0) + (monthSummaryRes?.cheque_pending ?? 0));
+    const monthlyUdhari = Number(monthSummaryRes?.total_credit ?? monthSummaryRes?.credit_extended ?? 0);
+    const monthlyCash = Number(monthSummaryRes?.cash_collected ?? monthSummaryRes?.cash ?? 0);
+    const monthlyCheque = Number(
+      (monthSummaryRes?.cheque_collected ?? 0) +
+      (monthSummaryRes?.pending_cheques ?? monthSummaryRes?.cheque_pending ?? 0)
+    );
 
     return {
       todaySales,

@@ -48,7 +48,7 @@ export function WorkerRoutePage() {
   const { profile } = useAuth();
   const navigate = useNavigate();
   const qc = useQueryClient();
-  const workerId = profile?.id || '';
+  const workerId = profile?.worker_id || profile?.id || '';
   const workerName = profile?.full_name || '';
 
   // Modals state

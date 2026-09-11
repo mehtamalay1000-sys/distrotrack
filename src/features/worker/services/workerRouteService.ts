@@ -42,7 +42,7 @@ export async function getWorkerTodayRoute(workerId: string, workerName?: string)
     // 1. Direct picklists assigned to worker (by any matching worker ID)
     const { data: directData } = await supabase
       .from('picklists')
-      .select('*, route:routes(*), worker:workers(*)')
+      .select('*, route:routes(*), worker:workers!picklists_worker_id_fkey(*)')
       .in('worker_id', idList)
       .in('status', ['assigned', 'in_progress', 'confirmed', 'draft'])
       .order('created_at', { ascending: false })
@@ -62,7 +62,7 @@ export async function getWorkerTodayRoute(workerId: string, workerName?: string)
       const routeIds = routeData.map(r => r.id);
       const { data: picklistData } = await supabase
         .from('picklists')
-        .select('*, route:routes(*), worker:workers(*)')
+        .select('*, route:routes(*), worker:workers!picklists_worker_id_fkey(*)')
         .in('route_id', routeIds)
         .in('status', ['assigned', 'in_progress', 'confirmed', 'draft'])
         .order('created_at', { ascending: false })
@@ -73,9 +73,24 @@ export async function getWorkerTodayRoute(workerId: string, workerName?: string)
       }
     }
 
+    // 3. Fallback to mockStore picklists if Supabase returned nothing
+    const mockPicklists = mockStore.getPicklists();
+    const activeMock = mockPicklists.find(
+      (p) =>
+        idList.includes(p.worker_id || '') &&
+        ['assigned', 'in_progress', 'confirmed', 'draft'].includes(p.status)
+    );
+    if (activeMock) return activeMock;
+
     return null;
   } catch {
-    return null;
+    const mockPicklists = mockStore.getPicklists();
+    const activeMock = mockPicklists.find(
+      (p) =>
+        (p.worker_id === workerId || (workerName && p.notes?.includes(workerName))) &&
+        ['assigned', 'in_progress', 'confirmed', 'draft'].includes(p.status)
+    );
+    return activeMock || null;
   }
 }
 
@@ -795,10 +810,11 @@ export interface WorkerPerformanceMetrics {
 }
 
 export async function getWorkerPerformanceMetrics(workerId: string, workerName?: string): Promise<WorkerPerformanceMetrics> {
+  const workerIds = [workerId];
+
   // ── 1. Fetch worker's real monthly target from Supabase ──────────
   let monthlyTarget = 0;
   try {
-    const workerIds = [workerId];
     if (workerName) {
       const { data: matched } = await supabase
         .from('workers')
@@ -840,7 +856,7 @@ export async function getWorkerPerformanceMetrics(workerId: string, workerName?:
     const { data: picklists } = await supabase
       .from('picklists')
       .select('id, picklist_number, date, total_parties, total_amount, total_collected, status, route:routes(name)')
-      .eq('worker_id', workerId)
+      .in('worker_id', workerIds)
       .order('created_at', { ascending: false });
 
     if (picklists && picklists.length > 0) {

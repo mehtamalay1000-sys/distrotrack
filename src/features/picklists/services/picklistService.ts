@@ -6,7 +6,7 @@ export async function getPicklists(): Promise<Picklist[]> {
   try {
     const { data, error } = await supabase
       .from('picklists')
-      .select('*, route:routes(id, name, code), worker:workers(id, name)')
+      .select('*, route:routes(id, name, code), worker:workers!picklists_worker_id_fkey(id, name)')
       .order('created_at', { ascending: false });
     if (error || !data) {
       return mockStore.getPicklists();
@@ -21,7 +21,7 @@ export async function getPicklist(id: string): Promise<Picklist> {
   try {
     const { data: picklist, error: plErr } = await supabase
       .from('picklists')
-      .select('*, route:routes(id, name, code), worker:workers(id, name)')
+      .select('*, route:routes(id, name, code), worker:workers!picklists_worker_id_fkey(id, name)')
       .eq('id', id)
       .single();
 

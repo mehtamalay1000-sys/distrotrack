@@ -448,7 +448,7 @@ export async function getAllWorkers() {
 export async function getMasterPicklists(range: DateRange) {
   const { data } = await supabase
     .from('picklists')
-    .select('*, route:routes(name, code), worker:workers(name)')
+    .select('*, route:routes(name, code), worker:workers!picklists_worker_id_fkey(name)')
     .gte('date', range.from)
     .lte('date', range.to)
     .order('date', { ascending: false });
@@ -468,7 +468,7 @@ export async function getMasterDeliveries(range: DateRange) {
 export async function getMasterPayments(range: DateRange) {
   const { data } = await supabase
     .from('payments')
-    .select('*, party:parties(name, code), worker:workers(name)')
+    .select('*, party:parties(name, code), worker:workers!payments_worker_id_fkey(name)')
     .gte('payment_date', range.from)
     .lte('payment_date', range.to)
     .order('payment_date', { ascending: false });
@@ -570,12 +570,12 @@ export async function getMasterExceptions(range: DateRange): Promise<MasterExcep
     const [picklistsRes, paymentsRes, expensesRes, movementsRes] = await Promise.all([
       supabase
         .from('picklists')
-        .select('id, picklist_number, date, cash_discrepancy, expected_cash, actual_cash_returned, financial_reconciliation_status, status, route:routes(name), worker:workers(name)')
+        .select('id, picklist_number, date, cash_discrepancy, expected_cash, actual_cash_returned, financial_reconciliation_status, status, route:routes(name), worker:workers!picklists_worker_id_fkey(name)')
         .gte('date', range.from)
         .lte('date', range.to),
       supabase
         .from('payments')
-        .select('id, amount, payment_mode, payment_date, cheque_number, notes, party:parties(name), worker:workers(name)')
+        .select('id, amount, payment_mode, payment_date, cheque_number, notes, party:parties(name), worker:workers!payments_worker_id_fkey(name)')
         .eq('status', 'bounced')
         .gte('payment_date', range.from)
         .lte('payment_date', range.to),
@@ -769,7 +769,7 @@ export async function getMasterStockOverview(): Promise<MasterStockOverview> {
         .limit(100),
       supabase
         .from('picklists')
-        .select('id, picklist_number, status, route:routes(name), worker:workers(name)')
+        .select('id, picklist_number, status, route:routes(name), worker:workers!picklists_worker_id_fkey(name)')
         .in('status', ['in_progress', 'assigned']),
     ]);
 

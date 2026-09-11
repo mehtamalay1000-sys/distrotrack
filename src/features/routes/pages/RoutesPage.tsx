@@ -45,7 +45,15 @@ export function RoutesPage() {
   });
   const updateMut = useMutation({
     mutationFn: ({ id, data }: { id: string; data: Partial<Route> }) => updateRoute(id, data),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['routes'] }); toast.success('Route updated'); closeModal(); },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['routes'] });
+      qc.invalidateQueries({ queryKey: ['picklists'] });
+      qc.invalidateQueries({ queryKey: ['deliveries'] });
+      qc.invalidateQueries({ queryKey: ['worker-today-route'] });
+      qc.invalidateQueries({ queryKey: ['dashboard-stats'] });
+      toast.success('Route updated');
+      closeModal();
+    },
     onError: (e: Error) => toast.error(e.message),
   });
   const deleteMut = useMutation({
