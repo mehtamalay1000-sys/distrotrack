@@ -97,7 +97,7 @@ export async function getProductQuantityRegister(filter?: QuantityRegisterFilter
     const pl = del?.picklist_id ? picklistMap.get(del.picklist_id) : null;
     const rt = del?.route_id ? routeMap.get(del.route_id) : pl?.route_id ? routeMap.get(pl.route_id) : null;
 
-    const date = del?.delivery_date || pl?.date || new Date().toISOString().split('T')[0];
+    const date = del?.delivery_date || (del?.delivered_at ? del.delivered_at.split('T')[0] : null) || pl?.date || new Date().toISOString().split('T')[0];
     const picklistNumber = pl?.picklist_number || (del?.picklist_id ? `PL-${del.picklist_id.slice(-6)}` : 'PL-DIRECT');
     const picklistId = pl?.id || del?.picklist_id || '';
     const routeCode = rt?.code || del?.route_code || 'R-GEN';
@@ -126,8 +126,9 @@ export async function getProductQuantityRegister(filter?: QuantityRegisterFilter
     const returned = damagedOrReturned > 0 ? damagedOrReturned : Math.max(0, ordered - delivered);
     const netSold = Math.max(0, delivered - returned);
 
-    const rate = Number(di.rate || master?.mrp || 50);
-    const mrp = Number(di.mrp || master?.mrp || rate);
+    const rate = Number(di.rate || di.mrp_at_sale || di.mrp || master?.mrp || 50);
+    // Historical transaction pricing integrity: Prioritize transaction snapshot (mrp_at_sale / mrp) over dynamic Product Master
+    const mrp = Number(di.mrp_at_sale ?? di.mrp ?? master?.mrp ?? rate);
     const salesAmount = netSold * rate;
 
     rawRows.push({
@@ -167,8 +168,10 @@ export async function getProductQuantityRegister(filter?: QuantityRegisterFilter
       const uom = master?.uom || 'EA';
 
       const qty = Number(pi.quantity || 0);
-      const rate = Number(pi.rate || master?.mrp || 50);
+      const rate = Number(pi.rate || pi.mrp_at_sale || pi.mrp || master?.mrp || 50);
       const amount = Number(pi.amount || qty * rate);
+      // Historical transaction pricing integrity: Prioritize transaction snapshot (mrp_at_sale / mrp) over dynamic Product Master
+      const mrp = Number(pi.mrp_at_sale ?? pi.mrp ?? master?.mrp ?? rate);
 
       rawRows.push({
         date: pl?.date || new Date().toISOString().split('T')[0],
@@ -186,7 +189,7 @@ export async function getProductQuantityRegister(filter?: QuantityRegisterFilter
         returnedQty: 0,
         netSoldQty: pl?.status === 'completed' ? qty : 0,
         rate,
-        mrp: master?.mrp || rate,
+        mrp,
         salesAmount: pl?.status === 'completed' ? amount : 0,
       });
     }

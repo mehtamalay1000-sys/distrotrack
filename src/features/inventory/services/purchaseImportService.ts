@@ -33,10 +33,18 @@ export interface ParsedPurchaseRow {
   invoiceNo: string;
   invoiceDate: string;
   batch: string;
+  mrp?: number;
+  rate?: number;
   rawRow: Record<string, any>;
 }
 
-export type PurchaseRowMatchStatus = 'MATCHED' | 'UNMAPPED' | 'INVALID_QTY' | 'EXCLUDED_STATUS';
+export type PurchaseRowMatchStatus =
+  | 'MATCHED'
+  | 'UNMAPPED'
+  | 'INVALID_QTY'
+  | 'EXCLUDED_STATUS'
+  | 'MRP_UPDATE'
+  | 'CONFLICTING_MRP';
 
 export interface PurchaseImportPreviewRow extends ParsedPurchaseRow {
   matchStatus: PurchaseRowMatchStatus;
@@ -45,6 +53,11 @@ export interface PurchaseImportPreviewRow extends ParsedPurchaseRow {
   validationError?: string;
   idempotencyKey: string;
   isDuplicate?: boolean;
+  currentMrp?: number;
+  incomingMrp?: number;
+  hasMrpUpdate?: boolean;
+  isConflictingMrp?: boolean;
+  mrpConflictValues?: number[];
 }
 
 export interface PurchaseImportPreview {
@@ -59,6 +72,10 @@ export interface PurchaseImportPreview {
   duplicateCount: number;
   totalReceivedQty: number;
   hasDuplicates: boolean;
+  mrpUpdatesCount: number;
+  conflictingMrpCount: number;
+  hasMrpUpdates: boolean;
+  hasConflictingMrp: boolean;
 }
 
 export interface PurchaseImportResult {
@@ -288,6 +305,15 @@ export async function parseSapPurchaseFile(file: File): Promise<{
     const poNumberKey = keys.find((k) => /^(?:po\s*no\.?|purchase\s*order|po\s*number|order\s*no\.?)$/i.test(k.trim()));
     const batchKey = keys.find((k) => /^(?:batch|lot|batch\s*no\.?)$/i.test(k.trim()));
 
+    // 10. Resolve MRP and Rate columns if present
+    const mrpKey = keys.find((k) =>
+      /^(?:mrp|max(?:imum)?\s*retail\s*price|unit\s*mrp|item\s*mrp)$/i.test(k.trim())
+    ) || keys.find((k) => /\bmrp\b/i.test(k));
+
+    const rateKey = keys.find((k) =>
+      /^(?:rate|invoice\s*rate|basic\s*rate|purchase\s*rate|price|unit\s*price)$/i.test(k.trim())
+    ) || keys.find((k) => /\brate\b/i.test(k));
+
     if (!skuKey) {
       return {
         rows: [],
@@ -331,6 +357,16 @@ export async function parseSapPurchaseFile(file: File): Promise<{
       const poNumber = poNumberKey ? String(r[poNumberKey] || '').trim() : '';
       const batch = batchKey ? String(r[batchKey] || '').trim() : '';
 
+      const rawMrp = mrpKey ? r[mrpKey] : undefined;
+      const mrp = rawMrp !== undefined && rawMrp !== null && String(rawMrp).trim() !== ''
+        ? parseCleanNumber(rawMrp)
+        : undefined;
+
+      const rawRate = rateKey ? r[rateKey] : undefined;
+      const rate = rawRate !== undefined && rawRate !== null && String(rawRate).trim() !== ''
+        ? parseCleanNumber(rawRate)
+        : undefined;
+
       if (grDocNo) grDocs.add(grDocNo);
       if (invoiceNo) invoices.add(invoiceNo);
 
@@ -347,6 +383,8 @@ export async function parseSapPurchaseFile(file: File): Promise<{
         invoiceNo,
         invoiceDate,
         batch,
+        mrp,
+        rate,
         rawRow: r,
       });
     }
@@ -416,6 +454,25 @@ export async function validateAndMatchPurchaseRows(
   mockMovements.forEach((m) => {
     if (m.idempotency_key) existingIdempKeys.add(m.idempotency_key);
   });
+
+  // Collect all distinct incoming MRPs per SKU across all rows to detect mismatches and conflicts
+  const skuToMrps = new Map<string, Set<number>>();
+  for (const row of rows) {
+    const normSku = row.sku.trim().toUpperCase();
+    let rowMrp = row.mrp;
+    if ((rowMrp === undefined || rowMrp === null || rowMrp <= 0) && row.rawRow) {
+      const extracted = extractSapProductDetails(row);
+      if (extracted.mrp && extracted.mrp > 0) {
+        rowMrp = extracted.mrp;
+      }
+    }
+    if (rowMrp && rowMrp > 0) {
+      if (!skuToMrps.has(normSku)) {
+        skuToMrps.set(normSku, new Set<number>());
+      }
+      skuToMrps.get(normSku)!.add(rowMrp);
+    }
+  }
 
   for (const row of rows) {
     const normSku = row.sku.trim().toUpperCase();
@@ -498,10 +555,41 @@ export async function validateAndMatchPurchaseRows(
       continue;
     }
 
-    // 4. Check for duplicate idempotency
+    // 4. Check for MRP mismatch / conflict
+    const currentMrp = Number(masterEntry.mrp || 0);
+    const incomingMrpSet = skuToMrps.get(normSku);
+    const distinctIncomingMrps = incomingMrpSet ? Array.from(incomingMrpSet) : [];
+
+    let hasMrpUpdate = false;
+    let isConflictingMrp = false;
+    let conflictValues: number[] | undefined = undefined;
+    let rowIncomingMrp: number | undefined = row.mrp || (distinctIncomingMrps.length === 1 ? distinctIncomingMrps[0] : undefined);
+
+    if (distinctIncomingMrps.length > 1) {
+      // Conflicting MRP values for the same SKU across rows in the same import file!
+      isConflictingMrp = true;
+      conflictValues = distinctIncomingMrps;
+    } else if (distinctIncomingMrps.length === 1) {
+      rowIncomingMrp = distinctIncomingMrps[0];
+      if (currentMrp > 0 && rowIncomingMrp !== currentMrp) {
+        hasMrpUpdate = true;
+      }
+    }
+
+    // 5. Check for duplicate idempotency
     const isDuplicate = existingIdempKeys.has(idempotencyKey);
     if (isDuplicate) {
       duplicateCount++;
+    }
+
+    let matchStatus: PurchaseRowMatchStatus = 'MATCHED';
+    let valError: string | undefined = undefined;
+
+    if (isConflictingMrp) {
+      matchStatus = 'CONFLICTING_MRP';
+      valError = `Conflicting MRP values for SKU in same import: ${conflictValues!.map((v) => `₹${v}`).join(' vs ')}`;
+    } else if (hasMrpUpdate) {
+      matchStatus = 'MRP_UPDATE';
     }
 
     matchedCount++;
@@ -509,12 +597,22 @@ export async function validateAndMatchPurchaseRows(
 
     previewRows.push({
       ...row,
-      matchStatus: 'MATCHED',
+      mrp: rowIncomingMrp ?? row.mrp,
+      matchStatus,
       canonicalName: masterEntry.name,
+      validationError: valError,
       idempotencyKey,
       isDuplicate,
+      currentMrp,
+      incomingMrp: rowIncomingMrp,
+      hasMrpUpdate,
+      isConflictingMrp,
+      mrpConflictValues: conflictValues,
     });
   }
+
+  const mrpUpdatesCount = previewRows.filter((r) => r.matchStatus === 'MRP_UPDATE').length;
+  const conflictingMrpCount = previewRows.filter((r) => r.matchStatus === 'CONFLICTING_MRP').length;
 
   return {
     rows: previewRows,
@@ -528,6 +626,10 @@ export async function validateAndMatchPurchaseRows(
     duplicateCount,
     totalReceivedQty,
     hasDuplicates: duplicateCount > 0,
+    mrpUpdatesCount,
+    conflictingMrpCount,
+    hasMrpUpdates: mrpUpdatesCount > 0,
+    hasConflictingMrp: conflictingMrpCount > 0,
   };
 }
 
@@ -544,9 +646,9 @@ export async function confirmPurchaseImport(
   fileName: string,
   notes?: string
 ): Promise<PurchaseImportResult> {
-  // Filter for valid matched rows
+  // Filter for valid matched rows (including rows flagged for MRP update, but excluding conflicting MRP)
   const actionableRows = preview.rows.filter(
-    (r) => r.matchStatus === 'MATCHED' && !r.isDuplicate
+    (r) => (r.matchStatus === 'MATCHED' || r.matchStatus === 'MRP_UPDATE') && !r.isDuplicate
   );
 
   if (actionableRows.length === 0) {
@@ -658,7 +760,7 @@ function executeMockPurchaseImport(
       continue;
     }
 
-    if (r.matchStatus === 'INVALID_QTY' || r.matchStatus === 'EXCLUDED_STATUS') {
+    if (r.matchStatus === 'INVALID_QTY' || r.matchStatus === 'EXCLUDED_STATUS' || r.matchStatus === 'CONFLICTING_MRP') {
       importItems.push({
         sku: r.sku,
         product_id: null,

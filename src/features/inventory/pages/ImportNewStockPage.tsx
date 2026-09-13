@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { Link } from 'react-router-dom';
@@ -19,10 +19,13 @@ import {
   type PurchaseImportResult,
   type ParsedPurchaseRow,
   type ExtractedSapProduct,
+  type PurchaseImportPreviewRow,
 } from '../services/purchaseImportService';
 import {
   addUnmappedSapProduct,
   addBulkUnmappedSapProducts,
+  updateProductMrp,
+  updateBulkProductMrp,
 } from '@/features/products/services/productService';
 
 export function ImportNewStockPage() {
@@ -41,9 +44,11 @@ export function ImportNewStockPage() {
   const [fileName, setFileName] = useState('');
   const [notes, setNotes] = useState('');
 
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   // Table filter & search
   const [searchQuery, setSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'MATCHED' | 'UNMAPPED' | 'INVALID_QTY' | 'EXCLUDED_STATUS' | 'DUPLICATE'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'MATCHED' | 'MRP_UPDATE' | 'CONFLICTING_MRP' | 'UNMAPPED' | 'INVALID_QTY' | 'EXCLUDED_STATUS' | 'DUPLICATE'>('all');
 
   // Confirmation modal for stock import
   const [confirmModalOpen, setConfirmModalOpen] = useState(false);
@@ -72,6 +77,70 @@ export function ImportNewStockPage() {
     duplicateSkuCount: 0,
     invalidCount: 0,
   });
+
+  // Single MRP Review Modal state
+  const [singleMrpModalOpen, setSingleMrpModalOpen] = useState(false);
+  const [selectedMrpRow, setSelectedMrpRow] = useState<PurchaseImportPreviewRow | null>(null);
+  const [updatingMrp, setUpdatingMrp] = useState(false);
+
+  // Bulk MRP Review Modal state
+  const [bulkMrpModalOpen, setBulkMrpModalOpen] = useState(false);
+  const [bulkUpdatingMrp, setBulkUpdatingMrp] = useState(false);
+
+  const handleConfirmSingleMrp = async () => {
+    if (!selectedMrpRow || selectedMrpRow.incomingMrp === undefined) return;
+    setUpdatingMrp(true);
+    try {
+      const res = await updateProductMrp({
+        sku: selectedMrpRow.sku,
+        newMrp: selectedMrpRow.incomingMrp,
+        source: 'SAP_PURCHASE_IMPORT',
+        importReference: batchRef,
+      });
+      if (res.success) {
+        toast.success(`Updated SKU ${selectedMrpRow.sku} current MRP to ₹${selectedMrpRow.incomingMrp}. Historical transactions remain unchanged.`);
+        setSingleMrpModalOpen(false);
+        setSelectedMrpRow(null);
+        await reRunMatching(parsedRows, batchRef);
+      } else {
+        toast.error(res.message || 'Failed to update MRP');
+      }
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to update MRP');
+    } finally {
+      setUpdatingMrp(false);
+    }
+  };
+
+  const handleConfirmBulkMrp = async () => {
+    if (!preview) return;
+    const mrpUpdateRows = preview.rows.filter((r) => r.matchStatus === 'MRP_UPDATE' && r.incomingMrp);
+    if (mrpUpdateRows.length === 0) return;
+
+    const uniqueBySku = new Map<string, number>();
+    for (const r of mrpUpdateRows) {
+      if (r.incomingMrp) {
+        uniqueBySku.set(r.sku.trim().toUpperCase(), r.incomingMrp);
+      }
+    }
+
+    const updates = Array.from(uniqueBySku.entries()).map(([sku, newMrp]) => ({
+      sku,
+      newMrp,
+    }));
+
+    setBulkUpdatingMrp(true);
+    try {
+      const res = await updateBulkProductMrp(updates, batchRef);
+      toast.success(`Updated ${res.updatedCount} products to new SAP MRP. Historical transactions remain unchanged.`);
+      setBulkMrpModalOpen(false);
+      await reRunMatching(parsedRows, batchRef);
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to bulk update MRP');
+    } finally {
+      setBulkUpdatingMrp(false);
+    }
+  };
 
   // History query
   const { data: historyList = [], isLoading: loadingHistory, refetch: refetchHistory } = useQuery({
@@ -384,7 +453,7 @@ export function ImportNewStockPage() {
   // Filter preview rows
   const filteredRows = (preview?.rows || []).filter((r) => {
     let matchStatus = true;
-    if (statusFilter === 'MATCHED') matchStatus = r.matchStatus === 'MATCHED' && !r.isDuplicate;
+    if (statusFilter === 'MATCHED') matchStatus = (r.matchStatus === 'MATCHED' || r.matchStatus === 'MRP_UPDATE') && !r.isDuplicate;
     else if (statusFilter === 'DUPLICATE') matchStatus = Boolean(r.isDuplicate);
     else if (statusFilter !== 'all') matchStatus = r.matchStatus === statusFilter;
 
@@ -401,7 +470,7 @@ export function ImportNewStockPage() {
   });
 
   const readyToImportCount = (preview?.rows || []).filter(
-    (r) => r.matchStatus === 'MATCHED' && !r.isDuplicate
+    (r) => (r.matchStatus === 'MATCHED' || r.matchStatus === 'MRP_UPDATE') && !r.isDuplicate
   ).length;
 
   return (
@@ -413,12 +482,12 @@ export function ImportNewStockPage() {
         actions={
           <div className="flex items-center gap-2">
             <button
-              onClick={() => setActiveTab('import')}
-              className={`px-3.5 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-                activeTab === 'import'
-                  ? 'bg-blue-600 text-white shadow-sm'
-                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300'
-              }`}
+              onClick={() => {
+                setActiveTab('import');
+                fileInputRef.current?.click();
+              }}
+              className="px-3.5 py-1.5 rounded-lg text-sm font-medium transition-colors bg-blue-600 text-white shadow-sm hover:bg-blue-700 flex items-center"
+              title="Select Weekly SAP Purchase / GR File (.xlsx, .xls, .csv)"
             >
               <PackagePlus className="w-4 h-4 inline mr-1.5" />
               Import Stock
@@ -498,6 +567,7 @@ export function ImportNewStockPage() {
 
                 <label className="relative inline-flex">
                   <input
+                    ref={fileInputRef}
                     type="file"
                     accept=".xlsx,.xls,.csv"
                     onChange={handleFileUpload}
@@ -589,7 +659,7 @@ export function ImportNewStockPage() {
           {preview && (
             <div className="space-y-6">
               {/* Metric Strips */}
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
                 <div className="bg-white dark:bg-gray-900 p-4 rounded-xl border border-gray-200 dark:border-gray-800">
                   <div className="text-xs text-gray-500">Total Rows</div>
                   <div className="text-2xl font-bold text-gray-900 dark:text-gray-100 mt-1">
@@ -605,11 +675,27 @@ export function ImportNewStockPage() {
                 </div>
 
                 <div className="bg-white dark:bg-gray-900 p-4 rounded-xl border border-amber-200 dark:border-amber-900/40 bg-amber-50/20">
-                  <div className="text-xs text-amber-700 dark:text-amber-400 font-medium">Unmapped SKUs</div>
+                  <div className="text-xs text-amber-700 dark:text-amber-400 font-medium">MRP Updates</div>
                   <div className="text-2xl font-bold text-amber-600 dark:text-amber-400 mt-1">
-                    {preview.unmapped}
+                    {preview.mrpUpdatesCount}
                   </div>
                 </div>
+
+                {preview.conflictingMrpCount > 0 ? (
+                  <div className="bg-white dark:bg-gray-900 p-4 rounded-xl border border-red-200 dark:border-red-900/40 bg-red-50/20">
+                    <div className="text-xs text-red-700 dark:text-red-400 font-medium">Conflicting MRP</div>
+                    <div className="text-2xl font-bold text-red-600 dark:text-red-400 mt-1">
+                      {preview.conflictingMrpCount}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="bg-white dark:bg-gray-900 p-4 rounded-xl border border-amber-200 dark:border-amber-900/40 bg-amber-50/20">
+                    <div className="text-xs text-amber-700 dark:text-amber-400 font-medium">Unmapped SKUs</div>
+                    <div className="text-2xl font-bold text-amber-600 dark:text-amber-400 mt-1">
+                      {preview.unmapped}
+                    </div>
+                  </div>
+                )}
 
                 <div className="bg-white dark:bg-gray-900 p-4 rounded-xl border border-gray-200 dark:border-gray-800">
                   <div className="text-xs text-gray-500">Excluded (Pending)</div>
@@ -633,6 +719,49 @@ export function ImportNewStockPage() {
                 </div>
               </div>
 
+              {/* MRP Updates Notification Banner */}
+              {preview.mrpUpdatesCount > 0 && (
+                <div className="bg-amber-50 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-800/80 rounded-xl p-4 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-sm">
+                  <div className="flex items-center gap-3">
+                    <AlertCircle className="w-5 h-5 text-amber-600 flex-shrink-0" />
+                    <div>
+                      <p className="font-semibold text-amber-900 dark:text-amber-200 text-sm">
+                        MRP Updates Detected: {preview.mrpUpdatesCount} SKU{preview.mrpUpdatesCount > 1 ? 's' : ''}
+                      </p>
+                      <p className="text-xs text-amber-700 dark:text-amber-300/90 mt-0.5">
+                        SAP contains new MRP values for existing catalog items. Historical sales will strictly retain transaction-time pricing.
+                      </p>
+                    </div>
+                  </div>
+                  {isAuthorized && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setBulkMrpModalOpen(true)}
+                      className="border-amber-400 text-amber-800 bg-amber-100/60 hover:bg-amber-100 dark:border-amber-700 dark:text-amber-200 dark:bg-amber-950 text-xs shrink-0 font-medium"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5 mr-1 text-amber-600" />
+                      Review MRP Updates ({preview.mrpUpdatesCount})
+                    </Button>
+                  )}
+                </div>
+              )}
+
+              {/* Conflicting MRP Warning Banner */}
+              {preview.conflictingMrpCount > 0 && (
+                <div className="bg-red-50 dark:bg-red-950/30 border border-red-300 dark:border-red-800 rounded-xl p-4 flex items-center gap-3 shadow-sm">
+                  <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0" />
+                  <div>
+                    <p className="font-semibold text-red-900 dark:text-red-200 text-sm">
+                      Conflicting MRP Values Detected ({preview.conflictingMrpCount} rows)
+                    </p>
+                    <p className="text-xs text-red-700 dark:text-red-300 mt-0.5">
+                      The same SKU appears with different MRPs in this batch. Conflicting rows cannot be automatically imported until resolved.
+                    </p>
+                  </div>
+                </div>
+              )}
+
               {/* Action Bar before Table */}
               <div className="flex flex-col sm:flex-row items-center justify-between gap-4 bg-white dark:bg-gray-900 p-4 rounded-xl border border-gray-200 dark:border-gray-800">
                 <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
@@ -654,6 +783,10 @@ export function ImportNewStockPage() {
                   >
                     <option value="all">All Rows ({preview.totalRows})</option>
                     <option value="MATCHED">Ready to Import ({readyToImportCount})</option>
+                    <option value="MRP_UPDATE">MRP Updates ({preview.mrpUpdatesCount})</option>
+                    {preview.conflictingMrpCount > 0 && (
+                      <option value="CONFLICTING_MRP">Conflicting MRP ({preview.conflictingMrpCount})</option>
+                    )}
                     <option value="DUPLICATE">Already Imported ({preview.duplicateCount})</option>
                     <option value="UNMAPPED">Unmapped SKUs ({preview.unmapped})</option>
                     <option value="EXCLUDED_STATUS">Excluded / Pending ({preview.excluded})</option>
@@ -662,6 +795,17 @@ export function ImportNewStockPage() {
                 </div>
 
                 <div className="flex items-center gap-3 w-full sm:w-auto justify-end flex-wrap">
+                  {preview.mrpUpdatesCount > 0 && isAuthorized && (
+                    <Button
+                      variant="outline"
+                      onClick={() => setBulkMrpModalOpen(true)}
+                      className="text-xs px-3 py-2 border-amber-300 text-amber-800 bg-amber-50/50 hover:bg-amber-100 dark:border-amber-700 dark:text-amber-300 dark:bg-amber-950/30 shadow-sm"
+                    >
+                      <RefreshCw className="w-4 h-4 mr-1.5 text-amber-600" />
+                      Review MRP Updates ({preview.mrpUpdatesCount})
+                    </Button>
+                  )}
+
                   {preview.unmapped > 0 && isAuthorized && (
                     <Button
                       variant="outline"
@@ -710,9 +854,11 @@ export function ImportNewStockPage() {
                           </td>
                         </tr>
                       ) : (
-                        filteredRows.map((r, idx) => {
+                          filteredRows.map((r, idx) => {
                           const isDupe = r.isDuplicate;
                           const isMatched = r.matchStatus === 'MATCHED' && !isDupe;
+                          const isMrpUpdate = r.matchStatus === 'MRP_UPDATE';
+                          const isConflictingMrp = r.matchStatus === 'CONFLICTING_MRP';
                           const isUnmapped = r.matchStatus === 'UNMAPPED';
                           const isExcluded = r.matchStatus === 'EXCLUDED_STATUS';
 
@@ -727,6 +873,14 @@ export function ImportNewStockPage() {
                                 {isDupe ? (
                                   <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300">
                                     Already Imported
+                                  </span>
+                                ) : isConflictingMrp ? (
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300">
+                                    CONFLICTING MRP
+                                  </span>
+                                ) : isMrpUpdate ? (
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300">
+                                    MRP UPDATE
                                   </span>
                                 ) : isMatched ? (
                                   <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
@@ -768,7 +922,31 @@ export function ImportNewStockPage() {
                                 {r.grDocNo || r.invoiceNo || '—'}
                               </td>
                               <td className="py-2.5 px-4 text-gray-500 text-[11px]">
-                                {r.validationError ? (
+                                {isMrpUpdate ? (
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="text-amber-700 dark:text-amber-300 font-medium">
+                                      Current ₹{r.currentMrp ?? '—'} → SAP ₹{r.incomingMrp ?? '—'}
+                                    </span>
+                                    {isAuthorized && (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setSelectedMrpRow(r);
+                                          setSingleMrpModalOpen(true);
+                                        }}
+                                        className="inline-flex items-center px-2 py-1 text-[11px] font-semibold text-amber-800 bg-amber-100 border border-amber-300 rounded-md hover:bg-amber-200 dark:bg-amber-950 dark:border-amber-700 dark:text-amber-200 dark:hover:bg-amber-900 transition-colors shrink-0 shadow-sm"
+                                        title="Review and update Product Master MRP"
+                                      >
+                                        <RefreshCw className="w-3 h-3 mr-1" />
+                                        Review MRP Update
+                                      </button>
+                                    )}
+                                  </div>
+                                ) : isConflictingMrp ? (
+                                  <span className="text-red-600 dark:text-red-400 font-medium">
+                                    {r.validationError || 'Conflicting MRP values for SKU in file.'}
+                                  </span>
+                                ) : r.validationError ? (
                                   <div className="flex items-center justify-between gap-2">
                                     <span className="text-amber-600 dark:text-amber-400 font-medium">
                                       {r.validationError}
@@ -1156,6 +1334,156 @@ export function ImportNewStockPage() {
             >
               <PackagePlus className="w-3.5 h-3.5 mr-1" />
               Confirm & Add {bulkStats.validList.length} Valid Products
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Modal: Single MRP Update Review */}
+      <Modal
+        open={singleMrpModalOpen}
+        onClose={() => !updatingMrp && setSingleMrpModalOpen(false)}
+        title="Review Product MRP Update"
+      >
+        <div className="space-y-4 py-2 text-xs text-gray-700 dark:text-gray-300">
+          <div className="bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 rounded-lg p-3">
+            <span className="text-[11px] font-semibold text-amber-900 dark:text-amber-200 uppercase tracking-wide block">
+              MRP Mismatch Detected
+            </span>
+            <p className="text-[11px] text-amber-800 dark:text-amber-300 mt-1">
+              SAP Purchase Import provides a newer MRP for this product. Confirming this update changes the current Product Master MRP, but <strong>all historical sales, deliveries, and transactions remain strictly unchanged at their historical transaction-time MRP</strong>.
+            </p>
+          </div>
+
+          {selectedMrpRow && (
+            <div className="space-y-3 bg-gray-50 dark:bg-gray-800/60 p-4 rounded-lg border border-gray-200 dark:border-gray-700">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <span className="text-gray-400 font-medium">Material / SKU:</span>
+                  <div className="font-mono font-bold text-sm text-gray-900 dark:text-gray-100 mt-0.5">
+                    {selectedMrpRow.sku}
+                  </div>
+                </div>
+                <div>
+                  <span className="text-gray-400 font-medium">Source / Reference:</span>
+                  <div className="font-mono text-gray-800 dark:text-gray-200 mt-0.5">
+                    SAP Purchase Import ({batchRef || selectedMrpRow.grDocNo || 'Weekly Batch'})
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <span className="text-gray-400 font-medium">Product Name:</span>
+                <div className="font-semibold text-gray-900 dark:text-gray-100 text-sm mt-0.5">
+                  {selectedMrpRow.canonicalName || selectedMrpRow.productName}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 pt-3 border-t border-gray-200 dark:border-gray-700">
+                <div className="p-3 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg">
+                  <span className="text-gray-500 font-medium block">Current Product Master MRP:</span>
+                  <span className="text-xl font-bold text-gray-700 dark:text-gray-300 mt-1 block">
+                    ₹{selectedMrpRow.currentMrp ?? '—'}
+                  </span>
+                </div>
+                <div className="p-3 bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-700 rounded-lg">
+                  <span className="text-amber-800 dark:text-amber-300 font-medium block">New SAP MRP:</span>
+                  <span className="text-xl font-bold text-amber-600 dark:text-amber-400 mt-1 block">
+                    ₹{selectedMrpRow.incomingMrp ?? '—'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="text-[11px] text-gray-500 pt-2 border-t border-gray-200 dark:border-gray-700 flex justify-between">
+                <span>Effective Date: <strong>{selectedMrpRow.grDate || new Date().toISOString().split('T')[0]}</strong></span>
+                <span>UOM: <strong>{selectedMrpRow.uom}</strong></span>
+              </div>
+            </div>
+          )}
+
+          <div className="flex items-center justify-end gap-2 pt-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setSingleMrpModalOpen(false)}
+              disabled={updatingMrp}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              loading={updatingMrp}
+              onClick={handleConfirmSingleMrp}
+              className="bg-amber-600 hover:bg-amber-700 text-white"
+            >
+              <RefreshCw className="w-3.5 h-3.5 mr-1" />
+              Confirm MRP Update
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Modal: Bulk MRP Updates Review */}
+      <Modal
+        open={bulkMrpModalOpen}
+        onClose={() => !bulkUpdatingMrp && setBulkMrpModalOpen(false)}
+        title="Review & Confirm Bulk MRP Updates"
+      >
+        <div className="space-y-4 py-2 text-xs text-gray-700 dark:text-gray-300">
+          <div className="bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 rounded-lg p-3">
+            <p className="font-semibold text-amber-900 dark:text-amber-200">
+              Bulk MRP Versioning Confirmation
+            </p>
+            <p className="mt-1 text-amber-800 dark:text-amber-300 text-[11px]">
+              Found <strong>{preview?.mrpUpdatesCount || 0} product(s)</strong> with updated MRP in this SAP import. Confirming updates will set the new MRP for future sales only. <strong>Historical transactions will NEVER be modified.</strong>
+            </p>
+          </div>
+
+          {preview && preview.mrpUpdatesCount > 0 && (
+            <div>
+              <span className="font-semibold text-gray-700 dark:text-gray-300 block mb-1">
+                Products to be Updated:
+              </span>
+              <div className="max-h-56 overflow-y-auto divide-y divide-gray-100 dark:divide-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg bg-gray-50 dark:bg-gray-800/50">
+                {preview.rows
+                  .filter((r) => r.matchStatus === 'MRP_UPDATE' && r.incomingMrp)
+                  .map((item, i) => (
+                    <div key={i} className="p-2.5 flex items-center justify-between text-[11px]">
+                      <div className="max-w-[65%]">
+                        <span className="font-mono font-semibold text-gray-900 dark:text-gray-100">{item.sku}</span>
+                        <span className="mx-1.5 text-gray-400">·</span>
+                        <span className="text-gray-700 dark:text-gray-300 truncate">{item.canonicalName || item.productName}</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-gray-500 line-through">₹{item.currentMrp}</span>
+                        <span className="text-gray-400">→</span>
+                        <span className="font-bold text-amber-600 dark:text-amber-400">₹{item.incomingMrp}</span>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          )}
+
+          <div className="flex items-center justify-end gap-2 pt-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setBulkMrpModalOpen(false)}
+              disabled={bulkUpdatingMrp}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              loading={bulkUpdatingMrp}
+              onClick={handleConfirmBulkMrp}
+              className="bg-amber-600 hover:bg-amber-700 text-white"
+            >
+              <RefreshCw className="w-3.5 h-3.5 mr-1" />
+              Confirm All MRP Updates
             </Button>
           </div>
         </div>

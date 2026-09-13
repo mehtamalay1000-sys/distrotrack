@@ -31,7 +31,7 @@ export interface ProductMasterEntry {
 /** Default estimated MRP lookup map for standard pack sizes if not present on document */
 const KNOWN_MRP_MAP: Record<string, number> = {
   '1600908': 150,
-  '1600958': 79,
+  '1600958': 75,
   '1601319': 145,
   '1601339': 78,
   '1602154': 93,
@@ -222,3 +222,16 @@ export function registerProductMasterEntry(entry: ProductMasterEntry): void {
     UNPADDED_SKU_MAP.set(unpadded, entry);
   }
 }
+
+/**
+ * Update the current MRP of a Product Master entry dynamically.
+ * Updates in-memory lookup maps and SAP_PRODUCT_MASTER entry.
+ */
+export function updateProductMasterMrp(sku: string, newMrp: number): boolean {
+  if (!sku || typeof newMrp !== 'number') return false;
+  const entry = findProductMasterEntry(sku);
+  if (!entry) return false;
+  entry.mrp = newMrp;
+  return true;
+}
+

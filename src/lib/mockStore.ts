@@ -1,7 +1,7 @@
 import type {
   Worker, Route, Party, Product, Picklist, Delivery, Payment, Expense, PicklistItem, DeliveryItem,
   RouteStockException, UnmappedSkuException, SapStockReconciliation, SapStockReconciliationItem,
-  InventoryMovement, SapPurchaseImport, SapPurchaseImportItem
+  InventoryMovement, SapPurchaseImport, SapPurchaseImportItem, ProductMrpHistory
 } from '@/lib/database.types';
 import { SAP_PRODUCT_MASTER } from '@/features/products/data/productMaster';
 import { getLocalDateString } from '@/shared/utils/format';
@@ -142,6 +142,7 @@ class MockStore {
   private inventoryMovements: InventoryMovement[] = [];
   private sapPurchaseImports: SapPurchaseImport[] = [];
   private sapPurchaseImportItems: SapPurchaseImportItem[] = [];
+  private productMrpHistory: ProductMrpHistory[] = [];
 
   constructor() {
     this.loadFromStorage();
@@ -213,6 +214,7 @@ class MockStore {
         this.inventoryMovements = parsed.inventoryMovements || [];
         this.sapPurchaseImports = parsed.sapPurchaseImports || [];
         this.sapPurchaseImportItems = parsed.sapPurchaseImportItems || [];
+        this.productMrpHistory = parsed.productMrpHistory || [];
       } else {
         this.resetToDefaults();
       }
@@ -246,6 +248,7 @@ class MockStore {
           inventoryMovements: this.inventoryMovements,
           sapPurchaseImports: this.sapPurchaseImports,
           sapPurchaseImportItems: this.sapPurchaseImportItems,
+          productMrpHistory: this.productMrpHistory,
         })
       );
     } catch (e) {
@@ -478,7 +481,12 @@ class MockStore {
       (p) => p.id === prodData.id || (prodData.sku && p.sku.toUpperCase() === prodData.sku.toUpperCase())
     );
     if (existingIdx >= 0) {
-      // Protect existing product master data: preserve canonical name, mrp, rate
+      if (prodData.mrp !== undefined) {
+        this.products[existingIdx].mrp = Number(prodData.mrp);
+      }
+      if (prodData.rate !== undefined) {
+        this.products[existingIdx].rate = Number(prodData.rate);
+      }
       return this.products[existingIdx];
     } else {
       const created: Product = {
@@ -681,6 +689,12 @@ class MockStore {
       free_quantity: Number(item.free_quantity || 0),
       rate: Number(item.rate || 0),
       amount: Number(item.amount || 0),
+      mrp: item.mrp !== undefined && item.mrp !== null ? Number(item.mrp) : null,
+      mrp_at_sale: item.mrp_at_sale !== undefined && item.mrp_at_sale !== null
+        ? Number(item.mrp_at_sale)
+        : item.mrp !== undefined && item.mrp !== null
+        ? Number(item.mrp)
+        : null,
       sap_line_data: item.sap_line_data || null,
     };
     this.picklistItems.push(created);
@@ -698,12 +712,22 @@ class MockStore {
       this.saveToStorage();
       return this.deliveryItems[existingIdx];
     }
+    const sku = (item.sku || '').trim();
+    const prod = sku ? this.products.find((p) => p.sku.toUpperCase() === sku.toUpperCase()) : null;
+    const snapMrp = item.mrp_at_sale !== undefined && item.mrp_at_sale !== null
+      ? Number(item.mrp_at_sale)
+      : item.mrp !== undefined && item.mrp !== null
+      ? Number(item.mrp)
+      : prod?.mrp !== undefined && prod?.mrp !== null
+      ? Number(prod.mrp)
+      : null;
+
     const created: DeliveryItem = {
       id: item.id || `dli-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       delivery_id: item.delivery_id || '',
-      product_id: item.product_id || null,
+      product_id: item.product_id || prod?.id || null,
       sku: item.sku || '',
-      product_name: item.product_name || '',
+      product_name: item.product_name || prod?.name || '',
       ordered_qty: Number(item.ordered_qty || 0),
       delivered_qty: Number(item.delivered_qty || 0),
       free_quantity: Number(item.free_quantity || 0),
@@ -714,6 +738,8 @@ class MockStore {
       damaged_free_qty: Number(item.damaged_free_qty || 0),
       rate: Number(item.rate || 0),
       amount: Number(item.amount || 0),
+      mrp: snapMrp,
+      mrp_at_sale: snapMrp,
       notes: item.notes || null,
     };
     this.deliveryItems.push(created);
@@ -1081,6 +1107,96 @@ class MockStore {
     }
     this.saveToStorage();
     return { importRecord, items: createdItems };
+  }
+
+  // ── Product MRP History & Updates ───────────────────────────────
+  getProductMrpHistory(sku?: string): ProductMrpHistory[] {
+    if (sku) {
+      const norm = sku.trim().toUpperCase();
+      return this.productMrpHistory.filter((h) => h.sku.toUpperCase() === norm);
+    }
+    return [...this.productMrpHistory];
+  }
+
+  saveProductMrpHistory(record: Partial<ProductMrpHistory>): ProductMrpHistory {
+    const created: ProductMrpHistory = {
+      id: record.id || `pmh-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      product_id: record.product_id || '',
+      sku: (record.sku || '').trim().toUpperCase(),
+      old_mrp: Number(record.old_mrp || 0),
+      new_mrp: Number(record.new_mrp || 0),
+      effective_at: record.effective_at || new Date().toISOString(),
+      source: record.source || 'SAP_PURCHASE_IMPORT',
+      import_reference: record.import_reference || null,
+      changed_by: record.changed_by || null,
+      created_at: new Date().toISOString(),
+    };
+    this.productMrpHistory.unshift(created);
+    this.saveToStorage();
+    return created;
+  }
+
+  updateProductMrp(
+    sku: string,
+    newMrp: number,
+    source: string = 'SAP_PURCHASE_IMPORT',
+    importRef?: string,
+    actorId?: string,
+    effectiveAt?: string
+  ): { status: 'updated' | 'unchanged' | 'not_found'; sku: string; oldMrp?: number; newMrp: number; message: string } {
+    const norm = (sku || '').trim().toUpperCase();
+    const unpadded = norm.replace(/^0+/, '');
+    const idx = this.products.findIndex(
+      (p) => p.sku.toUpperCase() === norm || (unpadded && p.sku.toUpperCase() === unpadded)
+    );
+
+    if (idx < 0) {
+      return {
+        status: 'not_found',
+        sku: norm,
+        newMrp,
+        message: `Product with SKU ${norm} not found in Product Master`,
+      };
+    }
+
+    const prod = this.products[idx];
+    const oldMrp = Number(prod.mrp || 0);
+
+    if (oldMrp === Number(newMrp)) {
+      return {
+        status: 'unchanged',
+        sku: norm,
+        oldMrp,
+        newMrp: oldMrp,
+        message: `Incoming MRP (${newMrp}) matches current MRP. No change.`,
+      };
+    }
+
+    // Update Product Master current MRP ONLY (historical transactions remain untouched!)
+    prod.mrp = Number(newMrp);
+    prod.updated_at = new Date().toISOString();
+
+    // Record in MRP History
+    this.saveProductMrpHistory({
+      product_id: prod.id,
+      sku: norm,
+      old_mrp: oldMrp,
+      new_mrp: Number(newMrp),
+      source,
+      import_reference: importRef || null,
+      changed_by: actorId || null,
+      effective_at: effectiveAt || new Date().toISOString(),
+    });
+
+    this.saveToStorage();
+
+    return {
+      status: 'updated',
+      sku: norm,
+      oldMrp,
+      newMrp: Number(newMrp),
+      message: `Updated SKU ${norm} MRP from ₹${oldMrp} to ₹${newMrp}`,
+    };
   }
 
   // No physical delete - Stage 6 non-physical deletion invariant

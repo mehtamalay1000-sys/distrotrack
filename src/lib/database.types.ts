@@ -202,6 +202,8 @@ export interface PicklistItem {
   free_quantity: number;
   rate: number;
   amount: number;
+  mrp?: number | null;
+  mrp_at_sale?: number | null;
   sap_line_data: string | null;
   // Joined
   product?: Product | null;
@@ -306,6 +308,8 @@ export interface DeliveryItem {
   damaged_free_qty: number;
   rate: number;
   amount: number;
+  mrp?: number | null;
+  mrp_at_sale?: number | null;
   notes: string | null;
 }
 
@@ -743,6 +747,21 @@ export interface MasterAuditLog {
   entity_id: string | null;
 }
 
+// ── Product MRP History ─────────────────────────────────────────────
+
+export interface ProductMrpHistory {
+  id: string;
+  product_id: string;
+  sku: string;
+  old_mrp: number;
+  new_mrp: number;
+  effective_at: string;
+  source: string;
+  import_reference: string | null;
+  changed_by?: string | null;
+  created_at: string;
+}
+
 // ── Database type for Supabase client ───────────────────────────────
 
 export interface Database {
@@ -754,6 +773,7 @@ export interface Database {
       routes: { Row: Route; Insert: Omit<Route, 'id' | 'created_at' | 'updated_at'>; Update: Partial<Route> };
       parties: { Row: Party; Insert: Omit<Party, 'id' | 'created_at' | 'updated_at'>; Update: Partial<Party> };
       products: { Row: Product; Insert: Omit<Product, 'id' | 'created_at' | 'updated_at'>; Update: Partial<Product> };
+      product_mrp_history: { Row: ProductMrpHistory; Insert: Omit<ProductMrpHistory, 'id' | 'created_at'>; Update: Partial<ProductMrpHistory> };
       picklists: { Row: Picklist; Insert: Omit<Picklist, 'id' | 'created_at' | 'updated_at'>; Update: Partial<Picklist> };
       picklist_parties: { Row: PicklistParty; Insert: Omit<PicklistParty, 'id'>; Update: Partial<PicklistParty> };
       picklist_items: { Row: PicklistItem; Insert: Omit<PicklistItem, 'id'>; Update: Partial<PicklistItem> };

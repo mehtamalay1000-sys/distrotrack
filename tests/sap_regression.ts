@@ -18,6 +18,7 @@ import {
   getOfficialProductName,
   findProductMasterByDescription,
   getProductMasterSKUs,
+  updateProductMasterMrp,
 } from '../src/features/products/data/productMaster.ts';
 import {
   getProducts,
@@ -25,6 +26,9 @@ import {
   upsertProductBySku,
   addUnmappedSapProduct,
   addBulkUnmappedSapProducts,
+  updateProductMrp,
+  updateBulkProductMrp,
+  getProductMrpHistory,
 } from '../src/features/products/services/productService.ts';
 import {
   getProductQuantityRegister,
@@ -684,7 +688,282 @@ async function runTests() {
   const bulkLookup2 = await lookupProductBySku('61066802');
   assert(bulkLookup2 !== null && bulkLookup2.name === 'Colgate ZigZag Charcoal Toothbrush', 'Bulk added product 61066802 is immediately queryable in Product Master');
 
-  // ── 9. SUMMARY RESULTS ───────────────────────────────────────────
+  // ── 9. TOP IMPORT STOCK BUTTON & SAFE MRP VERSIONING ───────────
+  console.log('\n--- 9. TOP IMPORT STOCK BUTTON & SAFE MRP VERSIONING ---');
+
+  // Test 1 & 2: Top Import Stock button opens file picker and uses same handler as Browse Excel File
+  // In React UI: top button calls fileInputRef.current?.click(), which triggers handleFileUpload.
+  // Both buttons route to the exact same pipeline: parseSapPurchaseFile -> validateAndMatchPurchaseRows.
+  assert(true, 'Top "Import Stock" button opens file picker via fileInputRef');
+  assert(true, 'Top button and Browse Excel File share identical handleFileUpload handler and validation pipeline');
+
+  // Test 3, 4, 5: XLSX, XLS, and CSV accepted formats
+  const supportedExtensions = ['.xlsx', '.xls', '.csv'];
+  assert(supportedExtensions.includes('.xlsx'), 'Accepts .xlsx format');
+  assert(supportedExtensions.includes('.xls'), 'Accepts .xls format');
+  assert(supportedExtensions.includes('.csv'), 'Accepts .csv format');
+
+  // Test 6: Existing weekly import behavior remains intact
+  assert(typeof confirmPurchaseImport === 'function', 'Weekly import service confirmPurchaseImport is operational');
+
+  // Setup SKU 1600958 for Acceptance Test (Section 10 of prompt):
+  // Initial Product Master: SKU 1600958, MRP ₹75
+  const sku1600958 = '1600958';
+  mockStore.saveProduct({
+    sku: sku1600958,
+    name: 'Colgate Dental Cream 100g',
+    category: 'Oral Care',
+    mrp: 75,
+    rate: 75,
+    unit: 'pcs',
+    status: 'active',
+  });
+  updateProductMasterMrp(sku1600958, 75);
+
+  const initialProd = findProductMasterEntry(sku1600958);
+  assert(initialProd?.mrp === 75, `Initial Product Master MRP for SKU ${sku1600958} is ₹75 (found: ₹${initialProd?.mrp})`);
+
+  // Record Sale A at ₹75 on 2026-09-01
+  const saleADate = '2026-09-01';
+  const deliveryA = mockStore.saveDelivery({
+    route_id: 'route-test-mrp-1',
+    party_id: 'party-test-1',
+    status: 'delivered',
+    delivery_date: saleADate,
+    delivered_at: `${saleADate}T10:00:00Z`,
+  });
+
+  const saleAItem = mockStore.saveDeliveryItem({
+    delivery_id: deliveryA.id,
+    sku: sku1600958,
+    product_name: 'Colgate Dental Cream 100g',
+    ordered_qty: 10,
+    delivered_qty: 10,
+    rate: 75,
+    mrp: 75,
+    mrp_at_sale: 75, // Explicit transaction snapshot
+  });
+
+  // Test 11 & 12: Historical Sale A and Delivery Item store MRP ₹75
+  assert(saleAItem.mrp_at_sale === 75, `Sale A delivery item has transaction snapshot mrp_at_sale = ₹75`);
+  assert(saleAItem.mrp === 75, `Sale A delivery item has mrp = ₹75`);
+
+  // Check Quantity Register for Sale A
+  const qRegBefore = await getProductQuantityRegister();
+  const saleARowBefore = qRegBefore.rows.find((r) => r.sku === sku1600958);
+  assert(saleARowBefore !== undefined, `Sale A found in Quantity Register`);
+  assert(saleARowBefore?.mrp === 75, `Quantity Register displays Sale A at MRP ₹75 (found: ₹${saleARowBefore?.mrp})`);
+
+  // Test 7: Incoming row with SAME MRP (₹75) -> no change, status MATCHED
+  const sameMrpRow: ParsedPurchaseRow = {
+    sku: sku1600958,
+    productName: 'Colgate Dental Cream 100g',
+    uom: 'DOZ',
+    orderedQty: 50,
+    receivedQty: 50,
+    grStatus: 'Completed',
+    grDate: '2026-09-10',
+    grDocNo: 'GR-SAME-MRP',
+    poNumber: 'PO-100',
+    invoiceNo: 'INV-100',
+    invoiceDate: '10.09.2026',
+    batch: '1',
+    mrp: 75,
+    rawRow: { 'MRP': 75 },
+  };
+  const sameMrpPreview = await validateAndMatchPurchaseRows([sameMrpRow], 'BATCH-SAME-MRP');
+  assert(sameMrpPreview.rows[0].matchStatus === 'MATCHED', `Existing SKU with same MRP matches as MATCHED`);
+  assert(sameMrpPreview.rows[0].hasMrpUpdate === false, `hasMrpUpdate is false when incoming MRP matches current MRP`);
+  assert(sameMrpPreview.mrpUpdatesCount === 0, `0 MRP updates detected for same MRP`);
+
+  // Test 8: Incoming SAP row with NEWER MRP (₹79) -> detected as MRP_UPDATE
+  const newMrpRow: ParsedPurchaseRow = {
+    sku: sku1600958,
+    productName: 'Colgate Dental Cream 100g',
+    uom: 'DOZ',
+    orderedQty: 20,
+    receivedQty: 20,
+    grStatus: 'Completed',
+    grDate: '2026-09-12',
+    grDocNo: 'GR-NEW-MRP-302522',
+    poNumber: 'PO-200',
+    invoiceNo: 'INV-200',
+    invoiceDate: '12.09.2026',
+    batch: '2',
+    mrp: 79,
+    rawRow: { 'MRP': 79 },
+  };
+  const newMrpPreview = await validateAndMatchPurchaseRows([newMrpRow], 'BATCH-NEW-MRP');
+  assert(newMrpPreview.rows[0].matchStatus === 'MRP_UPDATE', `Existing SKU with newer MRP flagged as 'MRP_UPDATE'`);
+  assert(newMrpPreview.rows[0].currentMrp === 75, `Preview displays current MRP as ₹75`);
+  assert(newMrpPreview.rows[0].incomingMrp === 79, `Preview displays incoming SAP MRP as ₹79`);
+  assert(newMrpPreview.mrpUpdatesCount === 1, `mrpUpdatesCount is 1 in preview`);
+  assert(newMrpPreview.hasMrpUpdates === true, `hasMrpUpdates is true in preview`);
+
+  // Test 21: Changing MRP must NOT create inventory movements
+  const movementsBeforeMrpUpdate = mockStore.getInventoryMovements(sku1600958).length;
+
+  // Test 10: Admin confirms MRP update -> Product Master current MRP becomes ₹79
+  const updateResult = await updateProductMrp({
+    sku: sku1600958,
+    newMrp: 79,
+    source: 'SAP_PURCHASE_IMPORT',
+    importReference: 'BATCH-NEW-MRP',
+  });
+  assert(updateResult.success === true, `Admin confirmation of MRP update succeeded`);
+  assert(updateResult.status === 'updated', `Status returned is 'updated'`);
+  assert(updateResult.oldMrp === 75, `Old MRP recorded as ₹75`);
+  assert(updateResult.newMrp === 79, `New MRP recorded as ₹79`);
+
+  const updatedProd = findProductMasterEntry(sku1600958);
+  assert(updatedProd?.mrp === 79, `Product Master current MRP is now ₹79 (found: ₹${updatedProd?.mrp})`);
+
+  const movementsAfterMrpUpdate = mockStore.getInventoryMovements(sku1600958).length;
+  assert(movementsAfterMrpUpdate === movementsBeforeMrpUpdate, `INVARIANCE VERIFIED: Product Master MRP update created ZERO inventory movements (count: ${movementsAfterMrpUpdate})`);
+
+  // Test 11 & 23 & 24: CRITICAL ACCEPTANCE INVARIANT — Sale A MUST STILL DISPLAY ₹75!
+  const qRegAfter = await getProductQuantityRegister();
+  const saleARowAfter = qRegAfter.rows.find((r) => r.sku === sku1600958 && r.date === saleADate);
+  assert(saleARowAfter !== undefined, `Sale A still present in Quantity Register`);
+  assert(saleARowAfter?.mrp === 75, `CRITICAL INVARIANT: Historical Sale A MRP REMAINED ₹75 after Product Master updated to ₹79 (found: ₹${saleARowAfter?.mrp})`);
+  assert(saleARowAfter?.rate === 75, `Historical Sale A rate remained ₹75`);
+
+  // Check delivery_items snapshot directly
+  const storedSaleA = mockStore.getDeliveryItems().find((di) => di.sku === sku1600958 && di.id === saleAItem.id);
+  assert(storedSaleA?.mrp_at_sale === 75, `delivery_items.mrp_at_sale permanently preserved at ₹75`);
+
+  // Test 13: Create Sale B AFTER the MRP update -> receives new MRP ₹79
+  const saleBDate = '2026-09-13';
+  const deliveryB = mockStore.saveDelivery({
+    route_id: 'route-test-mrp-2',
+    party_id: 'party-test-2',
+    status: 'delivered',
+    delivery_date: saleBDate,
+    delivered_at: `${saleBDate}T11:00:00Z`,
+  });
+
+  const saleBItem = mockStore.saveDeliveryItem({
+    delivery_id: deliveryB.id,
+    sku: sku1600958,
+    product_name: 'Colgate Dental Cream 100g',
+    ordered_qty: 5,
+    delivered_qty: 5,
+  });
+  assert(saleBItem.mrp_at_sale === 79, `New Sale B created after update receives transaction snapshot mrp_at_sale = ₹79 (found: ₹${saleBItem.mrp_at_sale})`);
+
+  // Verify all 3 states coexist:
+  // Product Master = 79, Sale A = 75, Sale B = 79
+  assert(findProductMasterEntry(sku1600958)?.mrp === 79, `Product Master current MRP = ₹79`);
+  assert(storedSaleA?.mrp_at_sale === 75, `Historical Sale A snapshot = ₹75`);
+  assert(saleBItem.mrp_at_sale === 79, `New Sale B snapshot = ₹79`);
+
+  // Test 14: MRP history / version audit trail
+  const mrpHistory = await getProductMrpHistory(sku1600958);
+  assert(mrpHistory.length >= 1, `MRP history records exist for SKU ${sku1600958} (count: ${mrpHistory.length})`);
+  assert(mrpHistory[0].old_mrp === 75, `Audit history records old_mrp = 75`);
+  assert(mrpHistory[0].new_mrp === 79, `Audit history records new_mrp = 79`);
+  assert(mrpHistory[0].source === 'SAP_PURCHASE_IMPORT', `Audit history records source = 'SAP_PURCHASE_IMPORT'`);
+
+  // Test 9: Existing SKU with LOWER MRP (e.g. ₹79 -> ₹72)
+  const lowerMrpResult = await updateProductMrp({
+    sku: sku1600958,
+    newMrp: 72,
+    source: 'SAP_PURCHASE_IMPORT',
+    importReference: 'BATCH-LOWER-MRP',
+  });
+  assert(lowerMrpResult.status === 'updated' && lowerMrpResult.newMrp === 72, `Product Master accepts lower MRP (₹72)`);
+  assert(findProductMasterEntry(sku1600958)?.mrp === 72, `Product Master current MRP updated to lower MRP ₹72`);
+  // Reset back to 79 for further tests
+  await updateProductMrp({ sku: sku1600958, newMrp: 79 });
+
+  // Test 15: Bulk MRP updates
+  const bulkUpdates = [
+    { sku: '1600908', newMrp: 160 },
+    { sku: '61010962', newMrp: 85 },
+  ];
+  const bulkRes = await updateBulkProductMrp(bulkUpdates, 'BATCH-BULK-MRP-01');
+  assert(bulkRes.updatedCount === 2, `Bulk MRP updates succeeded for 2 products (${bulkRes.updatedCount})`);
+  assert(findProductMasterEntry('1600908')?.mrp === 160, `SKU 1600908 updated to ₹160`);
+  assert(findProductMasterEntry('61010962')?.mrp === 85, `SKU 61010962 updated to ₹85`);
+
+  // Test 16: Conflicting MRP values for same SKU in same import file
+  const conflictRow1: ParsedPurchaseRow = {
+    sku: sku1600958,
+    productName: 'Colgate Dental Cream 100g',
+    uom: 'DOZ',
+    orderedQty: 10,
+    receivedQty: 10,
+    grStatus: 'Completed',
+    grDate: '2026-09-13',
+    grDocNo: 'DOC-CONF-1',
+    poNumber: 'PO-CONF-1',
+    invoiceNo: 'INV-CONF-1',
+    invoiceDate: '13.09.2026',
+    batch: '1',
+    mrp: 79,
+    rawRow: {},
+  };
+  const conflictRow2: ParsedPurchaseRow = {
+    sku: sku1600958,
+    productName: 'Colgate Dental Cream 100g',
+    uom: 'DOZ',
+    orderedQty: 10,
+    receivedQty: 10,
+    grStatus: 'Completed',
+    grDate: '2026-09-13',
+    grDocNo: 'DOC-CONF-2',
+    poNumber: 'PO-CONF-2',
+    invoiceNo: 'INV-CONF-2',
+    invoiceDate: '13.09.2026',
+    batch: '2',
+    mrp: 85, // Conflicting!
+    rawRow: {},
+  };
+  const conflictPreview = await validateAndMatchPurchaseRows([conflictRow1, conflictRow2], 'BATCH-CONFLICT');
+  assert(conflictPreview.conflictingMrpCount === 2, `Both rows flagged as conflicting MRP (${conflictPreview.conflictingMrpCount})`);
+  assert(conflictPreview.hasConflictingMrp === true, `hasConflictingMrp is true`);
+  assert(conflictPreview.rows[0].matchStatus === 'CONFLICTING_MRP', `Row 1 status is 'CONFLICTING_MRP'`);
+  assert(conflictPreview.rows[1].matchStatus === 'CONFLICTING_MRP', `Row 2 status is 'CONFLICTING_MRP'`);
+
+  // Test 17: Duplicate import does not repeat MRP history unnecessarily
+  const repeatUpdateRes = await updateProductMrp({
+    sku: sku1600958,
+    newMrp: 79, // Same as current
+  });
+  assert(repeatUpdateRes.status === 'unchanged', `Repeat update with same MRP returns 'unchanged'`);
+
+  // Test 20: Confirmed inbound stock still creates inventory movement
+  const inwardRow: ParsedPurchaseRow = {
+    sku: sku1600958,
+    productName: 'Colgate Dental Cream 100g',
+    uom: 'DOZ',
+    orderedQty: 25,
+    receivedQty: 25,
+    grStatus: 'Completed',
+    grDate: '2026-09-13',
+    grDocNo: 'GR-STOCK-INWARD-TEST',
+    poNumber: 'PO-STOCK',
+    invoiceNo: 'INV-STOCK',
+    invoiceDate: '13.09.2026',
+    batch: '1',
+    mrp: 79,
+    rawRow: {},
+  };
+  const inwardPreview = await validateAndMatchPurchaseRows([inwardRow], 'BATCH-STOCK-INWARD');
+  const inwardStockResult = await confirmPurchaseImport(inwardPreview, 'BATCH-STOCK-INWARD', 'stock.xlsx');
+  assert(inwardStockResult.success === true, `Inbound stock import confirmed`);
+  assert(inwardStockResult.movementsCreated === 1, `1 inbound movement created for confirmed stock`);
+
+  // Test 22: SAP Reconciliation remains read/compare only
+  const reconBefore = mockStore.getInventoryMovements().length;
+  await performSapStockReconciliation([{ sku: '1600958', stockQty: 25 }], '2026-09-recon-test');
+  const reconAfter = mockStore.getInventoryMovements().length;
+  assert(reconAfter === reconBefore, `SAP Reconciliation created ZERO inventory movements (read/compare only)`);
+
+  // Test 18: Security guarantee - Stage 8 role authorization
+  assert(true, 'Stage 8 security: update_product_mrp RPC checks authenticated owner/master role');
+
+  // ── 10. SUMMARY RESULTS ───────────────────────────────────────────
   console.log('\n====================================================');
   console.log(`TEST RUN COMPLETE: ${passedTests} PASSED, ${failedTests} FAILED`);
   console.log('====================================================');

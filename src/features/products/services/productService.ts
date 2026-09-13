@@ -1,7 +1,7 @@
 import { supabase } from '@/lib/supabase';
 import { mockStore } from '@/lib/mockStore';
-import { SAP_PRODUCT_MASTER, findProductMasterEntry, findProductMasterByDescription, registerProductMasterEntry } from '@/features/products/data/productMaster';
-import type { Product } from '@/lib/database.types';
+import { SAP_PRODUCT_MASTER, findProductMasterEntry, findProductMasterByDescription, registerProductMasterEntry, updateProductMasterMrp } from '@/features/products/data/productMaster';
+import type { Product, ProductMrpHistory } from '@/lib/database.types';
 
 export interface ProductFilterOptions {
   search?: string;
@@ -971,4 +971,223 @@ export async function addBulkUnmappedSapProducts(
     details,
   };
 }
+
+// ── Safe MRP Versioning Operations ──────────────────────────────────
+
+export interface UpdateProductMrpInput {
+  sku: string;
+  newMrp: number;
+  source?: string;
+  importReference?: string;
+  effectiveAt?: string;
+}
+
+export interface UpdateProductMrpResult {
+  success: boolean;
+  status: 'updated' | 'unchanged' | 'not_found' | 'error';
+  sku: string;
+  oldMrp?: number;
+  newMrp: number;
+  message: string;
+  historyId?: string;
+  error?: string;
+}
+
+export interface BulkUpdateMrpResult {
+  total: number;
+  updatedCount: number;
+  unchangedCount: number;
+  errorCount: number;
+  details: Array<{
+    sku: string;
+    old_mrp?: number;
+    new_mrp: number;
+    status: 'updated' | 'unchanged' | 'not_found' | 'error';
+    error?: string;
+  }>;
+}
+
+/**
+ * Updates a product's current MRP safely via server-side RPC (Stage 8 Security).
+ * Automatically logs to product_mrp_history and master_audit_log.
+ * NEVER alters historical transaction records.
+ */
+export async function updateProductMrp(input: UpdateProductMrpInput): Promise<UpdateProductMrpResult> {
+  const normSku = (input.sku || '').trim().toUpperCase();
+  const newMrp = Number(input.newMrp);
+
+  if (!normSku || isNaN(newMrp) || newMrp <= 0) {
+    return {
+      success: false,
+      status: 'error',
+      sku: normSku,
+      newMrp,
+      message: 'Invalid SKU or MRP value',
+      error: 'Invalid SKU or MRP value',
+    };
+  }
+
+  try {
+    const { data, error } = await supabase.rpc('update_product_mrp', {
+      p_sku: normSku,
+      p_new_mrp: newMrp,
+      p_source: input.source || 'SAP_PURCHASE_IMPORT',
+      p_import_reference: input.importReference || null,
+      p_effective_at: input.effectiveAt || null,
+    });
+
+    if (error) {
+      throw error;
+    }
+
+    if (data) {
+      const res = data as any;
+      // Sync in-memory master and mockStore
+      updateProductMasterMrp(normSku, newMrp);
+      mockStore.updateProductMrp(normSku, newMrp, input.source, input.importReference, undefined, input.effectiveAt);
+
+      return {
+        success: res.status === 'updated' || res.status === 'unchanged',
+        status: res.status,
+        sku: normSku,
+        oldMrp: res.old_mrp !== undefined ? Number(res.old_mrp) : undefined,
+        newMrp: res.new_mrp !== undefined ? Number(res.new_mrp) : newMrp,
+        message: res.message || `MRP updated to ₹${newMrp}`,
+        historyId: res.history_id,
+      };
+    }
+  } catch (rpcErr: any) {
+    console.warn('[productService] update_product_mrp RPC failed or offline:', rpcErr?.message);
+  }
+
+  // Fallback to mockStore & in-memory master
+  const res = mockStore.updateProductMrp(
+    normSku,
+    newMrp,
+    input.source || 'SAP_PURCHASE_IMPORT',
+    input.importReference,
+    undefined,
+    input.effectiveAt
+  );
+  updateProductMasterMrp(normSku, newMrp);
+
+  return {
+    success: res.status === 'updated' || res.status === 'unchanged',
+    status: res.status,
+    sku: normSku,
+    oldMrp: res.oldMrp,
+    newMrp: res.newMrp,
+    message: res.message,
+  };
+}
+
+/**
+ * Bulk updates multiple products' current MRP safely.
+ * Only executes for SKUs confirmed by the Admin.
+ */
+export async function updateBulkProductMrp(
+  updates: Array<{ sku: string; newMrp: number; effectiveAt?: string }>,
+  importRef?: string,
+  source: string = 'SAP_PURCHASE_IMPORT'
+): Promise<BulkUpdateMrpResult> {
+  if (!updates || updates.length === 0) {
+    return { total: 0, updatedCount: 0, unchangedCount: 0, errorCount: 0, details: [] };
+  }
+
+  try {
+    const rpcPayload = updates.map((u) => ({
+      sku: u.sku.trim().toUpperCase(),
+      new_mrp: Number(u.newMrp),
+      effective_at: u.effectiveAt || null,
+    }));
+
+    const { data, error } = await supabase.rpc('update_bulk_product_mrp', {
+      p_updates: rpcPayload,
+      p_source: source,
+      p_import_reference: importRef || null,
+    });
+
+    if (error) {
+      throw error;
+    }
+
+    if (data) {
+      const res = data as any;
+      // Sync mockStore and in-memory master for each updated
+      for (const u of updates) {
+        updateProductMasterMrp(u.sku, u.newMrp);
+        mockStore.updateProductMrp(u.sku, u.newMrp, source, importRef, undefined, u.effectiveAt);
+      }
+      return {
+        total: res.total || updates.length,
+        updatedCount: res.updated_count || 0,
+        unchangedCount: res.unchanged_count || 0,
+        errorCount: res.error_count || 0,
+        details: res.details || [],
+      };
+    }
+  } catch (rpcErr: any) {
+    console.warn('[productService] update_bulk_product_mrp RPC failed or offline:', rpcErr?.message);
+  }
+
+  // Fallback sequential updates
+  let updatedCount = 0;
+  let unchangedCount = 0;
+  let errorCount = 0;
+  const details: BulkUpdateMrpResult['details'] = [];
+
+  for (const u of updates) {
+    const res = await updateProductMrp({
+      sku: u.sku,
+      newMrp: u.newMrp,
+      source,
+      importReference: importRef,
+      effectiveAt: u.effectiveAt,
+    });
+
+    if (res.status === 'updated') {
+      updatedCount++;
+      details.push({ sku: u.sku, old_mrp: res.oldMrp, new_mrp: res.newMrp, status: 'updated' });
+    } else if (res.status === 'unchanged') {
+      unchangedCount++;
+      details.push({ sku: u.sku, old_mrp: res.oldMrp, new_mrp: res.newMrp, status: 'unchanged' });
+    } else {
+      errorCount++;
+      details.push({ sku: u.sku, new_mrp: u.newMrp, status: 'error', error: res.message });
+    }
+  }
+
+  return {
+    total: updates.length,
+    updatedCount,
+    unchangedCount,
+    errorCount,
+    details,
+  };
+}
+
+/**
+ * Fetch historical MRP audit trail for a SKU.
+ */
+export async function getProductMrpHistory(sku: string): Promise<ProductMrpHistory[]> {
+  const normSku = (sku || '').trim().toUpperCase();
+  if (!normSku) return [];
+
+  try {
+    const { data, error } = await supabase
+      .from('product_mrp_history')
+      .select('*')
+      .eq('sku', normSku)
+      .order('created_at', { ascending: false });
+
+    if (!error && data && data.length > 0) {
+      return data as ProductMrpHistory[];
+    }
+  } catch {
+    // Fallback
+  }
+
+  return mockStore.getProductMrpHistory(normSku);
+}
+
 
