@@ -13,6 +13,7 @@ import { PartiesPage } from '@/features/parties/pages/PartiesPage';
 import { ProductsPage } from '@/features/products/pages/ProductsPage';
 import { ProductQuantityRegisterPage } from '@/features/products/pages/ProductQuantityRegisterPage';
 import { SapReconciliationPage } from '@/features/products/pages/SapReconciliationPage';
+import { ImportNewStockPage } from '@/features/inventory/pages/ImportNewStockPage';
 import { ExpensesPage } from '@/features/expenses/pages/ExpensesPage';
 import { ImportPage } from '@/features/import/pages/ImportPage';
 import { MasterDataPage } from '@/features/import/pages/MasterDataPage';
@@ -62,8 +63,11 @@ export const router = createBrowserRouter([
               { path: '/admin/routes', element: <RoutesPage /> },
               { path: '/admin/parties', element: <PartiesPage /> },
               { path: '/admin/products', element: <ProductsPage /> },
+              { path: '/admin/inventory/import-stock', element: <ImportNewStockPage /> },
+              { path: '/admin/inventory/import', element: <ImportNewStockPage /> },
               { path: '/admin/inventory/register', element: <ProductQuantityRegisterPage /> },
               { path: '/admin/inventory/reconciliation', element: <SapReconciliationPage /> },
+              { path: '/admin/products/import-stock', element: <ImportNewStockPage /> },
               { path: '/admin/products/register', element: <ProductQuantityRegisterPage /> },
               { path: '/admin/products/reconciliation', element: <SapReconciliationPage /> },
               { path: '/admin/picklists', element: <PicklistsPage /> },

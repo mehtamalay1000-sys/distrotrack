@@ -567,14 +567,19 @@ export interface InventoryMovement {
   direction: InventoryMovementDirection;
   from_location: InventoryLocation | string;
   to_location: InventoryLocation | string;
-  picklist_id: string | null;
-  route_id: string | null;
-  delivery_id: string | null;
-  party_id: string | null;
-  worker_id: string | null;
-  reference_number: string | null;
-  notes: string | null;
-  idempotency_key: string | null;
+  picklist_id?: string | null;
+  route_id?: string | null;
+  delivery_id?: string | null;
+  party_id?: string | null;
+  worker_id?: string | null;
+  reference_number?: string | null;
+  notes?: string | null;
+  idempotency_key?: string | null;
+  source_location?: string | null;
+  destination_location?: string | null;
+  reference_type?: string | null;
+  reference_id?: string | null;
+  created_by?: string | null;
   created_at: string;
   // Joined
   product?: Product | null;
@@ -664,6 +669,40 @@ export interface SapStockReconciliationItem {
   created_at: string;
 }
 
+export interface SapPurchaseImport {
+  id: string;
+  batch_ref: string;
+  file_name: string | null;
+  imported_at: string;
+  imported_by: string | null;
+  total_rows: number;
+  movements_created: number;
+  skipped_duplicate: number;
+  skipped_unmapped: number;
+  notes?: string | null;
+  created_at: string;
+}
+
+export interface SapPurchaseImportItem {
+  id: string;
+  import_id: string;
+  sku: string;
+  product_id: string | null;
+  product_name: string;
+  quantity: number;
+  uom: string;
+  gr_status: string | null;
+  gr_date: string | null;
+  gr_doc_no: string | null;
+  po_number: string | null;
+  invoice_no: string | null;
+  idempotency_key: string;
+  movement_id: string | null;
+  status: 'created' | 'duplicate' | 'unmapped' | 'error';
+  notes?: string | null;
+  created_at: string;
+}
+
 export interface ProductQuantityRegisterRow {
   date: string;
   picklistNumber: string;
@@ -738,6 +777,8 @@ export interface Database {
       unmapped_sku_exceptions: { Row: UnmappedSkuException; Insert: Omit<UnmappedSkuException, 'id' | 'created_at' | 'updated_at'>; Update: Partial<UnmappedSkuException> };
       sap_stock_reconciliations: { Row: SapStockReconciliation; Insert: Omit<SapStockReconciliation, 'id' | 'created_at' | 'updated_at'>; Update: Partial<SapStockReconciliation> };
       sap_stock_reconciliation_items: { Row: SapStockReconciliationItem; Insert: Omit<SapStockReconciliationItem, 'id' | 'created_at'>; Update: Partial<SapStockReconciliationItem> };
+      sap_purchase_imports: { Row: SapPurchaseImport; Insert: Omit<SapPurchaseImport, 'id' | 'created_at'>; Update: Partial<SapPurchaseImport> };
+      sap_purchase_import_items: { Row: SapPurchaseImportItem; Insert: Omit<SapPurchaseImportItem, 'id' | 'created_at'>; Update: Partial<SapPurchaseImportItem> };
     };
     Views: Record<string, never>;
     Functions: Record<string, never>;

@@ -1,6 +1,7 @@
 import type {
   Worker, Route, Party, Product, Picklist, Delivery, Payment, Expense, PicklistItem, DeliveryItem,
-  RouteStockException, UnmappedSkuException, SapStockReconciliation, SapStockReconciliationItem
+  RouteStockException, UnmappedSkuException, SapStockReconciliation, SapStockReconciliationItem,
+  InventoryMovement, SapPurchaseImport, SapPurchaseImportItem
 } from '@/lib/database.types';
 import { SAP_PRODUCT_MASTER } from '@/features/products/data/productMaster';
 import { getLocalDateString } from '@/shared/utils/format';
@@ -138,6 +139,9 @@ class MockStore {
   private unmappedSkuExceptions: UnmappedSkuException[] = [];
   private sapStockReconciliations: SapStockReconciliation[] = [];
   private sapStockReconciliationItems: SapStockReconciliationItem[] = [];
+  private inventoryMovements: InventoryMovement[] = [];
+  private sapPurchaseImports: SapPurchaseImport[] = [];
+  private sapPurchaseImportItems: SapPurchaseImportItem[] = [];
 
   constructor() {
     this.loadFromStorage();
@@ -206,6 +210,9 @@ class MockStore {
         this.unmappedSkuExceptions = parsed.unmappedSkuExceptions || [];
         this.sapStockReconciliations = parsed.sapStockReconciliations || [];
         this.sapStockReconciliationItems = parsed.sapStockReconciliationItems || [];
+        this.inventoryMovements = parsed.inventoryMovements || [];
+        this.sapPurchaseImports = parsed.sapPurchaseImports || [];
+        this.sapPurchaseImportItems = parsed.sapPurchaseImportItems || [];
       } else {
         this.resetToDefaults();
       }
@@ -236,6 +243,9 @@ class MockStore {
           unmappedSkuExceptions: this.unmappedSkuExceptions,
           sapStockReconciliations: this.sapStockReconciliations,
           sapStockReconciliationItems: this.sapStockReconciliationItems,
+          inventoryMovements: this.inventoryMovements,
+          sapPurchaseImports: this.sapPurchaseImports,
+          sapPurchaseImportItems: this.sapPurchaseImportItems,
         })
       );
     } catch (e) {
@@ -987,6 +997,76 @@ class MockStore {
     }
     this.saveToStorage();
     return createdRec;
+  }
+
+  // ── Inventory Movements & SAP Purchase Imports ───────────────────
+  getInventoryMovements(sku?: string): InventoryMovement[] {
+    if (sku) {
+      const norm = sku.toUpperCase();
+      return this.inventoryMovements.filter((m) => m.sku.toUpperCase() === norm);
+    }
+    return [...this.inventoryMovements];
+  }
+
+  addInventoryMovement(
+    movement: Partial<InventoryMovement> & {
+      product_id: string;
+      sku: string;
+      movement_type: any;
+      quantity: number;
+      direction: any;
+      from_location: string;
+      to_location: string;
+    }
+  ): InventoryMovement {
+    const created: InventoryMovement = {
+      id: movement.id || `mov-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      occurred_at: movement.occurred_at || new Date().toISOString(),
+      created_at: movement.created_at || new Date().toISOString(),
+      ...movement,
+    };
+    this.inventoryMovements.push(created);
+    this.saveToStorage();
+    return created;
+  }
+
+  getSapPurchaseImports(): SapPurchaseImport[] {
+    return [...this.sapPurchaseImports];
+  }
+
+  getSapPurchaseImportItems(importId?: string): SapPurchaseImportItem[] {
+    if (importId) {
+      return this.sapPurchaseImportItems.filter((i) => i.import_id === importId);
+    }
+    return [...this.sapPurchaseImportItems];
+  }
+
+  saveSapPurchaseImport(
+    imp: Omit<SapPurchaseImport, 'id' | 'created_at' | 'imported_at'> & { id?: string; imported_at?: string },
+    items: Array<Omit<SapPurchaseImportItem, 'id' | 'import_id' | 'created_at'> & { id?: string }>
+  ): { importRecord: SapPurchaseImport; items: SapPurchaseImportItem[] } {
+    const importId = imp.id || `imp-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+    const importRecord: SapPurchaseImport = {
+      ...imp,
+      id: importId,
+      imported_at: imp.imported_at || new Date().toISOString(),
+      created_at: new Date().toISOString(),
+    };
+    this.sapPurchaseImports.unshift(importRecord);
+
+    const createdItems: SapPurchaseImportItem[] = [];
+    for (const it of items) {
+      const itemRecord: SapPurchaseImportItem = {
+        ...it,
+        id: it.id || `impi-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+        import_id: importId,
+        created_at: new Date().toISOString(),
+      };
+      this.sapPurchaseImportItems.push(itemRecord);
+      createdItems.push(itemRecord);
+    }
+    this.saveToStorage();
+    return { importRecord, items: createdItems };
   }
 
   // No physical delete - Stage 6 non-physical deletion invariant

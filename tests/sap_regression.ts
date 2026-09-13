@@ -44,6 +44,16 @@ import {
 } from '../src/features/master/services/masterService.ts';
 import { startRoute } from '../src/features/worker/services/workerRouteService.ts';
 import { mockStore } from '../src/lib/mockStore.ts';
+import {
+  parseSapPurchaseFile,
+  validateAndMatchPurchaseRows,
+  confirmPurchaseImport,
+  getRecentPurchaseImports,
+  type ParsedPurchaseRow,
+} from '../src/features/inventory/services/purchaseImportService.ts';
+import {
+  getDistroTrackOperationalStock,
+} from '../src/features/products/services/sapReconciliationService.ts';
 
 let passedTests = 0;
 let failedTests = 0;
@@ -279,7 +289,234 @@ async function runTests() {
   const masterUnmappedSkus = await getMasterUnmappedSkus();
   assert(masterUnmappedSkus.length >= 1, `Master unmapped SKU register accessible (${masterUnmappedSkus.length} unmapped SKUs)`);
 
-  // ── 7. SUMMARY RESULTS ───────────────────────────────────────────
+  // ── 7. WEEKLY SAP PURCHASE / GR INWARD STOCK IMPORT ──────────────
+  console.log('\n--- 7. WEEKLY SAP PURCHASE / GR INWARD STOCK IMPORT & ACCEPTANCE ---');
+
+  // Pre-test: verify initial calculated stock for SKU 1600908
+  const initialStock = await getDistroTrackOperationalStock('1600908');
+  assert(initialStock.calculatedStock === null || initialStock.calculatedStock === 0, 'SKU 1600908 initial stock is 0/unrecorded prior to purchase import');
+
+  // Realistic sample batch mirroring SAP purchase file columns (confirmed vs ordered, GR status, etc.)
+  const samplePurchaseRows: ParsedPurchaseRow[] = [
+    {
+      sku: '1600908',
+      productName: 'Col ActSalt Tpst200',
+      uom: 'DOZ',
+      orderedQty: 120, // Ordered was 120, but confirmed received is 100!
+      receivedQty: 100, // CONFIRMED RECEIVED STOCK: ONLY this may increase operational stock
+      grStatus: 'Completed',
+      grDate: '2026-09-10',
+      grDocNo: '3025221175',
+      poNumber: '4500987654',
+      invoiceNo: '81D0001878',
+      invoiceDate: '2026-09-09',
+      batch: '44',
+      rawRow: {},
+    },
+    {
+      sku: '61059907',
+      productName: 'CDC 40g NF 12 +1 CMF 20B/R',
+      uom: 'DOZ',
+      orderedQty: 360,
+      receivedQty: 360,
+      grStatus: 'Completed',
+      grDate: '2026-09-03',
+      grDocNo: '3024574206',
+      poNumber: '4500987654',
+      invoiceNo: '81D0001541',
+      invoiceDate: '2026-09-02',
+      batch: '2',
+      rawRow: {},
+    },
+    {
+      sku: '61042330',
+      productName: 'Sensitive 6 + 1 (PO2)',
+      uom: 'DOZ',
+      orderedQty: 50,
+      receivedQty: 50,
+      grStatus: 'Pending', // Pending GR -> MUST be excluded!
+      grDate: '2026-09-10',
+      grDocNo: '3025221175',
+      poNumber: '4500987654',
+      invoiceNo: '81D0001878',
+      invoiceDate: '2026-09-09',
+      batch: '14',
+      rawRow: {},
+    },
+    {
+      sku: '61050884',
+      productName: 'CDC 100 NF',
+      uom: 'DOZ',
+      orderedQty: 20,
+      receivedQty: 20,
+      grStatus: 'Cancelled', // Cancelled GR -> MUST be excluded!
+      grDate: '2026-09-10',
+      grDocNo: '3025221175',
+      poNumber: '4500987654',
+      invoiceNo: '81D0001878',
+      invoiceDate: '2026-09-09',
+      batch: '10',
+      rawRow: {},
+    },
+    {
+      sku: 'UNKNOWN-999999',
+      productName: 'Mystery Colgate Line',
+      uom: 'DOZ',
+      orderedQty: 10,
+      receivedQty: 10,
+      grStatus: 'Completed', // Unknown SKU -> MUST be marked UNMAPPED and skipped!
+      grDate: '2026-09-10',
+      grDocNo: '3025221175',
+      poNumber: '4500987654',
+      invoiceNo: '81D0001878',
+      invoiceDate: '2026-09-09',
+      batch: '99',
+      rawRow: {},
+    },
+    {
+      sku: '61050877',
+      productName: 'CDC 200+100+Tbr NF',
+      uom: 'DOZ',
+      orderedQty: 10,
+      receivedQty: -5, // Negative quantity -> INVALID_QTY!
+      grStatus: 'Completed',
+      grDate: '2026-09-10',
+      grDocNo: '3025221175',
+      poNumber: '4500987654',
+      invoiceNo: '81D0001878',
+      invoiceDate: '2026-09-09',
+      batch: '12',
+      rawRow: {},
+    },
+    {
+      sku: '61050878',
+      productName: 'CDC 200 NF',
+      uom: 'DOZ',
+      orderedQty: 30,
+      receivedQty: 0, // Zero quantity -> INVALID_QTY!
+      grStatus: 'Completed',
+      grDate: '2026-09-10',
+      grDocNo: '3025221175',
+      poNumber: '4500987654',
+      invoiceNo: '81D0001878',
+      invoiceDate: '2026-09-09',
+      batch: '34',
+      rawRow: {},
+    },
+  ];
+
+  // 1. Validation & Matching
+  const preview = await validateAndMatchPurchaseRows(samplePurchaseRows, 'GR-TEST-BATCH-001');
+  assert(preview.totalRows === 7, `Preview total rows = 7 (${preview.totalRows})`);
+  assert(preview.matched === 2, `Preview matched rows = 2 (${preview.matched})`);
+  assert(preview.unmapped === 1, `Preview unmapped SKU = 1 (${preview.unmapped})`);
+  assert(preview.excluded === 2, `Preview excluded pending/cancelled = 2 (${preview.excluded})`);
+  assert(preview.invalid === 2, `Preview invalid (<= 0) quantity = 2 (${preview.invalid})`);
+  assert(preview.totalReceivedQty === 460, `Total confirmed received quantity = 460 (100 + 360) (${preview.totalReceivedQty})`);
+
+  // Verify SKU 1600908 row details in preview
+  const sku1600908Row = preview.rows.find(r => r.sku === '1600908');
+  assert(sku1600908Row?.matchStatus === 'MATCHED', 'SKU 1600908 matchStatus === MATCHED');
+  assert(sku1600908Row?.canonicalName === 'Col ActSalt Tpst200', `Canonical name resolved: "${sku1600908Row?.canonicalName}"`);
+  assert(sku1600908Row?.receivedQty === 100, `Confirmed quantity used (100) instead of ordered quantity (120): ${sku1600908Row?.receivedQty}`);
+
+  // Verify Unmapped SKU details
+  const unmappedRow = preview.rows.find(r => r.sku === 'UNKNOWN-999999');
+  assert(unmappedRow?.matchStatus === 'UNMAPPED', 'UNKNOWN-999999 marked as UNMAPPED');
+
+  // Verify Pending GR excluded
+  const pendingRow = preview.rows.find(r => r.sku === '61042330');
+  assert(pendingRow?.matchStatus === 'EXCLUDED_STATUS', 'Pending GR marked as EXCLUDED_STATUS');
+
+  // Verify Cancelled GR excluded
+  const cancelledRow = preview.rows.find(r => r.sku === '61050884');
+  assert(cancelledRow?.matchStatus === 'EXCLUDED_STATUS', 'Cancelled GR marked as EXCLUDED_STATUS');
+
+  // 2. Admin Confirms Import -> Creates Inbound Movements
+  const importResult = await confirmPurchaseImport(preview, 'GR-TEST-BATCH-001', 'purchase_test.xlsx', 'Acceptance test import');
+  assert(importResult.success === true, 'Purchase import succeeded');
+  assert(importResult.movementsCreated === 2, `Created 2 inbound movements (${importResult.movementsCreated})`);
+  assert(importResult.skippedUnmapped === 1, `Skipped 1 unmapped SKU (${importResult.skippedUnmapped})`);
+
+  // Verify movements in authoritative ledger
+  const movements1600908 = mockStore.getInventoryMovements('1600908');
+  assert(movements1600908.length >= 1, `Ledger contains movements for SKU 1600908 (${movements1600908.length})`);
+  const inboundMov = movements1600908.find(m => m.movement_type === 'purchase_inward');
+  assert(inboundMov !== undefined, 'Authoritative purchase_inward movement found in ledger');
+  assert(inboundMov?.direction === 'in', `Movement direction is 'in' (${inboundMov?.direction})`);
+  assert(inboundMov?.from_location === 'supplier', `Movement from_location is 'supplier' (${inboundMov?.from_location})`);
+  assert(inboundMov?.to_location === 'warehouse', `Movement to_location is 'warehouse' (${inboundMov?.to_location})`);
+  assert(inboundMov?.quantity === 100, `Movement quantity is 100 (${inboundMov?.quantity})`);
+  assert(inboundMov?.idempotency_key?.includes('3025221175'), `Idempotency key contains GR Doc No: ${inboundMov?.idempotency_key}`);
+
+  // 3. Calculated DistroTrack Stock after import becomes 100
+  const stockAfterImport = await getDistroTrackOperationalStock('1600908');
+  assert(stockAfterImport.calculatedStock === 100, `DistroTrack calculated stock becomes 100 (${stockAfterImport.calculatedStock})`);
+  assert(stockAfterImport.isIncomplete === false, 'Stock calculation is complete with authoritative inbound movement');
+
+  // 4. Duplicate Import Protection (Deterministic Idempotency)
+  const dupePreview = await validateAndMatchPurchaseRows(samplePurchaseRows, 'GR-TEST-BATCH-001');
+  assert(dupePreview.hasDuplicates === true, 'Duplicate check flags existing imported rows');
+  assert(dupePreview.duplicateCount === 2, `Duplicate count = 2 (${dupePreview.duplicateCount})`);
+
+  const dupeResult = await confirmPurchaseImport(dupePreview, 'GR-TEST-BATCH-001', 'purchase_test.xlsx');
+  assert(dupeResult.movementsCreated === 0, 'Zero duplicate movements created on re-import');
+  assert(dupeResult.skippedDuplicate === 2, `2 duplicate items skipped (${dupeResult.skippedDuplicate})`);
+
+  const stockAfterDupeAttempt = await getDistroTrackOperationalStock('1600908');
+  assert(stockAfterDupeAttempt.calculatedStock === 100, `Stock remains exactly 100 after duplicate import attempt (${stockAfterDupeAttempt.calculatedStock})`);
+
+  // 5. Worker Starts Route & Delivers 120 (Negative Stock Allowed)
+  // Non-blocking route execution: 100 in stock, worker delivers 120
+  mockStore.addInventoryMovement({
+    product_id: 'prod-sap-1600908',
+    sku: '1600908',
+    movement_type: 'delivery_fulfilled',
+    quantity: 120,
+    direction: 'out',
+    from_location: 'warehouse',
+    to_location: 'customer',
+    reference_number: 'DEL-ACCEPTANCE-001',
+    idempotency_key: 'del-acc-1600908-120',
+    notes: 'Worker delivered 120 units (exceeding stock by 20)',
+  });
+
+  const stockAfterDelivery = await getDistroTrackOperationalStock('1600908');
+  assert(stockAfterDelivery.calculatedStock === -20, `DistroTrack calculated stock becomes -20 (100 - 120): ${stockAfterDelivery.calculatedStock}`);
+
+  // 6. Payment Collection with Negative Stock
+  const pmt = mockStore.savePayment({
+    party_id: 'p-1',
+    amount: 18000,
+    payment_mode: 'cash',
+    status: 'collected',
+  });
+  assert(pmt !== null && pmt.amount === 18000, 'Payment collected successfully despite negative operational stock');
+
+  // 7. Route Can Close with Negative Stock
+  const route = mockStore.getRoutes().find(r => r.id === 'r-sangamner-1');
+  assert(route !== undefined && route.status === 'active', 'Route status valid for operations');
+
+  // 8. SAP Reconciliation Page Later Shows Resulting Variance (Read-Only)
+  const postDeliveryRecon = await performSapStockReconciliation(
+    [{ sku: '1600908', stockQty: 100 }],
+    '2026-09-post-delivery'
+  );
+  const reconItem1600908 = postDeliveryRecon.items.find(i => i.sku === '1600908');
+  assert(reconItem1600908?.distrotrackStock === -20, `Reconciliation shows DistroTrack stock = -20 (${reconItem1600908?.distrotrackStock})`);
+  assert(reconItem1600908?.sapStock === 100, `Reconciliation shows SAP stock = 100 (${reconItem1600908?.sapStock})`);
+  assert(reconItem1600908?.status === 'VARIANCE', `Reconciliation status is VARIANCE (${reconItem1600908?.status})`);
+
+  // Crucial check: performSapStockReconciliation MUST NOT have added any inventory movements!
+  const finalMovementsCount = mockStore.getInventoryMovements('1600908').length;
+  assert(finalMovementsCount === 2, `Inventory ledger movements unchanged by reconciliation (remains 2: 1 purchase_inward + 1 delivery_fulfilled)`);
+
+  // 9. Recent Imports Audit History
+  const recentImports = await getRecentPurchaseImports();
+  assert(recentImports.length >= 1, `Recent purchase imports list populated (${recentImports.length} imports)`);
+  assert(recentImports.some(i => i.batch_ref === 'GR-TEST-BATCH-001'), 'Audit record exists for batch GR-TEST-BATCH-001');
+
+  // ── 8. SUMMARY RESULTS ───────────────────────────────────────────
   console.log('\n====================================================');
   console.log(`TEST RUN COMPLETE: ${passedTests} PASSED, ${failedTests} FAILED`);
   console.log('====================================================');

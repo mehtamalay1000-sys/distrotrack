@@ -210,6 +210,52 @@ export async function getDistroTrackOperationalStock(sku: string): Promise<{
   }
 
   // 2. Check mockStore
+  const mockMovements = mockStore.getInventoryMovements(sku);
+  if (mockMovements && mockMovements.length > 0) {
+    let opening = 0;
+    let inbound = 0;
+    let delivered = 0;
+    let returned = 0;
+    let damaged = 0;
+    let adjustments = 0;
+    let hasAuthoritativeOpeningOrInbound = false;
+
+    for (const m of mockMovements) {
+      const q = Number(m.quantity || 0);
+      switch (m.movement_type) {
+        case 'opening_balance':
+          opening += q;
+          hasAuthoritativeOpeningOrInbound = true;
+          break;
+        case 'purchase_inward':
+          inbound += q;
+          hasAuthoritativeOpeningOrInbound = true;
+          break;
+        case 'delivery_fulfilled':
+          delivered += q;
+          break;
+        case 'route_return':
+          returned += q;
+          break;
+        case 'damaged_transit':
+        case 'damaged_warehouse':
+          damaged += q;
+          break;
+        case 'inventory_adjustment':
+          adjustments += (m.direction === 'in' ? q : -q);
+          break;
+        default:
+          if (m.to_location === 'warehouse') inbound += q;
+          else if (m.from_location === 'warehouse') delivered += q;
+      }
+    }
+
+    if (hasAuthoritativeOpeningOrInbound) {
+      const calculatedStock = opening + inbound - delivered + returned - damaged + adjustments;
+      return { calculatedStock, isIncomplete: false };
+    }
+  }
+
   const mockProducts = mockStore.getProducts();
   const mockProd = mockProducts.find((p) => p.sku.toUpperCase() === sku.toUpperCase());
   if (mockProd) {

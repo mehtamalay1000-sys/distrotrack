@@ -5,7 +5,7 @@ import { useTheme } from '@/shared/theme/ThemeProvider';
 import {
   LayoutDashboard, Users, MapPin, Building2, Package, ClipboardList,
   Truck, CreditCard, Receipt, BarChart3, FileUp, Menu, X, LogOut, ChevronDown,
-  Sun, Moon, Database, FileSpreadsheet, Scale
+  Sun, Moon, Database, FileSpreadsheet, Scale, PackagePlus
 } from 'lucide-react';
 import { NotificationBell } from '@/shared/ui';
 
@@ -15,6 +15,7 @@ const navItems = [
   { to: '/admin/routes', label: 'Routes', icon: MapPin },
   { to: '/admin/parties', label: 'Parties', icon: Building2 },
   { to: '/admin/products', label: 'Products', icon: Package },
+  { to: '/admin/inventory/import-stock', label: 'Import New Stock', icon: PackagePlus },
   { to: '/admin/inventory/register', label: 'Quantity Register', icon: FileSpreadsheet },
   { to: '/admin/inventory/reconciliation', label: 'SAP Reconciliation', icon: Scale },
   { to: '/admin/picklists', label: 'Picklists', icon: ClipboardList },
