@@ -1,14 +1,18 @@
 import { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import {
   TrendingUp, Package, Truck, CreditCard, Users,
   AlertCircle, CheckCircle2, Clock, ArrowUp, ArrowDown,
   RefreshCw, CalendarDays, Building2, ClipboardList,
   AlertTriangle, ShieldAlert, XCircle, Activity,
+  Scale, FileSpreadsheet, ExternalLink, ChevronRight,
 } from 'lucide-react';
 import {
   getMasterKPIs, getMasterExceptions, getMasterAuditLog,
+  getMasterInventoryHealth, getMasterInventoryExceptions,
   todayRange, monthRange,
   type DateRange, type MasterKPIs, type MasterExceptions,
+  type MasterInventoryHealth, type MasterInventoryExceptionItem,
 } from '@/features/master/services/masterService';
 import type { MasterAuditLog } from '@/lib/database.types';
 import { useAuth } from '@/app/AuthProvider';
@@ -417,6 +421,181 @@ function StockExceptionSummary({ stock }: { stock: MasterExceptions['stockExcept
   );
 }
 
+// ── Inventory & Product Master Health (Section 14-16) ─────────────
+
+function InventoryProductMasterHealthSection({
+  health,
+  inventoryExceptions,
+}: {
+  health: MasterInventoryHealth;
+  inventoryExceptions: MasterInventoryExceptionItem[];
+}) {
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 p-4 mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 pb-3 border-b border-slate-100">
+        <div className="flex items-center gap-2">
+          <div className="h-8 w-8 rounded-lg bg-indigo-50 flex items-center justify-center">
+            <Package className="h-4 w-4 text-indigo-600" />
+          </div>
+          <div>
+            <h2 className="text-sm font-bold text-slate-900">Inventory & Product Master Health</h2>
+            <p className="text-xs text-slate-500">
+              Canonical SAP Product Master Oversight & Operational Stock Reconciliation
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <Link
+            to="/admin/inventory/register"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200 transition-colors"
+          >
+            <FileSpreadsheet className="h-3.5 w-3.5 text-primary-600" />
+            Quantity Register
+          </Link>
+          <Link
+            to="/admin/inventory/reconciliation"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200 transition-colors"
+          >
+            <Scale className="h-3.5 w-3.5 text-amber-600" />
+            Stock Reconciliation
+          </Link>
+        </div>
+      </div>
+
+      {/* 8 Primary Health Metrics Grid (Section 14) */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2.5 mb-4">
+        <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-100">
+          <div className="text-[11px] font-semibold text-slate-500">Total SAP Master</div>
+          <div className="text-base font-bold text-slate-900 tabular-nums mt-0.5">{health.totalSapProducts.toLocaleString()}</div>
+          <div className="text-[10px] text-slate-400">Canonical SKUs</div>
+        </div>
+
+        <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-100">
+          <div className="text-[11px] font-semibold text-slate-500">Active Products</div>
+          <div className="text-base font-bold text-emerald-700 tabular-nums mt-0.5">{health.activeProducts.toLocaleString()}</div>
+          <div className="text-[10px] text-slate-400">Available in ERP</div>
+        </div>
+
+        <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-100">
+          <div className="text-[11px] font-semibold text-slate-500">Mapped Products</div>
+          <div className="text-base font-bold text-slate-900 tabular-nums mt-0.5">{health.mappedProducts.toLocaleString()}</div>
+          <div className="text-[10px] text-slate-400">Verified SAP identity</div>
+        </div>
+
+        <div className={`p-2.5 rounded-lg border ${health.unmappedSkus > 0 ? 'bg-amber-50/60 border-amber-200 text-amber-800' : 'bg-slate-50 border-slate-100'}`}>
+          <div className="text-[11px] font-semibold">Unmapped SKUs</div>
+          <div className={`text-base font-bold tabular-nums mt-0.5 ${health.unmappedSkus > 0 ? 'text-amber-700' : 'text-slate-900'}`}>{health.unmappedSkus}</div>
+          <div className="text-[10px] text-slate-400">Action required</div>
+        </div>
+
+        <div className={`p-2.5 rounded-lg border ${health.productMasterExceptions > 0 ? 'bg-rose-50/60 border-rose-200' : 'bg-slate-50 border-slate-100'}`}>
+          <div className="text-[11px] font-semibold text-slate-500">PM Exceptions</div>
+          <div className={`text-base font-bold tabular-nums mt-0.5 ${health.productMasterExceptions > 0 ? 'text-rose-600' : 'text-slate-900'}`}>{health.productMasterExceptions}</div>
+          <div className="text-[10px] text-slate-400">Shortages & unmapped</div>
+        </div>
+
+        <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-100">
+          <div className="text-[11px] font-semibold text-slate-500">Recent Movement</div>
+          <div className="text-base font-bold text-indigo-700 tabular-nums mt-0.5">{health.productsWithRecentMovement}</div>
+          <div className="text-[10px] text-slate-400">Moved in 30 days</div>
+        </div>
+
+        <div className={`p-2.5 rounded-lg border ${health.stockVarianceCases > 0 ? 'bg-rose-50/60 border-rose-200' : 'bg-slate-50 border-slate-100'}`}>
+          <div className="text-[11px] font-semibold text-slate-500">Stock Variances</div>
+          <div className={`text-base font-bold tabular-nums mt-0.5 ${health.stockVarianceCases > 0 ? 'text-rose-600' : 'text-slate-900'}`}>{health.stockVarianceCases}</div>
+          <div className="text-[10px] text-slate-400">SAP vs DistroTrack</div>
+        </div>
+
+        <div className={`p-2.5 rounded-lg border ${health.incompleteReconciliations > 0 ? 'bg-amber-50/60 border-amber-200' : 'bg-slate-50 border-slate-100'}`}>
+          <div className="text-[11px] font-semibold text-slate-500">Incomplete Recs</div>
+          <div className={`text-base font-bold tabular-nums mt-0.5 ${health.incompleteReconciliations > 0 ? 'text-amber-700' : 'text-slate-900'}`}>{health.incompleteReconciliations}</div>
+          <div className="text-[10px] text-slate-400">Missing opening/inbound</div>
+        </div>
+      </div>
+
+      {/* Compact Business-Wide Stock Overview (Section 16) */}
+      <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 mb-4">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">Business-Wide Product Stock Overview</span>
+          <span className="text-[11px] text-slate-500">Aggregated Operational Ledger</span>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+          <div>
+            <span className="text-slate-500">Products Tracked:</span>
+            <span className="ml-1.5 font-bold text-slate-900">{health.productsTracked.toLocaleString()}</span>
+          </div>
+          <div>
+            <span className="text-slate-500">Total Delivered Qty:</span>
+            <span className="ml-1.5 font-bold text-emerald-700">{health.totalDeliveredQty.toLocaleString()} units</span>
+          </div>
+          <div>
+            <span className="text-slate-500">Total Returned Qty:</span>
+            <span className="ml-1.5 font-bold text-rose-600">{health.totalReturnedQty.toLocaleString()} units</span>
+          </div>
+          <div>
+            <span className="text-slate-500">Total Net Sold Qty:</span>
+            <span className="ml-1.5 font-bold text-indigo-700">{health.totalNetSoldQty.toLocaleString()} units</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Exception-First Master Inventory Alerts (Section 15) */}
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <div className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
+            <ShieldAlert className="h-3.5 w-3.5 text-rose-600" />
+            Inventory & Product Exceptions ({inventoryExceptions.length})
+          </div>
+          {inventoryExceptions.length > 0 && (
+            <Link
+              to="/master/business?tab=stock"
+              className="text-xs font-semibold text-primary-600 hover:text-primary-700 flex items-center gap-1"
+            >
+              Inspect all in Stock Oversight <ChevronRight className="h-3 w-3" />
+            </Link>
+          )}
+        </div>
+
+        {inventoryExceptions.length === 0 ? (
+          <div className="py-3 px-4 rounded-lg bg-emerald-50/50 border border-emerald-100 flex items-center gap-2 text-xs text-emerald-800">
+            <CheckCircle2 className="h-4 w-4 text-emerald-600 flex-shrink-0" />
+            <span>Zero critical inventory exceptions. All SKUs are mapped in SAP Master, routes are operating with recorded stock integrity, and reconciliations are clean.</span>
+          </div>
+        ) : (
+          <div className="divide-y divide-slate-100 text-xs border border-slate-100 rounded-lg overflow-hidden">
+            {inventoryExceptions.slice(0, 5).map((ex) => (
+              <div key={ex.id} className="p-2.5 hover:bg-slate-50 flex items-center justify-between gap-3 transition-colors">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${
+                      ex.severity === 'high' ? 'bg-rose-100 text-rose-800' :
+                      ex.severity === 'medium' ? 'bg-amber-100 text-amber-800' :
+                      'bg-slate-100 text-slate-700'
+                    }`}>
+                      {ex.type.replace('_', ' ')}
+                    </span>
+                    <span className="font-bold text-slate-900 truncate">{ex.title}</span>
+                  </div>
+                  <p className="text-slate-500 mt-0.5 truncate">{ex.detail}</p>
+                </div>
+                {ex.sku && (
+                  <Link
+                    to={`/admin/inventory/reconciliation?sku=${encodeURIComponent(ex.sku)}`}
+                    className="flex-shrink-0 text-[11px] font-semibold text-primary-600 hover:text-primary-700 flex items-center gap-1 px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 transition-colors"
+                  >
+                    Drill down <ExternalLink className="h-3 w-3" />
+                  </Link>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Recent Activity / Audit Summary ───────────────────────────────
 
 function RecentActivitySummary({ logs }: { logs: MasterAuditLog[] }) {
@@ -478,6 +657,8 @@ export function MasterDashboardPage() {
   const [customMonth, setCustomMonth] = useState(now.getMonth() + 1);
   const [kpis, setKpis] = useState<MasterKPIs | null>(null);
   const [exceptions, setExceptions] = useState<MasterExceptions | null>(null);
+  const [invHealth, setInvHealth] = useState<MasterInventoryHealth | null>(null);
+  const [invExceptions, setInvExceptions] = useState<MasterInventoryExceptionItem[]>([]);
   const [recentLogs, setRecentLogs] = useState<MasterAuditLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [lastRefreshed, setLastRefreshed] = useState<Date>(now);
@@ -486,14 +667,18 @@ export function MasterDashboardPage() {
 
   const load = async () => {
     setLoading(true);
-    const [kpiData, excData, logData] = await Promise.all([
+    const [kpiData, excData, logData, healthData, invExcData] = await Promise.all([
       getMasterKPIs(range),
       getMasterExceptions(range),
       getMasterAuditLog({ range, limit: 10 }),
+      getMasterInventoryHealth(),
+      getMasterInventoryExceptions(),
     ]);
     setKpis(kpiData);
     setExceptions(excData);
     setRecentLogs(logData);
+    setInvHealth(healthData);
+    setInvExceptions(invExcData);
     setLastRefreshed(new Date());
     setLoading(false);
   };
@@ -645,6 +830,14 @@ export function MasterDashboardPage() {
 
           {/* ── Stock Exceptions (P0) ──────────────────────────── */}
           {exceptions && <StockExceptionSummary stock={exceptions.stockExceptions} />}
+
+          {/* ── Inventory & Product Master Health (Section 14-16) ── */}
+          {invHealth && (
+            <InventoryProductMasterHealthSection
+              health={invHealth}
+              inventoryExceptions={invExceptions}
+            />
+          )}
 
           {/* ── Detail Cards Row (Breakdowns) ──────────────────── */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-6">

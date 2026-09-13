@@ -382,23 +382,85 @@ export async function getDeliveryDetail(deliveryId: string): Promise<Delivery | 
 
 /** Start a route — atomically moves physical stock from warehouse to vehicle via start_route_with_load */
 export async function startRoute(picklistId: string, workerId?: string, _workerName?: string): Promise<void> {
-  const { error } = await supabase.rpc('start_route_with_load', {
-    p_picklist_id: picklistId,
-    p_worker_id: workerId || null,
-  });
+  let stockShortageExceptionCaught = false;
 
-  if (error) {
-    throw new Error(`Failed to start route: ${error.message}`);
+  try {
+    const { error } = await supabase.rpc('start_route_with_load', {
+      p_picklist_id: picklistId,
+      p_worker_id: workerId || null,
+    });
+
+    if (error) {
+      const errMsg = (error.message || '').toLowerCase();
+      if (errMsg.includes('insufficient warehouse stock')) {
+        console.warn(`[ROUTE START] Warehouse stock shortage reported by RPC (${error.message}). Non-blocking exception policy applied.`);
+        stockShortageExceptionCaught = true;
+
+        // Try to log exception to route_stock_exceptions table directly
+        try {
+          const skuMatch = error.message.match(/SKU\s+([A-Z0-9_-]+)/i);
+          const shortageSku = skuMatch ? skuMatch[1] : 'UNKNOWN';
+          const pl = mockStore.getPicklists().find((p) => p.id === picklistId);
+          await supabase.from('route_stock_exceptions').insert({
+            route_id: pl?.route_id || null,
+            picklist_id: picklistId,
+            worker_id: workerId || pl?.worker_id || null,
+            sku: shortageSku,
+            notes: `Route started despite server stock shortage: ${error.message}`,
+            status: 'open',
+          });
+        } catch {
+          // ignore
+        }
+      } else if (
+        errMsg.includes('fetch failed') ||
+        errMsg.includes('failed to fetch') ||
+        errMsg.includes('network') ||
+        errMsg.includes('could not connect') ||
+        errMsg.includes('schema cache')
+      ) {
+        console.warn('[ROUTE START] Supabase unreachable or offline, falling back to local route start workflow:', error.message);
+      } else {
+        // Legitimate authorization/validation error (wrong worker, not assigned, invalid state)
+        throw new Error(`Failed to start route: ${error.message}`);
+      }
+    }
+  } catch (err: any) {
+    if (err.message && err.message.toLowerCase().includes('failed to start route')) {
+      throw err;
+    }
+    console.warn('[ROUTE START] Network or RPC issue calling start_route_with_load, continuing locally:', err);
   }
 
-  // Sync mockStore
+  // Sync mockStore and evaluate local stock shortages
   const pl = mockStore.getPicklists().find((p) => p.id === picklistId);
   if (pl) {
+    const assignedWorker = workerId || pl.worker_id;
+
+    // Check mock picklist items for warehouse stock discrepancies
+    const items = mockStore.getPicklistItems(picklistId);
+    for (const it of items) {
+      // Check if exception already exists or if shortage occurred
+      if (stockShortageExceptionCaught) {
+        mockStore.saveRouteStockException({
+          route_id: pl.route_id || 'unknown',
+          picklist_id: picklistId,
+          worker_id: assignedWorker || 'unknown',
+          product_id: it.product_id,
+          sku: it.sku,
+          required_quantity: it.quantity,
+          recorded_warehouse_stock: 0,
+          shortage_quantity: it.quantity,
+          notes: `Route started despite warehouse stock shortage for SKU ${it.sku}`,
+        });
+      }
+    }
+
     mockStore.savePicklist({
       ...pl,
       status: 'in_progress',
       started_at: new Date().toISOString(),
-      worker_id: workerId || pl.worker_id,
+      worker_id: assignedWorker || pl.worker_id,
     });
   }
 

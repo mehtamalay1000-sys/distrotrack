@@ -27,6 +27,7 @@ import {
   closeRouteReconciliation,
   reconcileRouteFinances,
 } from '../services/workerRouteService';
+import { getOfficialProductName } from '@/features/products/data/productMaster';
 import { formatCurrency } from '@/shared/utils/format';
 import { supabase } from '@/lib/supabase';
 import type { Delivery, RouteReturnItemInput } from '@/lib/database.types';
@@ -628,7 +629,7 @@ export function WorkerRoutePage() {
                             <div className="flex items-start justify-between">
                               <div>
                                 <div className="font-bold text-surface-900 dark:text-white">
-                                  {it.product_name}
+                                  {getOfficialProductName(it.sku, it.product_name)}
                                 </div>
                                 <div className="font-mono text-[10px] text-surface-400">
                                   SKU: {it.sku}

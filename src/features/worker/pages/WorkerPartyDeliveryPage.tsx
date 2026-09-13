@@ -20,6 +20,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { getDeliveryDetail, completePartyDelivery } from '../services/workerRouteService';
+import { getOfficialProductName } from '@/features/products/data/productMaster';
 import { formatCurrency } from '@/shared/utils/format';
 import { UPIQRPayment } from '@/shared/ui/UPIQRPayment';
 import type { PaymentMode } from '@/lib/database.types';
@@ -437,7 +438,7 @@ export function WorkerPartyDeliveryPage() {
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
                           <span className="text-sm font-semibold text-surface-900 dark:text-white truncate">
-                            {item.product_name}
+                            {getOfficialProductName(item.sku, item.product_name)}
                           </span>
                           {isFreeItem && (
                             <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">

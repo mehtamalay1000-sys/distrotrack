@@ -3,25 +3,79 @@ import { mockStore } from '@/lib/mockStore';
 import { SAP_PRODUCT_MASTER, findProductMasterEntry, findProductMasterByDescription } from '@/features/products/data/productMaster';
 import type { Product } from '@/lib/database.types';
 
-export async function getProducts(): Promise<Product[]> {
+export interface ProductFilterOptions {
+  search?: string;
+  brand?: string;
+  category?: string;
+  status?: string;
+}
+
+export async function getProducts(filter?: ProductFilterOptions): Promise<Product[]> {
+  let allProds: Product[] = [];
   try {
-    const { data, error } = await supabase
-      .from('products')
-      .select('*')
-      .order('name');
-    if (error || !data) {
-      return mockStore.getProducts();
+    let query = supabase.from('products').select('*').order('name');
+    if (filter?.brand && filter.brand !== 'All') {
+      query = query.eq('brand', filter.brand);
     }
-    // Filter out any corrupt legacy entries
-    const filtered = (data as Product[]).filter(p => p && p.name && !p.name.includes('ZTIN:') && !p.name.includes('TAX Invoice'));
-    return filtered.length > 0 ? filtered : mockStore.getProducts();
+    if (filter?.category && filter.category !== 'All') {
+      query = query.eq('category', filter.category);
+    }
+    if (filter?.status && filter.status !== 'All') {
+      query = query.eq('status', filter.status);
+    }
+
+    const { data, error } = await query;
+    if (error || !data || data.length === 0) {
+      allProds = mockStore.getProducts();
+    } else {
+      const filtered = (data as Product[]).filter(p => p && p.name && !p.name.includes('ZTIN:') && !p.name.includes('TAX Invoice'));
+      allProds = filtered.length > 0 ? filtered : mockStore.getProducts();
+    }
   } catch {
-    return mockStore.getProducts();
+    allProds = mockStore.getProducts();
   }
+
+  // If mockStore has SAP master items not yet in DB, merge them
+  const existingSkus = new Set(allProds.map(p => p.sku.toUpperCase()));
+  const mockProds = mockStore.getProducts();
+  if (mockProds.length > allProds.length) {
+    for (const mp of mockProds) {
+      if (!existingSkus.has(mp.sku.toUpperCase())) {
+        allProds.push(mp);
+        existingSkus.add(mp.sku.toUpperCase());
+      }
+    }
+  }
+
+  // Client-side filtering
+  if (filter?.search) {
+    const q = filter.search.toLowerCase().trim();
+    allProds = allProds.filter(p =>
+      p.sku.toLowerCase().includes(q) ||
+      p.name.toLowerCase().includes(q) ||
+      (p.brand || '').toLowerCase().includes(q) ||
+      (p.category || '').toLowerCase().includes(q)
+    );
+  }
+  if (filter?.brand && filter.brand !== 'All') {
+    const targetBrand = filter.brand.toLowerCase().trim();
+    allProds = allProds.filter(p => (p.brand || 'Colgate').toLowerCase().includes(targetBrand));
+  }
+  if (filter?.category && filter.category !== 'All') {
+    const targetCat = filter.category.toLowerCase().trim();
+    allProds = allProds.filter(p =>
+      (p.category || 'General').toLowerCase() === targetCat ||
+      (p.category || '').toLowerCase().includes(targetCat) ||
+      (p.sub_category || '').toLowerCase().includes(targetCat)
+    );
+  }
+
+  return allProds;
 }
 
 export async function createProduct(input: {
   sku: string; name: string; category?: string; mrp?: number; rate?: number; unit?: string;
+  brand?: string; uom?: string;
 }): Promise<Product> {
   try {
     const { data, error } = await supabase
@@ -30,6 +84,7 @@ export async function createProduct(input: {
         sku: input.sku, name: input.name,
         category: input.category ?? null, mrp: input.mrp ?? 0,
         rate: input.rate ?? 0, unit: input.unit ?? 'pcs', status: 'active',
+        brand: input.brand ?? 'Colgate', uom: input.uom ?? 'EA',
       })
       .select()
       .single();
@@ -69,7 +124,6 @@ export async function deleteProduct(id: string): Promise<void> {
 
 /**
  * Pure lookup by SKU — returns existing product or null.
- * Does NOT create or mutate a product. Checks Supabase first, then mockStore.
  * Normalizes SAP leading zeroes so variations of the same SKU match reliably.
  */
 export async function lookupProductBySku(sku: string): Promise<Product | null> {
@@ -102,13 +156,47 @@ export async function lookupProductBySku(sku: string): Promise<Product | null> {
   // 2. Try mockStore
   const mockProducts = mockStore.getProducts();
   const found = mockProducts.find(
-    p => p.sku === normalizedSku || (unpaddedSku && p.sku === unpaddedSku)
+    p => p.sku.toUpperCase() === normalizedSku.toUpperCase() || (unpaddedSku && p.sku.toUpperCase() === unpaddedSku.toUpperCase())
   );
-  return found || null;
+  if (found) return found;
+
+  // 3. Fallback: check SAP Product Master catalog directly
+  const masterEntry = findProductMasterEntry(normalizedSku);
+  if (masterEntry) {
+    const prod: Product = {
+      id: `prod-sap-${masterEntry.sku}`,
+      sku: masterEntry.sku,
+      name: masterEntry.name,
+      category: masterEntry.category,
+      mrp: masterEntry.mrp,
+      rate: masterEntry.mrp,
+      unit: masterEntry.unit,
+      status: 'active',
+      brand: masterEntry.brand,
+      uom: masterEntry.uom,
+      active: masterEntry.active,
+      sub_category: masterEntry.subCategory,
+      sub_brand: masterEntry.subBrand,
+      variant: masterEntry.variant,
+      ppg: masterEntry.ppg,
+      ppg_description: masterEntry.ppgDescription,
+      material_group: masterEntry.materialGroup,
+      prod_hierarchy: masterEntry.prodHierarchy,
+      is_sap_master: true,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    mockStore.saveProduct(prod);
+    return prod;
+  }
+
+  return null;
 }
 
 /**
  * Lookup-first product resolution for SAP import.
+ * Strict rule: If SKU is not in Product Master, mark as UNMAPPED SKU and record exception.
+ * Never silently create a fake product!
  */
 export async function upsertProductBySku(
   sku: string,
@@ -118,79 +206,108 @@ export async function upsertProductBySku(
 ): Promise<Product> {
   const normalizedSku = sku.trim();
 
-  // 1. Try to find existing product by exact SKU
+  // 1. Try exact lookup by SKU
   const existing = await lookupProductBySku(normalizedSku);
   if (existing) {
     return existing;
   }
 
-  // 2. Check Product Master for canonical values (by SKU or by Product Description)
+  // 2. Check Product Master for canonical values (by SKU or description)
   let masterEntry = findProductMasterEntry(normalizedSku);
   if (!masterEntry && name) {
     masterEntry = findProductMasterByDescription(name);
   }
-  if (!masterEntry && sku) {
-    masterEntry = findProductMasterByDescription(sku);
-  }
 
-  const finalSku = masterEntry?.sku || normalizedSku;
-  const productName = masterEntry?.name || name;
-  const productMrp = masterEntry?.mrp || (mrp > 0 ? mrp : 50);
-  const productRate = rate > 0 ? rate : (masterEntry?.mrp || 50);
-  const productCategory = masterEntry?.category || 'General';
-  const productUnit = masterEntry?.unit || 'pcs';
+  if (masterEntry) {
+    // Found in SAP Master -> create verified product record
+    const finalSku = masterEntry.sku;
+    const existingMaster = await lookupProductBySku(finalSku);
+    if (existingMaster) return existingMaster;
 
-  // Double check if product exists under resolved master SKU
-  const existingMaster = await lookupProductBySku(finalSku);
-  if (existingMaster) {
-    return existingMaster;
-  }
+    try {
+      const { data, error } = await supabase
+        .from('products')
+        .insert({
+          sku: finalSku,
+          name: masterEntry.name,
+          category: masterEntry.category,
+          mrp: masterEntry.mrp || mrp,
+          rate: rate > 0 ? rate : masterEntry.mrp,
+          unit: masterEntry.unit || 'pcs',
+          status: 'active',
+          brand: masterEntry.brand,
+          uom: masterEntry.uom,
+          sub_category: masterEntry.subCategory,
+          sub_brand: masterEntry.subBrand,
+          variant: masterEntry.variant,
+          ppg: masterEntry.ppg,
+          ppg_description: masterEntry.ppgDescription,
+          material_group: masterEntry.materialGroup,
+          prod_hierarchy: masterEntry.prodHierarchy,
+          is_sap_master: true,
+        })
+        .select()
+        .single();
 
-  if (!masterEntry) {
-    console.warn(
-      `[PRODUCT MASTER] New product discovered via import: SKU="${normalizedSku}", ` +
-      `Name="${name}", MRP=${mrp}. Creating new product entry.`
-    );
-  }
-
-  // 3. Create the product
-  try {
-    const { data, error } = await supabase
-      .from('products')
-      .insert({
-        sku: normalizedSku,
-        name: productName,
-        category: productCategory,
-        mrp: productMrp,
-        rate: productRate,
-        unit: productUnit,
-        status: 'active',
-      })
-      .select()
-      .single();
-
-    if (error || !data) {
-      return mockStore.saveProduct({
-        sku: normalizedSku,
-        name: productName,
-        category: productCategory ?? undefined,
-        mrp: productMrp,
-        rate: productRate,
-        unit: productUnit,
-      });
+      if (!error && data) {
+        mockStore.saveProduct(data as Product);
+        return data as Product;
+      }
+    } catch {
+      // Fallback
     }
-    mockStore.saveProduct(data as Product);
-    return data as Product;
-  } catch {
+
     return mockStore.saveProduct({
-      sku: normalizedSku,
-      name: productName,
-      category: productCategory ?? undefined,
-      mrp: productMrp,
-      rate: productRate,
-      unit: productUnit,
+      sku: finalSku,
+      name: masterEntry.name,
+      category: masterEntry.category,
+      mrp: masterEntry.mrp || mrp,
+      rate: rate > 0 ? rate : masterEntry.mrp,
+      unit: masterEntry.unit || 'pcs',
+      brand: masterEntry.brand,
+      uom: masterEntry.uom,
+      is_sap_master: true,
     });
   }
+
+  // 3. UNMAPPED SKU EXCEPTION: Do NOT guess or invent fake products!
+  console.warn(`[PRODUCT MASTER] Unmapped SKU detected in import: ${normalizedSku} ("${name}"). Exposing as exception.`);
+
+  // Record exception in mockStore and Supabase
+  mockStore.saveUnmappedSkuException({
+    sku: normalizedSku,
+    imported_product_name: name || null,
+    source_type: 'picklist',
+  });
+
+  try {
+    await supabase.from('unmapped_sku_exceptions').upsert({
+      sku: normalizedSku,
+      imported_product_name: name || null,
+      source_type: 'picklist',
+      last_seen_at: new Date().toISOString(),
+    }, { onConflict: 'sku' });
+  } catch {
+    // Non-blocking
+  }
+
+  // Create explicit UNMAPPED placeholder so operational records can link, clearly flagged
+  const unmappedProduct: Product = {
+    id: `unmapped-${normalizedSku}`,
+    sku: normalizedSku,
+    name: 'UNMAPPED SKU',
+    category: 'Unmapped',
+    mrp: mrp,
+    rate: rate,
+    unit: 'pcs',
+    status: 'inactive',
+    is_sap_master: false,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+
+  mockStore.saveProduct(unmappedProduct);
+  return unmappedProduct;
 }
 
 /**

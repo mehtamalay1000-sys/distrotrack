@@ -7,6 +7,7 @@ import { PageHeader, Button, StatusBadge, Card, LoadingState, ErrorState } from 
 import { getPicklist, updatePicklistStatus, assignPicklistWorker } from '../services/picklistService';
 import { getWorkers } from '@/features/workers/services/workerService';
 import { getRouteStockCheck } from '@/features/worker/services/workerRouteService';
+import { getOfficialProductName } from '@/features/products/data/productMaster';
 import { formatCurrency, formatDate } from '@/shared/utils/format';
 import { supabase } from '@/lib/supabase';
 
@@ -247,7 +248,7 @@ export function PicklistDetailPage() {
                       </span>
                     </td>
                     <td className="font-medium text-surface-900 dark:text-surface-100">
-                      {item.product_name}
+                      {getOfficialProductName(item.sku, item.product_name)}
                     </td>
                     <td className="text-right font-semibold text-surface-800 dark:text-surface-200">
                       {item.loaded_qty}
@@ -372,7 +373,7 @@ export function PicklistDetailPage() {
                     {item.party?.code && <div className="font-mono text-xs text-surface-400">{item.party.code}</div>}
                   </td>
                   <td><span className="font-mono text-xs bg-surface-100 dark:bg-surface-700 text-surface-800 dark:text-surface-200 px-1.5 py-0.5 rounded font-medium">{item.sku}</span></td>
-                  <td className="font-medium text-surface-900 dark:text-surface-100">{item.product_name}</td>
+                  <td className="font-medium text-surface-900 dark:text-surface-100">{getOfficialProductName(item.sku, item.product_name)}</td>
                   <td className="text-right font-medium text-surface-900 dark:text-surface-100">{item.quantity}</td>
                   <td className="text-right text-surface-700 dark:text-surface-300">{formatCurrency(item.rate)}</td>
                   <td className="text-right font-semibold text-surface-900 dark:text-surface-100">{formatCurrency(item.amount)}</td>

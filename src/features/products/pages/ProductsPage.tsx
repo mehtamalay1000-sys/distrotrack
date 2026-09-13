@@ -1,9 +1,10 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
   Plus, Search, Edit2, Trash2, Package, Trophy, Calendar, MapPin,
-  TrendingUp, BarChart3, Tag, Layers, RefreshCw
+  TrendingUp, BarChart3, Tag, Layers, RefreshCw, FileSpreadsheet, Scale
 } from 'lucide-react';
 import { PageHeader, Button, Input, Modal, EmptyState, LoadingState, ErrorState, StatusBadge } from '@/shared/ui';
 import {
@@ -37,7 +38,7 @@ export function ProductsPage() {
   // React Query hooks
   const { data: products = [], isLoading: loadingProducts, error: errorProducts } = useQuery({
     queryKey: ['products'],
-    queryFn: getProducts,
+    queryFn: () => getProducts(),
   });
 
   const { data: monthlyAnalytics, isLoading: loadingMonthly } = useQuery({
@@ -135,7 +136,17 @@ export function ProductsPage() {
         title="Products & Sales Analytics"
         description="FMCG Product Master, Monthly Top Sellers, and Route/Date Sales History"
         actions={
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <Link to="/admin/inventory/register">
+              <Button variant="outline" icon={<FileSpreadsheet className="h-4 w-4 text-primary-600" />}>
+                Quantity Register
+              </Button>
+            </Link>
+            <Link to="/admin/inventory/reconciliation">
+              <Button variant="outline" icon={<Scale className="h-4 w-4 text-amber-600" />}>
+                SAP Reconciliation
+              </Button>
+            </Link>
             <Button
               variant="outline"
               icon={<Trash2 className="h-4 w-4 text-rose-500" />}

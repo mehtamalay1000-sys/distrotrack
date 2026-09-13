@@ -1,4 +1,7 @@
- import type { Worker, Route, Party, Product, Picklist, Delivery, Payment, Expense, PicklistItem, DeliveryItem } from '@/lib/database.types';
+import type {
+  Worker, Route, Party, Product, Picklist, Delivery, Payment, Expense, PicklistItem, DeliveryItem,
+  RouteStockException, UnmappedSkuException, SapStockReconciliation, SapStockReconciliationItem
+} from '@/lib/database.types';
 import { SAP_PRODUCT_MASTER } from '@/features/products/data/productMaster';
 import { getLocalDateString } from '@/shared/utils/format';
 
@@ -57,7 +60,7 @@ const INITIAL_ROUTES: Route[] = [
 
 const INITIAL_PARTIES: Party[] = [];
 const INITIAL_PRODUCTS: Product[] = SAP_PRODUCT_MASTER.map((entry, idx) => ({
-  id: `prod-master-${idx}`,
+  id: `prod-master-${entry.sku || idx}`,
   sku: entry.sku,
   name: entry.name,
   category: entry.category,
@@ -65,6 +68,17 @@ const INITIAL_PRODUCTS: Product[] = SAP_PRODUCT_MASTER.map((entry, idx) => ({
   rate: entry.mrp,
   unit: entry.unit,
   status: 'active' as const,
+  brand: entry.brand || 'Colgate',
+  uom: entry.uom || 'EA',
+  active: entry.active || '',
+  sub_category: entry.subCategory || '',
+  sub_brand: entry.subBrand || '',
+  variant: entry.variant || '',
+  ppg: entry.ppg || '',
+  ppg_description: entry.ppgDescription || '',
+  material_group: entry.materialGroup || '',
+  prod_hierarchy: entry.prodHierarchy || '',
+  is_sap_master: true,
   created_at: new Date().toISOString(),
   updated_at: new Date().toISOString(),
 }));
@@ -120,12 +134,20 @@ class MockStore {
   private expenses: Expense[] = [];
   private picklistItems: PicklistItem[] = [];
   private deliveryItems: DeliveryItem[] = [];
+  private routeStockExceptions: RouteStockException[] = [];
+  private unmappedSkuExceptions: UnmappedSkuException[] = [];
+  private sapStockReconciliations: SapStockReconciliation[] = [];
+  private sapStockReconciliationItems: SapStockReconciliationItem[] = [];
 
   constructor() {
     this.loadFromStorage();
   }
 
   private loadFromStorage() {
+    if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
+      this.resetToDefaults();
+      return;
+    }
     try {
       const stored = localStorage.getItem('distrotrack_clean_v3');
       if (stored) {
@@ -180,6 +202,10 @@ class MockStore {
         }
         this.picklistItems = dedupedItems;
         this.deliveryItems = parsed.deliveryItems || [];
+        this.routeStockExceptions = parsed.routeStockExceptions || [];
+        this.unmappedSkuExceptions = parsed.unmappedSkuExceptions || [];
+        this.sapStockReconciliations = parsed.sapStockReconciliations || [];
+        this.sapStockReconciliationItems = parsed.sapStockReconciliationItems || [];
       } else {
         this.resetToDefaults();
       }
@@ -189,6 +215,9 @@ class MockStore {
   }
 
   private saveToStorage() {
+    if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
+      return;
+    }
     try {
       localStorage.setItem(
         'distrotrack_clean_v3',
@@ -203,6 +232,10 @@ class MockStore {
           expenses: this.expenses,
           picklistItems: this.picklistItems,
           deliveryItems: this.deliveryItems,
+          routeStockExceptions: this.routeStockExceptions,
+          unmappedSkuExceptions: this.unmappedSkuExceptions,
+          sapStockReconciliations: this.sapStockReconciliations,
+          sapStockReconciliationItems: this.sapStockReconciliationItems,
         })
       );
     } catch (e) {
@@ -606,7 +639,10 @@ class MockStore {
   }
 
   // ── Line Items (Picklists & Deliveries) ────────────────────────────
-  getPicklistItems(): PicklistItem[] {
+  getPicklistItems(picklistId?: string): PicklistItem[] {
+    if (picklistId) {
+      return this.picklistItems.filter((pli) => pli.picklist_id === picklistId);
+    }
     return [...this.picklistItems];
   }
   savePicklistItem(item: Partial<PicklistItem>): PicklistItem {
@@ -856,6 +892,103 @@ class MockStore {
     this.saveToStorage();
     return exp;
   }
+
+  // ── Route Stock Shortage Exceptions ─────────────────────────────
+  getRouteStockExceptions(): RouteStockException[] {
+    return [...this.routeStockExceptions];
+  }
+  saveRouteStockException(ex: Partial<RouteStockException>): RouteStockException {
+    const created: RouteStockException = {
+      id: ex.id || `rse-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      occurred_at: ex.occurred_at || new Date().toISOString(),
+      picklist_id: ex.picklist_id || '',
+      route_id: ex.route_id || null,
+      worker_id: ex.worker_id || null,
+      product_id: ex.product_id || null,
+      sku: ex.sku || '',
+      product_name: ex.product_name || '',
+      required_quantity: Number(ex.required_quantity || 0),
+      recorded_warehouse_stock: Number(ex.recorded_warehouse_stock || 0),
+      shortage_quantity: Number(ex.shortage_quantity || 0),
+      status: ex.status || 'open',
+      notes: ex.notes || null,
+      created_at: new Date().toISOString(),
+    };
+    this.routeStockExceptions.unshift(created);
+    this.saveToStorage();
+    return created;
+  }
+
+  // ── Unmapped SKU Exceptions ─────────────────────────────────────
+  getUnmappedSkuExceptions(): UnmappedSkuException[] {
+    return [...this.unmappedSkuExceptions];
+  }
+  saveUnmappedSkuException(ex: Partial<UnmappedSkuException>): UnmappedSkuException {
+    const existing = this.unmappedSkuExceptions.find((u) => u.sku === ex.sku);
+    if (existing) {
+      existing.last_seen_at = new Date().toISOString();
+      if (ex.source_type === 'picklist') existing.affected_picklist_count++;
+      if (ex.source_type === 'bill') existing.affected_bill_count++;
+      if (ex.imported_product_name) existing.imported_product_name = ex.imported_product_name;
+      existing.updated_at = new Date().toISOString();
+      this.saveToStorage();
+      return existing;
+    }
+    const created: UnmappedSkuException = {
+      id: ex.id || `unm-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      sku: ex.sku || '',
+      imported_product_name: ex.imported_product_name || null,
+      source_type: ex.source_type || 'picklist',
+      source_reference: ex.source_reference || null,
+      first_seen_at: new Date().toISOString(),
+      last_seen_at: new Date().toISOString(),
+      affected_picklist_count: ex.source_type === 'bill' ? 0 : 1,
+      affected_bill_count: ex.source_type === 'bill' ? 1 : 0,
+      status: ex.status || 'unresolved',
+      notes: ex.notes || null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    this.unmappedSkuExceptions.unshift(created);
+    this.saveToStorage();
+    return created;
+  }
+
+  // ── SAP Stock Reconciliations & Snapshots ───────────────────────
+  getSapStockReconciliations(): SapStockReconciliation[] {
+    return [...this.sapStockReconciliations];
+  }
+  getSapStockReconciliationItems(reconciliationId?: string): SapStockReconciliationItem[] {
+    if (reconciliationId) {
+      return this.sapStockReconciliationItems.filter((i) => i.reconciliation_id === reconciliationId);
+    }
+    return [...this.sapStockReconciliationItems];
+  }
+  saveSapStockReconciliation(
+    rec: Omit<SapStockReconciliation, 'id' | 'created_at' | 'updated_at'> & { id?: string },
+    items: Array<Omit<SapStockReconciliationItem, 'id' | 'reconciliation_id' | 'created_at'> & { id?: string }>
+  ): SapStockReconciliation {
+    const recId = rec.id || `rec-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+    const createdRec: SapStockReconciliation = {
+      ...rec,
+      id: recId,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    this.sapStockReconciliations.unshift(createdRec);
+
+    for (const it of items) {
+      this.sapStockReconciliationItems.push({
+        ...it,
+        id: it.id || `reci-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+        reconciliation_id: recId,
+        created_at: new Date().toISOString(),
+      });
+    }
+    this.saveToStorage();
+    return createdRec;
+  }
+
   // No physical delete - Stage 6 non-physical deletion invariant
   deleteExpense(_id: string) {
     console.warn('[mockStore] Physical delete on expenses is prohibited by Stage 6. Use reverseExpense or rejectExpense instead.');

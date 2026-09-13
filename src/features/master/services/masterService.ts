@@ -1,7 +1,9 @@
 import { supabase } from '@/lib/supabase';
+import { mockStore } from '@/lib/mockStore';
+import { SAP_PRODUCT_MASTER } from '@/features/products/data/productMaster';
 import { getExpenses, getRouteProfitability } from '@/features/expenses/services/expenseService';
 import { getLocalDateString } from '@/shared/utils/format';
-import type { MasterAuditLog, FinancialSummary, RouteProfitabilityResponse } from '@/lib/database.types';
+import type { MasterAuditLog, FinancialSummary, RouteProfitabilityResponse, RouteStockException, UnmappedSkuException } from '@/lib/database.types';
 
 export { getRouteProfitability, type RouteProfitabilityResponse };
 
@@ -988,3 +990,213 @@ export async function getMasterPartyDebtAging(): Promise<MasterPartyAging[]> {
     return [];
   }
 }
+
+// ── Master Inventory & Product Master Health ─────────────────────
+
+export interface MasterInventoryHealth {
+  totalSapProducts: number;
+  activeProducts: number;
+  mappedProducts: number;
+  unmappedSkus: number;
+  productMasterExceptions: number;
+  productsWithRecentMovement: number;
+  productsWithNoRecentMovement: number;
+  stockVarianceCases: number;
+  incompleteReconciliations: number;
+  // Compact Stock Overview
+  productsTracked: number;
+  totalDeliveredQty: number;
+  totalReturnedQty: number;
+  totalNetSoldQty: number;
+}
+
+export interface MasterInventoryExceptionItem {
+  id: string;
+  type: 'unmapped_sku' | 'stock_variance' | 'incomplete_stock' | 'large_variance' | 'route_shortage';
+  severity: 'high' | 'medium' | 'low';
+  title: string;
+  detail: string;
+  sku?: string;
+  routeCode?: string;
+  timestamp: string;
+}
+
+export async function getMasterInventoryHealth(): Promise<MasterInventoryHealth> {
+  const totalSapProducts = SAP_PRODUCT_MASTER.length;
+
+  // 1. Fetch products count
+  let products = mockStore.getProducts();
+  try {
+    const { data } = await supabase.from('products').select('*');
+    if (data && data.length > 0) {
+      products = data as any[];
+    }
+  } catch {
+    // fallback
+  }
+
+  const productsTracked = products.length;
+  const activeProducts = products.filter(p => p.status === 'active').length;
+  const mappedProducts = products.filter(p => p.is_sap_master !== false && p.sku !== 'UNMAPPED SKU').length;
+
+  // 2. Unmapped SKUs
+  const unmappedList = await getMasterUnmappedSkus();
+  const unmappedSkus = unmappedList.length;
+
+  // 3. Route Stock Shortages
+  const routeExceptions = await getMasterRouteStockExceptions();
+  const productMasterExceptions = unmappedSkus + routeExceptions.length;
+
+  // 4. Products with movement & quantities
+  let totalDeliveredQty = 0;
+  let totalReturnedQty = 0;
+  const activeSkusMoved = new Set<string>();
+
+  const deliveryItems = mockStore.getDeliveryItems();
+  for (const it of deliveryItems) {
+    totalDeliveredQty += Number(it.delivered_qty || 0);
+    totalReturnedQty += Number(it.damaged_qty || 0);
+    if (it.sku) activeSkusMoved.add(it.sku);
+  }
+
+  const productsWithRecentMovement = activeSkusMoved.size;
+  const productsWithNoRecentMovement = Math.max(0, activeProducts - productsWithRecentMovement);
+  const totalNetSoldQty = Math.max(0, totalDeliveredQty - totalReturnedQty);
+
+  // 5. Stock Variances & Incomplete reconciliations
+  let stockVarianceCases = 0;
+  let incompleteReconciliations = 0;
+
+  try {
+    const reconciliations = mockStore.getSapStockReconciliations();
+    if (reconciliations.length > 0) {
+      const latest = reconciliations[0];
+      stockVarianceCases = latest.variance_count || 0;
+      incompleteReconciliations = latest.incomplete_count || 0;
+    } else {
+      const { data: recData } = await supabase
+        .from('sap_stock_reconciliations')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (recData) {
+        stockVarianceCases = (recData as any).variance_count || 0;
+        incompleteReconciliations = (recData as any).incomplete_count || 0;
+      }
+    }
+  } catch {
+    // fallback
+  }
+
+  return {
+    totalSapProducts,
+    activeProducts,
+    mappedProducts,
+    unmappedSkus,
+    productMasterExceptions,
+    productsWithRecentMovement,
+    productsWithNoRecentMovement,
+    stockVarianceCases,
+    incompleteReconciliations,
+    productsTracked,
+    totalDeliveredQty,
+    totalReturnedQty,
+    totalNetSoldQty,
+  };
+}
+
+export async function getMasterInventoryExceptions(): Promise<MasterInventoryExceptionItem[]> {
+  const exceptions: MasterInventoryExceptionItem[] = [];
+
+  // 1. Unmapped SKUs
+  const unmappedList = await getMasterUnmappedSkus();
+  for (const u of unmappedList) {
+    exceptions.push({
+      id: u.id,
+      type: 'unmapped_sku',
+      severity: 'high',
+      title: `Unmapped SKU: ${u.sku}`,
+      detail: `${u.imported_product_name || 'No description'} (Seen in ${u.affected_picklist_count} picklists, ${u.affected_bill_count} bills)`,
+      sku: u.sku,
+      timestamp: u.last_seen_at || u.created_at,
+    });
+  }
+
+  // 2. Route Stock Shortages
+  const routeShortages = await getMasterRouteStockExceptions();
+  for (const rs of routeShortages) {
+    exceptions.push({
+      id: rs.id,
+      type: 'route_shortage',
+      severity: 'medium',
+      title: `Route Started Despite Shortage: SKU ${rs.sku}`,
+      detail: `Required: ${rs.required_quantity}, Warehouse Stock: ${rs.recorded_warehouse_stock} (Shortage: ${rs.shortage_quantity})`,
+      sku: rs.sku,
+      timestamp: rs.created_at,
+    });
+  }
+
+  // 3. SAP Reconciliation variances
+  const reconciliations = mockStore.getSapStockReconciliations();
+  if (reconciliations.length > 0) {
+    const latest = reconciliations[0];
+    const items = mockStore.getSapStockReconciliationItems(latest.id);
+    for (const it of items) {
+      if (it.status === 'VARIANCE') {
+        const v = it.variance ?? 0;
+        const isLarge = Math.abs(v) >= 10;
+        exceptions.push({
+          id: it.id,
+          type: isLarge ? 'large_variance' : 'stock_variance',
+          severity: isLarge ? 'high' : 'medium',
+          title: `SAP Stock Variance: ${it.sku}`,
+          detail: `${it.product_name}: SAP Stock ${it.sap_stock ?? '—'} vs DistroTrack ${it.distrotrack_stock ?? '—'} (Variance ${v > 0 ? '+' : ''}${v})`,
+          sku: it.sku,
+          timestamp: it.created_at,
+        });
+      } else if (it.status === 'INCOMPLETE DATA') {
+        exceptions.push({
+          id: it.id,
+          type: 'incomplete_stock',
+          severity: 'low',
+          title: `Incomplete Stock Data: ${it.sku}`,
+          detail: `${it.product_name}: DistroTrack stock calculation incomplete; opening/inbound history missing`,
+          sku: it.sku,
+          timestamp: it.created_at,
+        });
+      }
+    }
+  }
+
+  // Return sorted with high severity first, then by timestamp descending
+  return exceptions.sort((a, b) => {
+    const pMap = { high: 3, medium: 2, low: 1 };
+    if (pMap[b.severity] !== pMap[a.severity]) {
+      return pMap[b.severity] - pMap[a.severity];
+    }
+    return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+  });
+}
+
+export async function getMasterUnmappedSkus(): Promise<UnmappedSkuException[]> {
+  try {
+    const { data } = await supabase.from('unmapped_sku_exceptions').select('*').order('last_seen_at', { ascending: false });
+    if (data && data.length > 0) return data as UnmappedSkuException[];
+  } catch {
+    // fallback
+  }
+  return mockStore.getUnmappedSkuExceptions();
+}
+
+export async function getMasterRouteStockExceptions(): Promise<RouteStockException[]> {
+  try {
+    const { data } = await supabase.from('route_stock_exceptions').select('*').order('created_at', { ascending: false });
+    if (data && data.length > 0) return data as RouteStockException[];
+  } catch {
+    // fallback
+  }
+  return mockStore.getRouteStockExceptions();
+}
+

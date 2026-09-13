@@ -3,6 +3,7 @@ import {
   isProductTableHeader, isTableEndMarker, validateProductRow,
   isNonProductLabel, isValidSKU,
 } from './helpers';
+import { getOfficialProductName } from '@/features/products/data/productMaster';
 import type { ParsedPicklist, ParsedPicklistParty, ParsedPicklistItem, ParsedPicklistLoadItem } from './types';
 
 /**
@@ -341,11 +342,13 @@ export async function parsePicklist(file: File): Promise<ParsedPicklist> {
           continue;
         }
 
+        const resolvedProductName = getOfficialProductName(sku, productName);
+
         const item: ParsedPicklistItem = {
           partyCode: 'AGGREGATE',
           partyName: 'Picking List Overall',
           sku,
-          productName,
+          productName: resolvedProductName,
           category,
           quantity: totalQty,
           rate: mrp,

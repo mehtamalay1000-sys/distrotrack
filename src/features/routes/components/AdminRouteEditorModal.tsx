@@ -21,7 +21,7 @@ export function AdminRouteEditorModal({ route, onClose }: AdminRouteEditorModalP
   const [addingProductIdMap, setAddingProductIdMap] = useState<Record<string, string>>({});
 
   const { data: allParties = [] } = useQuery({ queryKey: ['parties'], queryFn: getParties });
-  const { data: allProducts = [] } = useQuery({ queryKey: ['products'], queryFn: getProducts });
+  const { data: allProducts = [] } = useQuery({ queryKey: ['products'], queryFn: () => getProducts() });
 
   // Get all deliveries associated with this route
   const deliveries = mockStore.getDeliveries().filter((d) => {

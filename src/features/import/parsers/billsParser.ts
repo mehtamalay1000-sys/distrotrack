@@ -3,7 +3,7 @@ import {
   isProductTableHeader, isTableEndMarker, validateProductRow,
   isNonProductLabel, isValidSKU,
 } from './helpers';
-import { findProductMasterByDescription } from '@/features/products/data/productMaster';
+import { findProductMasterByDescription, getOfficialProductName } from '@/features/products/data/productMaster';
 import { getLocalDateString } from '@/shared/utils/format';
 import type { ParsedBillsResult, ParsedInvoice, ParsedInvoiceItem } from './types';
 
@@ -248,8 +248,8 @@ export async function parseBills(file: File): Promise<ParsedBillsResult> {
 
                 // Resolve canonical SAP SKU, Name, and MRP from Product Master
                 const masterMatch = findProductMasterByDescription(description);
-                const finalSku = masterMatch?.sku || deriveSKUFromDescription(description, srNo);
-                const finalName = masterMatch?.name || description;
+                const finalSku = masterMatch?.sku || 'UNMAPPED SKU';
+                const finalName = masterMatch?.name || (finalSku === 'UNMAPPED SKU' ? 'UNMAPPED SKU' : description);
                 const finalMrp = masterMatch?.mrp || parsedMrp;
 
                 const item: ParsedInvoiceItem = {
@@ -314,8 +314,8 @@ export async function parseBills(file: File): Promise<ParsedBillsResult> {
 
                 if (freeQty > 0 || paidQty > 0) {
                   const masterMatch = findProductMasterByDescription(description);
-                  const finalSku = masterMatch?.sku || deriveSKUFromDescription(description, srNo);
-                  const finalName = masterMatch?.name || description;
+                  const finalSku = masterMatch?.sku || 'UNMAPPED SKU';
+                  const finalName = masterMatch?.name || (finalSku === 'UNMAPPED SKU' ? 'UNMAPPED SKU' : description);
 
                   const item: ParsedInvoiceItem = {
                     sku: finalSku,
@@ -456,7 +456,8 @@ function parseItemFields(
 
   if (!mrpSplit) return null;
 
-  const productName = mrpSplit[1].trim();
+  const rawProductName = mrpSplit[1].trim();
+  const productName = getOfficialProductName(sku, rawProductName);
   const mrp = parseNumber(mrpSplit[2]);
   const rateDoz = parseNumber(mrpSplit[3]);
   const remainder = mrpSplit[4].trim();
@@ -503,22 +504,6 @@ function parseItemFields(
   }
 
   return item;
-}
-
-/**
- * Derives a meaningful SKU from the product description.
- */
-function deriveSKUFromDescription(description: string, srNo: number): string {
-  const words = description
-    .replace(/[^A-Za-z0-9\s]/g, '')
-    .trim()
-    .split(/\s+/)
-    .filter(w => w.length > 0);
-
-  if (words.length === 0) return `ITEM-${srNo}`;
-
-  const parts = words.slice(0, 3).map(w => w.toUpperCase());
-  return parts.join('-').slice(0, 15);
 }
 
 /**

@@ -1,12 +1,15 @@
 import { useState, useEffect, useCallback } from 'react';
-import { RefreshCw, CalendarDays, Filter, ShieldAlert, Package, AlertTriangle } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { RefreshCw, CalendarDays, Filter, ShieldAlert, Package, AlertTriangle, Scale, FileSpreadsheet } from 'lucide-react';
 import {
   getMasterPicklists, getMasterDeliveries, getMasterPayments,
   getMasterExpenses, getMasterParties, getMasterProducts,
   getMasterStockOverview, type MasterStockOverview,
+  getMasterUnmappedSkus, getMasterRouteStockExceptions,
   monthRange, todayRange,
   type DateRange,
 } from '@/features/master/services/masterService';
+import type { UnmappedSkuException, RouteStockException } from '@/lib/database.types';
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -81,6 +84,8 @@ export function MasterBusinessPage() {
   const [customMonth, setCustomMonth] = useState(now.getMonth() + 1);
   const [rows, setRows] = useState<Row[]>([]);
   const [stockOverview, setStockOverview] = useState<MasterStockOverview | null>(null);
+  const [unmappedSkus, setUnmappedSkus] = useState<UnmappedSkuException[]>([]);
+  const [routeExceptions, setRouteExceptions] = useState<RouteStockException[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [exceptionsOnly, setExceptionsOnly] = useState(false);
@@ -104,8 +109,14 @@ export function MasterBusinessPage() {
       else if (tab === 'parties') data = await getMasterParties();
       else if (tab === 'products') data = await getMasterProducts();
       else if (tab === 'stock') {
-        const stockData = await getMasterStockOverview();
+        const [stockData, unmappedData, routeShortageData] = await Promise.all([
+          getMasterStockOverview(),
+          getMasterUnmappedSkus(),
+          getMasterRouteStockExceptions(),
+        ]);
         setStockOverview(stockData);
+        setUnmappedSkus(unmappedData);
+        setRouteExceptions(routeShortageData);
       }
     } catch { data = []; }
     setRows(data);
@@ -251,7 +262,11 @@ export function MasterBusinessPage() {
               <RefreshCw className="h-4 w-4 animate-spin mr-2" /> Loading…
             </div>
           ) : tab === 'stock' ? (
-            <StockOversightView overview={stockOverview} />
+            <StockOversightView
+              overview={stockOverview}
+              unmappedSkus={unmappedSkus}
+              routeExceptions={routeExceptions}
+            />
           ) : filtered.length === 0 ? (
             <div className="flex items-center justify-center h-32 text-slate-400 text-sm">
               {exceptionsOnly ? 'No exception records found for this filter.' : 'No records found for this period.'}
@@ -447,13 +462,45 @@ function ProductsTable({ rows }: { rows: Row[] }) {
 
 // ── Stock Oversight Component (Section 9) ──────────────────────────
 
-function StockOversightView({ overview }: { overview: MasterStockOverview | null }) {
+function StockOversightView({
+  overview,
+  unmappedSkus = [],
+  routeExceptions = [],
+}: {
+  overview: MasterStockOverview | null;
+  unmappedSkus?: UnmappedSkuException[];
+  routeExceptions?: RouteStockException[];
+}) {
   if (!overview) {
     return <div className="p-8 text-center text-slate-400 text-sm">Loading stock oversight data…</div>;
   }
 
   return (
     <div className="p-4 space-y-6">
+      {/* Quick Navigation Links */}
+      <div className="flex flex-wrap items-center justify-between gap-3 p-3 bg-indigo-50/50 dark:bg-indigo-950/20 border border-indigo-200 dark:border-indigo-800 rounded-xl">
+        <div className="flex items-center gap-2 text-xs text-indigo-900 dark:text-indigo-200">
+          <Package className="h-4 w-4 text-indigo-600 flex-shrink-0" />
+          <span><strong>SAP Stock Tools:</strong> Reconcile physical depot inventory against SAP system records or analyze product quantity movement.</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <Link
+            to="/admin/inventory/register"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 transition-colors shadow-sm"
+          >
+            <FileSpreadsheet className="h-3.5 w-3.5 text-primary-600" />
+            Quantity Register
+          </Link>
+          <Link
+            to="/admin/inventory/reconciliation"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-primary-600 text-white hover:bg-primary-700 transition-colors shadow-sm"
+          >
+            <Scale className="h-3.5 w-3.5 text-white" />
+            SAP Stock Reconciliation
+          </Link>
+        </div>
+      </div>
+
       {/* Top metrics */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
@@ -690,6 +737,106 @@ function StockOversightView({ overview }: { overview: MasterStockOverview | null
           </div>
         );
       })()}
+
+      {/* Section 17: Unmapped SAP SKUs Inspection */}
+      <div className="border border-slate-200 rounded-xl overflow-hidden">
+        <div className="px-4 py-3 bg-amber-50/60 border-b border-amber-200 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4 text-amber-600" />
+            <h3 className="text-xs font-bold text-amber-900 uppercase tracking-wider">
+              Unmapped SAP Product SKUs ({unmappedSkus.length})
+            </h3>
+          </div>
+          <span className="text-xs text-amber-700 font-medium">SAP Master Health Check</span>
+        </div>
+        {unmappedSkus.length > 0 ? (
+          <div className="max-h-72 overflow-y-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="bg-slate-50/80 border-b border-slate-200 text-slate-500 font-semibold uppercase">
+                  <th className="text-left px-3 py-2">SKU / Code</th>
+                  <th className="text-left px-3 py-2">Imported Name</th>
+                  <th className="text-center px-3 py-2">SAP Status</th>
+                  <th className="text-right px-3 py-2">Picklists</th>
+                  <th className="text-right px-3 py-2">Bills</th>
+                  <th className="text-left px-3 py-2">First Seen</th>
+                  <th className="text-left px-3 py-2">Last Seen</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {unmappedSkus.map((u) => (
+                  <tr key={u.id} className="hover:bg-amber-50/30 transition-colors">
+                    <td className="px-3 py-2 font-mono font-bold text-rose-700">{u.sku}</td>
+                    <td className="px-3 py-2 text-slate-800 font-medium">{u.imported_product_name || '—'}</td>
+                    <td className="px-3 py-2 text-center">
+                      <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-100 text-rose-800 uppercase">
+                        UNMAPPED SKU
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums font-semibold">{u.affected_picklist_count}</td>
+                    <td className="px-3 py-2 text-right tabular-nums font-semibold">{u.affected_bill_count}</td>
+                    <td className="px-3 py-2 text-slate-500">{fmtDate(u.first_seen_at)}</td>
+                    <td className="px-3 py-2 text-slate-500">{fmtDate(u.last_seen_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="p-4 text-center text-xs text-slate-400">
+            Zero unmapped SKUs detected. All operational SKUs match the official Colgate-Palmolive SAP Product Master.
+          </div>
+        )}
+      </div>
+
+      {/* Section 18: Route Start Stock Exceptions (Warehouse Shortages) */}
+      <div className="border border-slate-200 rounded-xl overflow-hidden">
+        <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <ShieldAlert className="h-4 w-4 text-slate-600" />
+            <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+              Routes Started With Warehouse Stock Shortage ({routeExceptions.length})
+            </h3>
+          </div>
+          <span className="text-xs text-slate-500 font-medium">Non-blocking operational audits</span>
+        </div>
+        {routeExceptions.length > 0 ? (
+          <div className="max-h-72 overflow-y-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="bg-slate-50/80 border-b border-slate-200 text-slate-500 font-semibold uppercase">
+                  <th className="text-left px-3 py-2">Timestamp</th>
+                  <th className="text-left px-3 py-2">Route</th>
+                  <th className="text-left px-3 py-2">Worker</th>
+                  <th className="text-left px-3 py-2">SKU</th>
+                  <th className="text-right px-3 py-2">Required Qty</th>
+                  <th className="text-right px-3 py-2">Recorded Stock</th>
+                  <th className="text-right px-3 py-2">Shortage Qty</th>
+                  <th className="text-left px-3 py-2">Notes</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {routeExceptions.map((re) => (
+                  <tr key={re.id} className="hover:bg-slate-50 transition-colors">
+                    <td className="px-3 py-2 text-slate-500 whitespace-nowrap">{fmtDate(re.created_at)}</td>
+                    <td className="px-3 py-2 font-medium text-slate-900">{re.route_id}</td>
+                    <td className="px-3 py-2 text-slate-700">{re.worker_id}</td>
+                    <td className="px-3 py-2 font-mono font-bold text-primary-700">{re.sku}</td>
+                    <td className="px-3 py-2 text-right tabular-nums font-semibold text-slate-900">{re.required_quantity}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-slate-600">{re.recorded_warehouse_stock}</td>
+                    <td className="px-3 py-2 text-right tabular-nums font-bold text-rose-600">-{re.shortage_quantity}</td>
+                    <td className="px-3 py-2 text-slate-500 max-w-xs truncate" title={re.notes || ''}>{re.notes || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="p-4 text-center text-xs text-slate-400">
+            Zero route stock shortage exceptions recorded. All routes started with sufficient recorded stock.
+          </div>
+        )}
+      </div>
     </div>
   );
 }

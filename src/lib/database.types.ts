@@ -125,6 +125,17 @@ export interface Product {
   status: ProductStatus;
   created_at: string;
   updated_at: string;
+  brand?: string | null;
+  uom?: string | null;
+  active?: string | null;
+  sub_category?: string | null;
+  sub_brand?: string | null;
+  variant?: string | null;
+  ppg?: string | null;
+  ppg_description?: string | null;
+  material_group?: string | null;
+  prod_hierarchy?: string | null;
+  is_sap_master?: boolean;
 }
 
 export interface Picklist {
@@ -574,6 +585,105 @@ export interface InventoryMovement {
   worker?: Worker | null;
 }
 
+// ── Route Stock Exceptions (Non-blocking warehouse shortage tracking) ──
+
+export interface RouteStockException {
+  id: string;
+  occurred_at: string;
+  picklist_id: string;
+  route_id: string | null;
+  worker_id: string | null;
+  product_id: string | null;
+  sku: string;
+  product_name: string;
+  required_quantity: number;
+  recorded_warehouse_stock: number;
+  shortage_quantity: number;
+  status: 'open' | 'investigated' | 'resolved';
+  notes?: string | null;
+  created_at: string;
+  // Joined
+  route?: Route | null;
+  worker?: Worker | null;
+  picklist?: Picklist | null;
+}
+
+// ── Unmapped SKU Exceptions (Unrecognized products found in imports) ────
+
+export interface UnmappedSkuException {
+  id: string;
+  sku: string;
+  imported_product_name: string | null;
+  source_type: 'picklist' | 'bill' | 'sap_upload' | 'other';
+  source_reference: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
+  affected_picklist_count: number;
+  affected_bill_count: number;
+  status: 'unresolved' | 'resolved' | 'ignored';
+  notes?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// ── SAP Stock Reconciliation Types ────────────────────────────────────
+
+export type SapReconciliationStatus = 'MATCHED' | 'VARIANCE' | 'INCOMPLETE DATA' | 'UNMAPPED SKU';
+
+export interface SapStockReconciliation {
+  id: string;
+  period: string;
+  uploaded_at: string;
+  uploaded_by: string | null;
+  file_name: string | null;
+  total_products: number;
+  matched_count: number;
+  variance_count: number;
+  incomplete_count: number;
+  unmapped_count: number;
+  positive_variance_count: number;
+  negative_variance_count: number;
+  total_sap_stock: number;
+  total_distrotrack_stock: number;
+  notes?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SapStockReconciliationItem {
+  id: string;
+  reconciliation_id: string;
+  sku: string;
+  product_name: string;
+  uom: string;
+  sap_stock: number | null;
+  distrotrack_stock: number | null;
+  variance: number | null;
+  status: SapReconciliationStatus;
+  notes?: string | null;
+  created_at: string;
+}
+
+export interface ProductQuantityRegisterRow {
+  date: string;
+  picklistNumber: string;
+  picklistId: string;
+  routeCode: string;
+  routeName: string;
+  sku: string;
+  productName: string;
+  brand?: string;
+  category?: string;
+  uom: string;
+  picklistQty: number;
+  deliveredQty: number;
+  returnedQty: number;
+  netSoldQty: number;
+  rate: number;
+  mrp: number;
+  salesAmount: number;
+}
+
 // ── Master Audit Log ────────────────────────────────────────────────
 
 export interface MasterAuditLog {
@@ -624,6 +734,10 @@ export interface Database {
       };
       picklist_load_items: { Row: PicklistLoadItem; Insert: Omit<PicklistLoadItem, 'id' | 'created_at' | 'updated_at'>; Update: Partial<PicklistLoadItem> };
       party_financial_ledger: { Row: PartyFinancialLedger; Insert: Omit<PartyFinancialLedger, 'id' | 'created_at'>; Update: Partial<PartyFinancialLedger> };
+      route_stock_exceptions: { Row: RouteStockException; Insert: Omit<RouteStockException, 'id' | 'created_at'>; Update: Partial<RouteStockException> };
+      unmapped_sku_exceptions: { Row: UnmappedSkuException; Insert: Omit<UnmappedSkuException, 'id' | 'created_at' | 'updated_at'>; Update: Partial<UnmappedSkuException> };
+      sap_stock_reconciliations: { Row: SapStockReconciliation; Insert: Omit<SapStockReconciliation, 'id' | 'created_at' | 'updated_at'>; Update: Partial<SapStockReconciliation> };
+      sap_stock_reconciliation_items: { Row: SapStockReconciliationItem; Insert: Omit<SapStockReconciliationItem, 'id' | 'created_at'>; Update: Partial<SapStockReconciliationItem> };
     };
     Views: Record<string, never>;
     Functions: Record<string, never>;
