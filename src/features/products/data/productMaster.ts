@@ -206,3 +206,19 @@ export function findProductMasterByDescription(desc: string): ProductMasterEntry
 export function getProductMasterSKUs(): Set<string> {
   return MASTER_SKU_SET;
 }
+
+/**
+ * Register a newly imported or added Product Master entry dynamically.
+ * Updates in-memory lookup sets and maps so subsequent lookups resolve immediately.
+ */
+export function registerProductMasterEntry(entry: ProductMasterEntry): void {
+  if (!entry || !entry.sku) return;
+  const norm = entry.sku.trim().toUpperCase();
+  SKU_MAP.set(norm, entry);
+  MASTER_SKU_SET.add(norm);
+
+  const unpadded = norm.replace(/^0+/, '');
+  if (unpadded) {
+    UNPADDED_SKU_MAP.set(unpadded, entry);
+  }
+}

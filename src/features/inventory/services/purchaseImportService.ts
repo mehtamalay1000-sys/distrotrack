@@ -17,7 +17,7 @@
 import * as XLSX from 'xlsx';
 import { supabase } from '@/lib/supabase';
 import { mockStore } from '@/lib/mockStore';
-import { findProductMasterEntry } from '@/features/products/data/productMaster';
+import { findProductMasterEntry, registerProductMasterEntry } from '@/features/products/data/productMaster';
 import type { SapPurchaseImport, SapPurchaseImportItem } from '@/lib/database.types';
 
 export interface ParsedPurchaseRow {
@@ -71,6 +71,80 @@ export interface PurchaseImportResult {
   skippedUnmapped: number;
   errors?: string[];
   message?: string;
+}
+
+export interface ExtractedSapProduct {
+  sku: string;
+  name: string;
+  uom: string;
+  category?: string | null;
+  subCategory?: string | null;
+  brand?: string | null;
+  subBrand?: string | null;
+  variant?: string | null;
+  ppg?: string | null;
+  ppgDescription?: string | null;
+  materialGroup?: string | null;
+  prodHierarchy?: string | null;
+  mrp?: number | null;
+  rate?: number | null;
+  unit?: string | null;
+}
+
+/**
+ * Extracts product master fields from a parsed SAP purchase/GR row.
+ * Strictly avoids inventing or fabricating values: only uses data present in source row.
+ */
+export function extractSapProductDetails(row: ParsedPurchaseRow): ExtractedSapProduct {
+  const raw = row.rawRow || {};
+  const keys = Object.keys(raw);
+
+  const findVal = (regex: RegExp): string | null => {
+    const k = keys.find((key) => regex.test(key.trim()));
+    if (!k) return null;
+    const v = raw[k];
+    if (v === undefined || v === null || String(v).trim() === '') return null;
+    return String(v).trim();
+  };
+
+  const sku = row.sku.trim();
+  const name = row.productName.trim() || findVal(/^(?:material\s*desc(?:ription)?|desc(?:ription)?|product\s*name|article\s*desc(?:ription)?)$/i) || sku;
+  const uom = row.uom.trim() || findVal(/^(?:uom|unit|base\s*uom)$/i) || 'EA';
+
+  const category = findVal(/^(?:category|prod(?:uct)?\s*category)$/i);
+  const subCategory = findVal(/^(?:sub\s*cat(?:egory)?|subcategory)$/i);
+  const brand = findVal(/^(?:brand)$/i);
+  const subBrand = findVal(/^(?:sub\s*brand|subbrand)$/i);
+  const variant = findVal(/^(?:variant)$/i);
+  const ppg = findVal(/^(?:ppg|price\s*point\s*group)$/i);
+  const ppgDescription = findVal(/^(?:ppg\s*desc(?:ription)?)$/i);
+  const materialGroup = findVal(/^(?:material\s*group|mat(?:erial)?\.?\s*group)$/i);
+  const prodHierarchy = findVal(/^(?:prod(?:uct)?\s*hierarchy|hierarchy)$/i);
+
+  // MRP & Rate only if explicitly provided in file
+  const rawMrp = findVal(/^(?:mrp|max(?:imum)?\s*retail\s*price)$/i);
+  const rawRate = findVal(/^(?:rate|invoice\s*rate|basic\s*rate|purchase\s*rate|price)$/i);
+
+  const mrp = rawMrp ? parseCleanNumber(rawMrp) : null;
+  const rate = rawRate ? parseCleanNumber(rawRate) : null;
+
+  return {
+    sku,
+    name,
+    uom,
+    category,
+    subCategory,
+    brand,
+    subBrand,
+    variant,
+    ppg,
+    ppgDescription,
+    materialGroup,
+    prodHierarchy,
+    mrp: mrp && mrp > 0 ? mrp : null,
+    rate: rate && rate > 0 ? rate : null,
+    unit: uom.toLowerCase() === 'doz' ? 'doz' : uom.toLowerCase() === 'cs' ? 'cs' : 'pcs',
+  };
 }
 
 const CONFIRMED_STATUS_REGEX = /^(?:completed|gr\s*done|received|posted|101|yes|grn|success)$/i;
@@ -383,8 +457,35 @@ export async function validateAndMatchPurchaseRows(
       continue;
     }
 
-    // 3. Exact Material/SKU matching via canonical SAP Product Master
-    const masterEntry = findProductMasterEntry(row.sku);
+    // 3. Exact Material/SKU matching via canonical SAP Product Master or registered master
+    let masterEntry = findProductMasterEntry(row.sku);
+
+    if (!masterEntry) {
+      // Check if product was added dynamically to mockStore / database
+      const dbProd = mockStore.getProducts().find(
+        (p) => p.sku.toUpperCase() === normSku || (normSku.replace(/^0+/, '') && p.sku.toUpperCase() === normSku.replace(/^0+/, ''))
+      );
+      if (dbProd) {
+        registerProductMasterEntry({
+          sku: dbProd.sku,
+          name: dbProd.name,
+          mrp: dbProd.mrp,
+          category: dbProd.category || 'General',
+          unit: dbProd.unit,
+          brand: dbProd.brand || undefined,
+          uom: dbProd.uom || undefined,
+          active: dbProd.active || undefined,
+          subCategory: dbProd.sub_category || undefined,
+          subBrand: dbProd.sub_brand || undefined,
+          variant: dbProd.variant || undefined,
+          ppg: dbProd.ppg || undefined,
+          ppgDescription: dbProd.ppg_description || undefined,
+          materialGroup: dbProd.material_group || undefined,
+          prodHierarchy: dbProd.prod_hierarchy || undefined,
+        });
+        masterEntry = findProductMasterEntry(row.sku);
+      }
+    }
 
     if (!masterEntry) {
       unmappedCount++;

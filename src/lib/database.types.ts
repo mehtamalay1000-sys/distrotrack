@@ -136,6 +136,7 @@ export interface Product {
   material_group?: string | null;
   prod_hierarchy?: string | null;
   is_sap_master?: boolean;
+  source?: string | null;
 }
 
 export interface Picklist {

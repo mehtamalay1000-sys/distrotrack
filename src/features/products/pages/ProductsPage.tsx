@@ -268,7 +268,24 @@ export function ProductsPage() {
                   {filteredCatalog.map((p) => (
                     <tr key={p.id} className="hover:bg-surface-50/50 dark:hover:bg-surface-700/30 transition-colors">
                       <td className="px-4 py-3 font-mono text-xs font-semibold text-primary-700 dark:text-primary-400">{p.sku}</td>
-                      <td className="px-4 py-3 font-medium text-surface-900 dark:text-surface-100">{p.name}</td>
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="font-medium text-surface-900 dark:text-surface-100">{p.name}</span>
+                          {p.source === 'SAP_PURCHASE_IMPORT' ? (
+                            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-indigo-100 text-indigo-800 dark:bg-indigo-950 dark:text-indigo-300">
+                              Imported from SAP Purchase/GR
+                            </span>
+                          ) : p.is_sap_master ? (
+                            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300">
+                              SAP Master
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300">
+                              Manually Added
+                            </span>
+                          )}
+                        </div>
+                      </td>
                       <td className="px-4 py-3">
                         <span className="text-xs bg-surface-100 dark:bg-surface-700 text-surface-700 dark:text-surface-300 px-2 py-0.5 rounded font-medium">
                           {p.category || 'General'}

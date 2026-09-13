@@ -1,6 +1,6 @@
 import { supabase } from '@/lib/supabase';
 import { mockStore } from '@/lib/mockStore';
-import { SAP_PRODUCT_MASTER, findProductMasterEntry, findProductMasterByDescription } from '@/features/products/data/productMaster';
+import { SAP_PRODUCT_MASTER, findProductMasterEntry, findProductMasterByDescription, registerProductMasterEntry } from '@/features/products/data/productMaster';
 import type { Product } from '@/lib/database.types';
 
 export interface ProductFilterOptions {
@@ -643,3 +643,332 @@ export async function clearAllSalesAnalyticsData(): Promise<void> {
   }
   mockStore.clearAllImportedSalesData();
 }
+
+// ── Unmapped SAP Product Master Creation ─────────────────────────────────
+
+export interface AddUnmappedProductResult {
+  status: 'created' | 'already_exists' | 'error';
+  product?: Product;
+  message?: string;
+  error?: string;
+}
+
+export interface BulkAddUnmappedResult {
+  total: number;
+  createdCount: number;
+  alreadyExistsCount: number;
+  invalidCount: number;
+  details: Array<{
+    sku: string;
+    name?: string;
+    status: 'created' | 'already_exists' | 'invalid' | 'error';
+    error?: string;
+  }>;
+}
+
+/**
+ * Adds an unmapped SAP product to the Product Master.
+ * Calls secure server-side RPC `add_unmapped_sap_product` to enforce Owner/Admin authorization,
+ * idempotent uniqueness by SKU, and audit logging.
+ *
+ * Synchronizes in-memory maps dynamically so immediate re-matching succeeds without page reloads.
+ */
+export async function addUnmappedSapProduct(
+  input: {
+    sku: string;
+    name: string;
+    uom?: string | null;
+    category?: string | null;
+    subCategory?: string | null;
+    brand?: string | null;
+    subBrand?: string | null;
+    variant?: string | null;
+    ppg?: string | null;
+    ppgDescription?: string | null;
+    materialGroup?: string | null;
+    prodHierarchy?: string | null;
+    mrp?: number | null;
+    rate?: number | null;
+    unit?: string | null;
+  },
+  importRef?: string
+): Promise<AddUnmappedProductResult> {
+  const cleanSku = (input.sku || '').trim().toUpperCase();
+  const cleanName = (input.name || '').trim();
+
+  if (!cleanSku) {
+    return { status: 'error', error: 'SKU/Material code is required' };
+  }
+  if (!cleanName) {
+    return { status: 'error', error: 'Product name/description is required' };
+  }
+
+  // 1. Try server-side RPC (enforces Owner/Admin role, idempotent constraint, audit log)
+  try {
+    const { data, error } = await supabase.rpc('add_unmapped_sap_product', {
+      p_product: {
+        sku: cleanSku,
+        name: cleanName,
+        uom: input.uom || null,
+        category: input.category || null,
+        sub_category: input.subCategory || null,
+        brand: input.brand || null,
+        sub_brand: input.subBrand || null,
+        variant: input.variant || null,
+        ppg: input.ppg || null,
+        ppg_description: input.ppgDescription || null,
+        material_group: input.materialGroup || null,
+        prod_hierarchy: input.prodHierarchy || null,
+        mrp: input.mrp ?? null,
+        rate: input.rate ?? null,
+        unit: input.unit || (input.uom?.toLowerCase() === 'doz' ? 'doz' : 'pcs'),
+      },
+      p_import_ref: importRef || 'SAP_PURCHASE_IMPORT',
+    });
+
+    if (!error && data) {
+      const res = data as any;
+      const returnedProd: Product = res.product || {
+        id: `prod-sap-${cleanSku}`,
+        sku: cleanSku,
+        name: cleanName,
+        category: input.category || null,
+        mrp: input.mrp || 0,
+        rate: input.rate || 0,
+        unit: input.unit || (input.uom?.toLowerCase() === 'doz' ? 'doz' : 'pcs'),
+        status: 'active',
+        brand: input.brand || null,
+        uom: input.uom || null,
+        source: 'SAP_PURCHASE_IMPORT',
+        is_sap_master: true,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+
+      // Synchronize in-memory stores immediately
+      mockStore.saveProduct(returnedProd);
+      registerProductMasterEntry({
+        sku: cleanSku,
+        name: cleanName,
+        mrp: Number(returnedProd.mrp || 0),
+        category: returnedProd.category || 'General',
+        unit: returnedProd.unit,
+        brand: returnedProd.brand || undefined,
+        uom: returnedProd.uom || undefined,
+        active: returnedProd.active || undefined,
+        subCategory: returnedProd.sub_category || undefined,
+        subBrand: returnedProd.sub_brand || undefined,
+        variant: returnedProd.variant || undefined,
+        ppg: returnedProd.ppg || undefined,
+        ppgDescription: returnedProd.ppg_description || undefined,
+        materialGroup: returnedProd.material_group || undefined,
+        prodHierarchy: returnedProd.prod_hierarchy || undefined,
+      });
+
+      return {
+        status: res.status === 'already_exists' ? 'already_exists' : 'created',
+        product: returnedProd,
+        message: res.message,
+      };
+    }
+  } catch (err: any) {
+    console.warn('[productService] add_unmapped_sap_product RPC failed or offline:', err?.message);
+  }
+
+  // 2. Safe Fallback / Offline / Mock Mode
+  const existing = mockStore.getProducts().find(
+    (p) => p.sku.toUpperCase() === cleanSku || p.sku.toUpperCase() === cleanSku.replace(/^0+/, '')
+  );
+  if (existing) {
+    return {
+      status: 'already_exists',
+      product: existing,
+      message: `Product with SKU ${cleanSku} already exists in Product Master`,
+    };
+  }
+
+  const newProd: Product = {
+    id: `prod-sap-${cleanSku}`,
+    sku: cleanSku,
+    name: cleanName,
+    category: input.category || null,
+    mrp: input.mrp ?? 0,
+    rate: input.rate ?? 0,
+    unit: input.unit || (input.uom?.toLowerCase() === 'doz' ? 'doz' : 'pcs'),
+    status: 'active',
+    brand: input.brand || null,
+    uom: input.uom || null,
+    active: 'Y',
+    sub_category: input.subCategory || null,
+    sub_brand: input.subBrand || null,
+    variant: input.variant || null,
+    ppg: input.ppg || null,
+    ppg_description: input.ppgDescription || null,
+    material_group: input.materialGroup || null,
+    prod_hierarchy: input.prodHierarchy || null,
+    is_sap_master: true,
+    source: 'SAP_PURCHASE_IMPORT',
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+
+  mockStore.saveProduct(newProd);
+  registerProductMasterEntry({
+    sku: cleanSku,
+    name: cleanName,
+    mrp: newProd.mrp,
+    category: newProd.category || 'General',
+    unit: newProd.unit,
+    brand: newProd.brand || undefined,
+    uom: newProd.uom || undefined,
+    active: newProd.active || undefined,
+    subCategory: newProd.sub_category || undefined,
+    subBrand: newProd.sub_brand || undefined,
+    variant: newProd.variant || undefined,
+    ppg: newProd.ppg || undefined,
+    ppgDescription: newProd.ppg_description || undefined,
+    materialGroup: newProd.material_group || undefined,
+    prodHierarchy: newProd.prod_hierarchy || undefined,
+  });
+
+  return {
+    status: 'created',
+    product: newProd,
+    message: `Product ${cleanName} (${cleanSku}) added to Product Master`,
+  };
+}
+
+/**
+ * Bulk adds multiple unmapped SAP products into Product Master.
+ */
+export async function addBulkUnmappedSapProducts(
+  products: Array<{
+    sku: string;
+    name: string;
+    uom?: string | null;
+    category?: string | null;
+    subCategory?: string | null;
+    brand?: string | null;
+    subBrand?: string | null;
+    variant?: string | null;
+    ppg?: string | null;
+    ppgDescription?: string | null;
+    materialGroup?: string | null;
+    prodHierarchy?: string | null;
+    mrp?: number | null;
+    rate?: number | null;
+    unit?: string | null;
+  }>,
+  importRef?: string
+): Promise<BulkAddUnmappedResult> {
+  // 1. Try server RPC
+  try {
+    const formatted = products.map((p) => ({
+      sku: (p.sku || '').trim().toUpperCase(),
+      name: (p.name || '').trim(),
+      uom: p.uom || null,
+      category: p.category || null,
+      sub_category: p.subCategory || null,
+      brand: p.brand || null,
+      sub_brand: p.subBrand || null,
+      variant: p.variant || null,
+      ppg: p.ppg || null,
+      ppg_description: p.ppgDescription || null,
+      material_group: p.materialGroup || null,
+      prod_hierarchy: p.prodHierarchy || null,
+      mrp: p.mrp ?? null,
+      rate: p.rate ?? null,
+      unit: p.unit || (p.uom?.toLowerCase() === 'doz' ? 'doz' : 'pcs'),
+    }));
+
+    const { data, error } = await supabase.rpc('add_bulk_unmapped_sap_products', {
+      p_products: formatted,
+      p_import_ref: importRef || 'SAP_PURCHASE_IMPORT',
+    });
+
+    if (!error && data) {
+      const res = data as any;
+      // Synchronize in-memory stores immediately
+      for (const p of products) {
+        if (p.sku && p.name) {
+          const skuNorm = p.sku.trim().toUpperCase();
+          const prod: Product = {
+            id: `prod-sap-${skuNorm}`,
+            sku: skuNorm,
+            name: p.name.trim(),
+            category: p.category || null,
+            mrp: p.mrp || 0,
+            rate: p.rate || 0,
+            unit: p.unit || (p.uom?.toLowerCase() === 'doz' ? 'doz' : 'pcs'),
+            status: 'active',
+            brand: p.brand || null,
+            uom: p.uom || null,
+            source: 'SAP_PURCHASE_IMPORT',
+            is_sap_master: true,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          };
+          mockStore.saveProduct(prod);
+          registerProductMasterEntry({
+            sku: skuNorm,
+            name: p.name.trim(),
+            mrp: prod.mrp,
+            category: prod.category || 'General',
+            unit: prod.unit,
+            brand: prod.brand || undefined,
+            uom: prod.uom || undefined,
+          });
+        }
+      }
+      return {
+        total: res.total || products.length,
+        createdCount: res.created_count || 0,
+        alreadyExistsCount: res.already_exists_count || 0,
+        invalidCount: res.invalid_count || 0,
+        details: res.details || [],
+      };
+    }
+  } catch (err: any) {
+    console.warn('[productService] add_bulk_unmapped_sap_products RPC failed or offline:', err?.message);
+  }
+
+  // Fallback sequential addition
+  let createdCount = 0;
+  let alreadyExistsCount = 0;
+  let invalidCount = 0;
+  const details: BulkAddUnmappedResult['details'] = [];
+
+  for (const p of products) {
+    if (!p.sku || !p.sku.trim()) {
+      invalidCount++;
+      details.push({ sku: p.sku || '', status: 'invalid', error: 'Missing SKU' });
+      continue;
+    }
+    if (!p.name || !p.name.trim()) {
+      invalidCount++;
+      details.push({ sku: p.sku, status: 'invalid', error: 'Missing product description' });
+      continue;
+    }
+
+    const res = await addUnmappedSapProduct(p, importRef);
+    if (res.status === 'created') {
+      createdCount++;
+      details.push({ sku: p.sku, name: p.name, status: 'created' });
+    } else if (res.status === 'already_exists') {
+      alreadyExistsCount++;
+      details.push({ sku: p.sku, name: p.name, status: 'already_exists' });
+    } else {
+      invalidCount++;
+      details.push({ sku: p.sku, name: p.name, status: 'error', error: res.error });
+    }
+  }
+
+  return {
+    total: products.length,
+    createdCount,
+    alreadyExistsCount,
+    invalidCount,
+    details,
+  };
+}
+

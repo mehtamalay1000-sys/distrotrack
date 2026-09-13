@@ -23,6 +23,8 @@ import {
   getProducts,
   lookupProductBySku,
   upsertProductBySku,
+  addUnmappedSapProduct,
+  addBulkUnmappedSapProducts,
 } from '../src/features/products/services/productService.ts';
 import {
   getProductQuantityRegister,
@@ -49,6 +51,7 @@ import {
   validateAndMatchPurchaseRows,
   confirmPurchaseImport,
   getRecentPurchaseImports,
+  extractSapProductDetails,
   type ParsedPurchaseRow,
 } from '../src/features/inventory/services/purchaseImportService.ts';
 import {
@@ -516,7 +519,172 @@ async function runTests() {
   assert(recentImports.length >= 1, `Recent purchase imports list populated (${recentImports.length} imports)`);
   assert(recentImports.some(i => i.batch_ref === 'GR-TEST-BATCH-001'), 'Audit record exists for batch GR-TEST-BATCH-001');
 
-  // ── 8. SUMMARY RESULTS ───────────────────────────────────────────
+  // ── 8. UNMAPPED SAP PRODUCT ADDITION & IN-MEMORY RE-MATCHING ──────
+  console.log('\n=== 8. UNMAPPED SAP PRODUCTS TO PRODUCT MASTER ===');
+
+  // 1. Initial State: Parsed purchase rows with unmapped Colgate product 61054028
+  const unmappedTestRow: ParsedPurchaseRow = {
+    sku: '61054028',
+    productName: 'CDC 500g NF (200g*2+100g)',
+    uom: 'DOZ',
+    orderedQty: 4,
+    receivedQty: 4,
+    grStatus: 'Completed',
+    grDate: '2026-09-13',
+    grDocNo: '3024574206',
+    poNumber: '4500123456',
+    invoiceNo: '81D0001541',
+    invoiceDate: '02.09.2026',
+    batch: '21',
+    rawRow: {
+      'Article No': '61054028',
+      'Description': 'CDC 500g NF (200g*2+100g)',
+      'UOM': 'DOZ',
+      'Confirmed Qty': 4,
+      'GR Status': 'Completed',
+      'Category': 'Oral Care',
+      'Variant': '500g NF',
+    },
+  };
+
+  const testSessionRows: ParsedPurchaseRow[] = [unmappedTestRow];
+  const testBatchRef = 'GR-BATCH-UNMAPPED-TEST-001';
+
+  // 2. Initial validation: SKU 61054028 MUST initially be UNMAPPED
+  const initialVal = await validateAndMatchPurchaseRows(testSessionRows, testBatchRef);
+  assert(initialVal.unmapped === 1, `Initial matching identifies 1 unmapped row (${initialVal.unmapped})`);
+  assert(initialVal.matched === 0, `Initial matching has 0 matched rows (${initialVal.matched})`);
+  assert(initialVal.rows[0].matchStatus === 'UNMAPPED', 'Row status is initially UNMAPPED');
+  assert(
+    initialVal.rows[0].validationError === 'SKU not found in official Colgate-Palmolive Product Master',
+    'Correct validation note for unmapped SKU'
+  );
+
+  // 3. Product Details Extraction (No fabricated fields)
+  const extracted = extractSapProductDetails(unmappedTestRow);
+  assert(extracted.sku === '61054028', `Extracted SKU matches source: ${extracted.sku}`);
+  assert(extracted.name === 'CDC 500g NF (200g*2+100g)', `Extracted name matches source: ${extracted.name}`);
+  assert(extracted.uom === 'DOZ', `Extracted UOM preserved from source: ${extracted.uom}`);
+  assert(extracted.category === 'Oral Care', `Extracted Category from source: ${extracted.category}`);
+  assert(extracted.variant === '500g NF', `Extracted Variant from source: ${extracted.variant}`);
+  assert(extracted.mrp === null, 'MRP remains null because source did not provide it (no fabrication)');
+  assert(extracted.rate === null, 'Rate remains null because source did not provide it (no fabrication)');
+
+  // 4. Add Single Unmapped Product to Product Master
+  const addResult = await addUnmappedSapProduct(
+    {
+      sku: extracted.sku,
+      name: extracted.name,
+      uom: extracted.uom,
+      category: extracted.category,
+      variant: extracted.variant,
+      mrp: extracted.mrp,
+      rate: extracted.rate,
+      unit: extracted.unit,
+    },
+    testBatchRef
+  );
+  assert(addResult.status === 'created', `Product creation status is 'created' (${addResult.status})`);
+  assert(addResult.product?.sku === '61054028', 'Created product has correct SKU 61054028');
+  assert(addResult.product?.source === 'SAP_PURCHASE_IMPORT', `Product source is marked 'SAP_PURCHASE_IMPORT' (${addResult.product?.source})`);
+
+  // 5. CRITICAL INVARIANCE: Adding product alone MUST NOT create an inventory movement!
+  const movementsAfterProductAdd = mockStore.getInventoryMovements('61054028');
+  assert(
+    movementsAfterProductAdd.length === 0,
+    `Zero inventory movements created during product master addition (count = ${movementsAfterProductAdd.length})`
+  );
+
+  const initialStock61054028 = await getDistroTrackOperationalStock('61054028');
+  assert(
+    initialStock61054028.calculatedStock === null,
+    `Operational calculated stock remains null (no movements yet) before import confirmation (${initialStock61054028.calculatedStock})`
+  );
+
+  // 6. Immediate In-Memory Re-Matching (NO re-upload required!)
+  const reMatched = await validateAndMatchPurchaseRows(testSessionRows, testBatchRef);
+  assert(reMatched.unmapped === 0, `Unmapped count decreases to 0 (${reMatched.unmapped})`);
+  assert(reMatched.matched === 1, `Matched count increases to 1 (${reMatched.matched})`);
+  assert(reMatched.rows[0].matchStatus === 'MATCHED', 'Row status transitioned to MATCHED / Ready to Inward');
+  assert(reMatched.rows[0].receivedQty === 4, `Received quantity preserved at 4 DOZ (${reMatched.rows[0].receivedQty})`);
+  assert(reMatched.rows[0].uom === 'DOZ', `UOM preserved at DOZ (${reMatched.rows[0].uom})`);
+  assert(reMatched.rows[0].canonicalName === 'CDC 500g NF (200g*2+100g)', 'Canonical name resolved correctly');
+
+  // 7. Stock Import Integration: Confirm import and verify purchase_inward movement
+  const inwardImportRes = await confirmPurchaseImport(reMatched, testBatchRef, 'weekly_purchase.xlsx');
+  assert(inwardImportRes.success === true, 'Weekly purchase import confirmed successfully');
+  assert(inwardImportRes.movementsCreated === 1, `1 inbound movement created (${inwardImportRes.movementsCreated})`);
+
+  const movementsAfterInward = mockStore.getInventoryMovements('61054028');
+  assert(movementsAfterInward.length === 1, `Exactly 1 inventory movement in ledger (${movementsAfterInward.length})`);
+  assert(movementsAfterInward[0].movement_type === 'purchase_inward', `Movement type is 'purchase_inward' (${movementsAfterInward[0].movement_type})`);
+  assert(movementsAfterInward[0].quantity === 4, `Movement quantity is +4 (${movementsAfterInward[0].quantity})`);
+
+  const stockAfterInward = await getDistroTrackOperationalStock('61054028');
+  assert(stockAfterInward.calculatedStock === 4, `DistroTrack calculated stock increased to 4 DOZ (${stockAfterInward.calculatedStock})`);
+
+  // 8. Idempotency Safety: Repeated creation of the same SKU must NOT duplicate Product Master
+  const duplicateAddAttempt = await addUnmappedSapProduct(
+    {
+      sku: '61054028',
+      name: 'CDC 500g NF (200g*2+100g)',
+      uom: 'DOZ',
+    },
+    testBatchRef
+  );
+  assert(
+    duplicateAddAttempt.status === 'already_exists',
+    `Duplicate addition correctly returned 'already_exists' (${duplicateAddAttempt.status})`
+  );
+
+  const allProductsForSku = mockStore.getProducts().filter(p => p.sku.toUpperCase() === '61054028');
+  assert(allProductsForSku.length === 1, `Strict idempotency: exactly 1 Product Master record exists for SKU 61054028 (found ${allProductsForSku.length})`);
+
+  // 9. Bulk Add Unmapped Products & Rejection of Invalid Records
+  const bulkUnmappedInput = [
+    {
+      sku: '61066801',
+      name: 'Colgate Strong Teeth 200g New',
+      uom: 'DOZ',
+      category: 'Oral Care',
+    },
+    {
+      sku: '61066802',
+      name: 'Colgate ZigZag Charcoal Toothbrush',
+      uom: 'DOZ',
+      category: 'Oral Care',
+    },
+    {
+      sku: '', // Invalid: missing SKU
+      name: 'Invalid Item Missing SKU',
+      uom: 'EA',
+    },
+    {
+      sku: '61066803',
+      name: '', // Invalid: missing Name
+      uom: 'EA',
+    },
+    {
+      sku: '61054028', // Existing SKU
+      name: 'CDC 500g NF (200g*2+100g)',
+      uom: 'DOZ',
+    },
+  ];
+
+  const bulkAddResult = await addBulkUnmappedSapProducts(bulkUnmappedInput, 'BULK-TEST-001');
+  assert(bulkAddResult.total === 5, `Total processed: 5 (${bulkAddResult.total})`);
+  assert(bulkAddResult.createdCount === 2, `2 valid records created (${bulkAddResult.createdCount})`);
+  assert(bulkAddResult.alreadyExistsCount === 1, `1 duplicate record skipped as already exists (${bulkAddResult.alreadyExistsCount})`);
+  assert(bulkAddResult.invalidCount === 2, `2 invalid/missing rows safely rejected (${bulkAddResult.invalidCount})`);
+
+  // Verify bulk added products are immediately searchable via lookupProductBySku
+  const bulkLookup1 = await lookupProductBySku('61066801');
+  assert(bulkLookup1 !== null && bulkLookup1.name === 'Colgate Strong Teeth 200g New', 'Bulk added product 61066801 is immediately queryable in Product Master');
+
+  const bulkLookup2 = await lookupProductBySku('61066802');
+  assert(bulkLookup2 !== null && bulkLookup2.name === 'Colgate ZigZag Charcoal Toothbrush', 'Bulk added product 61066802 is immediately queryable in Product Master');
+
+  // ── 9. SUMMARY RESULTS ───────────────────────────────────────────
   console.log('\n====================================================');
   console.log(`TEST RUN COMPLETE: ${passedTests} PASSED, ${failedTests} FAILED`);
   console.log('====================================================');

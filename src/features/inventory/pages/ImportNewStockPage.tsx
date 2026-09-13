@@ -5,27 +5,38 @@ import { Link } from 'react-router-dom';
 import {
   FileUp, RefreshCw, CheckCircle2,
   History, PackagePlus, ArrowRight, ShieldCheck,
-  Search, AlertCircle, FileSpreadsheet
+  Search, AlertCircle, FileSpreadsheet, Plus
 } from 'lucide-react';
 import { PageHeader, Card, Button, LoadingState, EmptyState, Modal } from '@/shared/ui';
+import { useAuth } from '@/app/AuthProvider';
 import {
   parseSapPurchaseFile,
   validateAndMatchPurchaseRows,
   confirmPurchaseImport,
   getRecentPurchaseImports,
+  extractSapProductDetails,
   type PurchaseImportPreview,
   type PurchaseImportResult,
   type ParsedPurchaseRow,
+  type ExtractedSapProduct,
 } from '../services/purchaseImportService';
+import {
+  addUnmappedSapProduct,
+  addBulkUnmappedSapProducts,
+} from '@/features/products/services/productService';
 
 export function ImportNewStockPage() {
   const qc = useQueryClient();
+  const { profile, role } = useAuth();
+  const isAuthorized = role === 'owner' || role === 'master' || profile?.role === 'owner' || profile?.role === 'master';
+
   const [activeTab, setActiveTab] = useState<'import' | 'history'>('import');
 
   // File & parsing state
   const [file, setFile] = useState<File | null>(null);
   const [parsing, setParsing] = useState(false);
   const [preview, setPreview] = useState<PurchaseImportPreview | null>(null);
+  const [parsedRows, setParsedRows] = useState<ParsedPurchaseRow[]>([]);
   const [batchRef, setBatchRef] = useState('');
   const [fileName, setFileName] = useState('');
   const [notes, setNotes] = useState('');
@@ -34,9 +45,33 @@ export function ImportNewStockPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'MATCHED' | 'UNMAPPED' | 'INVALID_QTY' | 'EXCLUDED_STATUS' | 'DUPLICATE'>('all');
 
-  // Confirmation modal
+  // Confirmation modal for stock import
   const [confirmModalOpen, setConfirmModalOpen] = useState(false);
   const [importResult, setImportResult] = useState<PurchaseImportResult | null>(null);
+
+  // Single Add Product Modal state
+  const [singleAddModalOpen, setSingleAddModalOpen] = useState(false);
+  const [extractedProduct, setExtractedProduct] = useState<ExtractedSapProduct | null>(null);
+  const [addingProduct, setAddingProduct] = useState(false);
+
+  // Bulk Add Modal state
+  const [bulkAddModalOpen, setBulkAddModalOpen] = useState(false);
+  const [bulkAdding, setBulkAdding] = useState(false);
+  const [bulkStats, setBulkStats] = useState<{
+    totalUnmapped: number;
+    validList: ExtractedSapProduct[];
+    missingSkuCount: number;
+    missingNameCount: number;
+    duplicateSkuCount: number;
+    invalidCount: number;
+  }>({
+    totalUnmapped: 0,
+    validList: [],
+    missingSkuCount: 0,
+    missingNameCount: 0,
+    duplicateSkuCount: 0,
+    invalidCount: 0,
+  });
 
   // History query
   const { data: historyList = [], isLoading: loadingHistory, refetch: refetchHistory } = useQuery({
@@ -44,6 +79,13 @@ export function ImportNewStockPage() {
     queryFn: getRecentPurchaseImports,
     enabled: activeTab === 'history',
   });
+
+  // Immediate in-memory re-matching without re-uploading file
+  const reRunMatching = async (currentRows: ParsedPurchaseRow[], currentBatchRef: string) => {
+    const valPreview = await validateAndMatchPurchaseRows(currentRows, currentBatchRef);
+    valPreview.fileName = fileName;
+    setPreview(valPreview);
+  };
 
   // Handle file selection and parsing
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -69,6 +111,7 @@ export function ImportNewStockPage() {
       }
 
       setBatchRef(parsed.batchRef);
+      setParsedRows(parsed.rows);
       const valPreview = await validateAndMatchPurchaseRows(parsed.rows, parsed.batchRef);
       valPreview.fileName = uploaded.name;
       setPreview(valPreview);
@@ -149,11 +192,11 @@ export function ImportNewStockPage() {
         rawRow: {},
       },
       {
-        sku: 'UNKNOWN-999999',
-        productName: 'Unmapped Colgate Mystery Sample',
+        sku: '61054028',
+        productName: 'CDC 500g NF (200g*2+100g)',
         uom: 'DOZ',
-        orderedQty: 10,
-        receivedQty: 10,
+        orderedQty: 4,
+        receivedQty: 4,
         grStatus: 'Completed',
         grDate: new Date().toISOString().split('T')[0],
         grDocNo: '3024574206',
@@ -161,18 +204,155 @@ export function ImportNewStockPage() {
         invoiceNo: '81D0001541',
         invoiceDate: '02.09.2026',
         batch: '99',
-        rawRow: {},
+        rawRow: {
+          'Article No': '61054028',
+          'Description': 'CDC 500g NF (200g*2+100g)',
+          'UOM': 'DOZ',
+          'Confirmed Qty': 4,
+          'GR Status': 'Completed',
+          'Category': 'Oral Care',
+          'Variant': '500g NF',
+        },
       },
     ];
 
     const ref = `SAMPLE-GR-${Date.now()}`;
     setBatchRef(ref);
     setFileName('colgate_weekly_purchase_sample.xlsx');
+    setParsedRows(sampleRows);
     const valPreview = await validateAndMatchPurchaseRows(sampleRows, ref);
     valPreview.fileName = 'colgate_weekly_purchase_sample.xlsx';
     setPreview(valPreview);
     setParsing(false);
     toast.success('Loaded Colgate-Palmolive sample purchase rows');
+  };
+
+  // Handlers for Single Add to Product Master
+  const handleOpenAddModal = (row: ParsedPurchaseRow) => {
+    if (!isAuthorized) {
+      toast.error('Only authenticated Owner/Admin users may add products to Product Master.');
+      return;
+    }
+    const extracted = extractSapProductDetails(row);
+    setExtractedProduct(extracted);
+    setSingleAddModalOpen(true);
+  };
+
+  const handleConfirmSingleAdd = async () => {
+    if (!extractedProduct) return;
+    setAddingProduct(true);
+    try {
+      const res = await addUnmappedSapProduct({
+        sku: extractedProduct.sku,
+        name: extractedProduct.name,
+        uom: extractedProduct.uom,
+        category: extractedProduct.category,
+        subCategory: extractedProduct.subCategory,
+        brand: extractedProduct.brand,
+        subBrand: extractedProduct.subBrand,
+        variant: extractedProduct.variant,
+        ppg: extractedProduct.ppg,
+        ppgDescription: extractedProduct.ppgDescription,
+        materialGroup: extractedProduct.materialGroup,
+        prodHierarchy: extractedProduct.prodHierarchy,
+        mrp: extractedProduct.mrp,
+        rate: extractedProduct.rate,
+        unit: extractedProduct.unit,
+      }, batchRef);
+
+      if (res.status === 'already_exists') {
+        toast.info(res.message || `SKU ${extractedProduct.sku} already exists in Product Master.`);
+      } else if (res.status === 'created') {
+        toast.success(res.message || `Product ${extractedProduct.name} (${extractedProduct.sku}) added to Product Master.`);
+      } else {
+        toast.error(res.error || 'Failed to add product.');
+        return;
+      }
+
+      setSingleAddModalOpen(false);
+      qc.invalidateQueries({ queryKey: ['products'] });
+
+      // Immediately re-run matching without requiring re-upload!
+      await reRunMatching(parsedRows, batchRef);
+    } catch (err: any) {
+      toast.error(err?.message || 'Error adding product to Master');
+    } finally {
+      setAddingProduct(false);
+    }
+  };
+
+  // Handlers for Bulk Add All Valid Unmapped Products
+  const handleOpenBulkModal = () => {
+    if (!isAuthorized) {
+      toast.error('Only authenticated Owner/Admin users may add products to Product Master.');
+      return;
+    }
+    if (!preview) return;
+
+    const unmappedRows = preview.rows.filter((r) => r.matchStatus === 'UNMAPPED');
+    const validList: ExtractedSapProduct[] = [];
+    const seenSkus = new Set<string>();
+    let missingSkuCount = 0;
+    let missingNameCount = 0;
+    let duplicateSkuCount = 0;
+    let invalidCount = 0;
+
+    for (const r of unmappedRows) {
+      const extracted = extractSapProductDetails(r);
+      const cleanSku = (extracted.sku || '').trim();
+      const cleanName = (extracted.name || '').trim();
+
+      if (!cleanSku) {
+        missingSkuCount++;
+        invalidCount++;
+        continue;
+      }
+      if (!cleanName) {
+        missingNameCount++;
+        invalidCount++;
+        continue;
+      }
+      if (seenSkus.has(cleanSku.toUpperCase())) {
+        duplicateSkuCount++;
+        continue;
+      }
+
+      seenSkus.add(cleanSku.toUpperCase());
+      validList.push(extracted);
+    }
+
+    setBulkStats({
+      totalUnmapped: unmappedRows.length,
+      validList,
+      missingSkuCount,
+      missingNameCount,
+      duplicateSkuCount,
+      invalidCount,
+    });
+    setBulkAddModalOpen(true);
+  };
+
+  const handleConfirmBulkAdd = async () => {
+    if (bulkStats.validList.length === 0) {
+      toast.error('No valid unmapped products to add.');
+      return;
+    }
+    setBulkAdding(true);
+    try {
+      const res = await addBulkUnmappedSapProducts(bulkStats.validList, batchRef);
+      toast.success(
+        `Added ${res.createdCount} products to Master. ${res.alreadyExistsCount} already existed. ${res.invalidCount} skipped.`
+      );
+      setBulkAddModalOpen(false);
+      qc.invalidateQueries({ queryKey: ['products'] });
+
+      // Immediately re-run matching without requiring re-upload!
+      await reRunMatching(parsedRows, batchRef);
+    } catch (err: any) {
+      toast.error(err?.message || 'Bulk add failed');
+    } finally {
+      setBulkAdding(false);
+    }
   };
 
   // Import mutation
@@ -481,7 +661,18 @@ export function ImportNewStockPage() {
                   </select>
                 </div>
 
-                <div className="flex items-center gap-3 w-full sm:w-auto justify-end">
+                <div className="flex items-center gap-3 w-full sm:w-auto justify-end flex-wrap">
+                  {preview.unmapped > 0 && isAuthorized && (
+                    <Button
+                      variant="outline"
+                      onClick={handleOpenBulkModal}
+                      className="text-xs px-3 py-2 border-amber-300 text-amber-800 bg-amber-50/50 hover:bg-amber-100 dark:border-amber-700 dark:text-amber-300 dark:bg-amber-950/30 shadow-sm"
+                    >
+                      <PackagePlus className="w-4 h-4 mr-1.5 text-amber-600" />
+                      Add All Valid Unmapped Products ({preview.unmapped})
+                    </Button>
+                  )}
+
                   <Button
                     variant="primary"
                     disabled={readyToImportCount === 0 || importMutation.isPending}
@@ -508,7 +699,7 @@ export function ImportNewStockPage() {
                         <th className="py-3 px-4 font-semibold">GR Status</th>
                         <th className="py-3 px-4 font-semibold">GR Date</th>
                         <th className="py-3 px-4 font-semibold">GR Doc / Invoice</th>
-                        <th className="py-3 px-4 font-semibold">Validation Notes</th>
+                        <th className="py-3 px-4 font-semibold">Validation Notes & Actions</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
@@ -578,9 +769,22 @@ export function ImportNewStockPage() {
                               </td>
                               <td className="py-2.5 px-4 text-gray-500 text-[11px]">
                                 {r.validationError ? (
-                                  <span className="text-red-600 dark:text-red-400 font-medium">
-                                    {r.validationError}
-                                  </span>
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="text-amber-600 dark:text-amber-400 font-medium">
+                                      {r.validationError}
+                                    </span>
+                                    {isUnmapped && isAuthorized && (
+                                      <button
+                                        type="button"
+                                        onClick={() => handleOpenAddModal(r)}
+                                        className="inline-flex items-center px-2 py-1 text-[11px] font-semibold text-blue-700 bg-blue-50 border border-blue-200 rounded-md hover:bg-blue-100 dark:bg-blue-950 dark:border-blue-800 dark:text-blue-300 dark:hover:bg-blue-900 transition-colors shrink-0 shadow-sm"
+                                        title="Add this unmapped SAP product to Product Master"
+                                      >
+                                        <Plus className="w-3 h-3 mr-1" />
+                                        + Add to Product Master
+                                      </button>
+                                    )}
+                                  </div>
                                 ) : isDupe ? (
                                   <span className="text-purple-600 dark:text-purple-400">
                                     Deterministic idempotency match: skipped to prevent duplicate stock.
@@ -745,6 +949,218 @@ export function ImportNewStockPage() {
           </div>
         </div>
       </Modal>
+
+      {/* Modal: Single Add Unmapped Product to Master */}
+      <Modal
+        open={singleAddModalOpen}
+        onClose={() => !addingProduct && setSingleAddModalOpen(false)}
+        title="Add to Product Master"
+      >
+        <div className="space-y-4 py-2 text-xs text-gray-700 dark:text-gray-300">
+          <div className="bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 rounded-lg p-3">
+            <span className="text-[11px] font-semibold text-blue-900 dark:text-blue-200 uppercase tracking-wide block">
+              Source: SAP Purchase/GR Import
+            </span>
+            <p className="text-[11px] text-blue-700 dark:text-blue-300 mt-1">
+              Registering this unmapped product into the authoritative Colgate-Palmolive Product Master.
+              Adding a product alone will NOT create inventory movements.
+            </p>
+          </div>
+
+          {extractedProduct && (
+            <div className="space-y-3 bg-gray-50 dark:bg-gray-800/60 p-4 rounded-lg border border-gray-200 dark:border-gray-700">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <span className="text-gray-400 font-medium">Material / SKU:</span>
+                  <div className="font-mono font-bold text-sm text-gray-900 dark:text-gray-100 mt-0.5">
+                    {extractedProduct.sku}
+                  </div>
+                </div>
+                <div>
+                  <span className="text-gray-400 font-medium">UOM:</span>
+                  <div className="font-mono font-semibold text-gray-900 dark:text-gray-100 mt-0.5">
+                    {extractedProduct.uom}
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <span className="text-gray-400 font-medium">Product Description / Name:</span>
+                <div className="font-semibold text-gray-900 dark:text-gray-100 text-sm mt-0.5">
+                  {extractedProduct.name}
+                </div>
+              </div>
+
+              {/* Display available SAP fields only if present in source */}
+              <div className="grid grid-cols-2 gap-3 pt-2 border-t border-gray-200 dark:border-gray-700">
+                {extractedProduct.brand && (
+                  <div>
+                    <span className="text-gray-400">Brand:</span>
+                    <div className="font-medium text-gray-800 dark:text-gray-200">{extractedProduct.brand}</div>
+                  </div>
+                )}
+                {extractedProduct.category && (
+                  <div>
+                    <span className="text-gray-400">Category:</span>
+                    <div className="font-medium text-gray-800 dark:text-gray-200">{extractedProduct.category}</div>
+                  </div>
+                )}
+                {extractedProduct.subCategory && (
+                  <div>
+                    <span className="text-gray-400">Sub Category:</span>
+                    <div className="font-medium text-gray-800 dark:text-gray-200">{extractedProduct.subCategory}</div>
+                  </div>
+                )}
+                {extractedProduct.variant && (
+                  <div>
+                    <span className="text-gray-400">Variant:</span>
+                    <div className="font-medium text-gray-800 dark:text-gray-200">{extractedProduct.variant}</div>
+                  </div>
+                )}
+                {extractedProduct.ppg && (
+                  <div>
+                    <span className="text-gray-400">PPG:</span>
+                    <div className="font-medium text-gray-800 dark:text-gray-200">{extractedProduct.ppg}</div>
+                  </div>
+                )}
+                {extractedProduct.ppgDescription && (
+                  <div>
+                    <span className="text-gray-400">PPG Description:</span>
+                    <div className="font-medium text-gray-800 dark:text-gray-200">{extractedProduct.ppgDescription}</div>
+                  </div>
+                )}
+                {extractedProduct.materialGroup && (
+                  <div>
+                    <span className="text-gray-400">Material Group:</span>
+                    <div className="font-medium text-gray-800 dark:text-gray-200">{extractedProduct.materialGroup}</div>
+                  </div>
+                )}
+                {extractedProduct.prodHierarchy && (
+                  <div>
+                    <span className="text-gray-400">Product Hierarchy:</span>
+                    <div className="font-medium text-gray-800 dark:text-gray-200">{extractedProduct.prodHierarchy}</div>
+                  </div>
+                )}
+                {extractedProduct.mrp !== null && extractedProduct.mrp !== undefined && (
+                  <div>
+                    <span className="text-gray-400">MRP:</span>
+                    <div className="font-medium text-gray-800 dark:text-gray-200">₹{extractedProduct.mrp}</div>
+                  </div>
+                )}
+                {extractedProduct.rate !== null && extractedProduct.rate !== undefined && (
+                  <div>
+                    <span className="text-gray-400">Invoice / Purchase Rate:</span>
+                    <div className="font-medium text-gray-800 dark:text-gray-200">₹{extractedProduct.rate}</div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          <div className="flex items-center justify-end gap-2 pt-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setSingleAddModalOpen(false)}
+              disabled={addingProduct}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              loading={addingProduct}
+              onClick={handleConfirmSingleAdd}
+            >
+              <Plus className="w-3.5 h-3.5 mr-1" />
+              Confirm & Add to Product Master
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Modal: Bulk Add All Valid Unmapped Products */}
+      <Modal
+        open={bulkAddModalOpen}
+        onClose={() => !bulkAdding && setBulkAddModalOpen(false)}
+        title="Add All Valid Unmapped Products"
+      >
+        <div className="space-y-4 py-2 text-xs text-gray-700 dark:text-gray-300">
+          <div className="bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 rounded-lg p-3">
+            <p className="font-semibold text-blue-900 dark:text-blue-200">
+              Bulk Product Master Registration
+            </p>
+            <p className="mt-1 text-blue-800 dark:text-blue-300 text-[11px]">
+              Found <strong>{bulkStats.totalUnmapped} unmapped products</strong> in the current import preview. Review the validation breakdown below before confirming.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-3 gap-2">
+            <div className="p-3 bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-800 rounded-lg">
+              <div className="text-gray-500 text-[11px]">Valid Records</div>
+              <div className="text-xl font-bold text-emerald-600 dark:text-emerald-400 mt-0.5">
+                {bulkStats.validList.length}
+              </div>
+            </div>
+
+            <div className="p-3 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 rounded-lg">
+              <div className="text-gray-500 text-[11px]">Duplicate SKUs</div>
+              <div className="text-xl font-bold text-amber-600 dark:text-amber-400 mt-0.5">
+                {bulkStats.duplicateSkuCount}
+              </div>
+            </div>
+
+            <div className="p-3 bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-800 rounded-lg">
+              <div className="text-gray-500 text-[11px]">Invalid / Missing</div>
+              <div className="text-xl font-bold text-red-600 dark:text-red-400 mt-0.5">
+                {bulkStats.missingSkuCount + bulkStats.missingNameCount}
+              </div>
+            </div>
+          </div>
+
+          {bulkStats.validList.length > 0 && (
+            <div>
+              <span className="font-semibold text-gray-700 dark:text-gray-300 block mb-1">
+                Valid Products to be Added ({bulkStats.validList.length}):
+              </span>
+              <div className="max-h-48 overflow-y-auto divide-y divide-gray-100 dark:divide-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg bg-gray-50 dark:bg-gray-800/50">
+                {bulkStats.validList.map((item, i) => (
+                  <div key={i} className="p-2 flex items-center justify-between text-[11px]">
+                    <div>
+                      <span className="font-mono font-semibold text-gray-900 dark:text-gray-100">{item.sku}</span>
+                      <span className="mx-2 text-gray-400">·</span>
+                      <span className="text-gray-700 dark:text-gray-300">{item.name}</span>
+                    </div>
+                    <span className="font-mono text-gray-500">{item.uom}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="flex items-center justify-end gap-2 pt-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setBulkAddModalOpen(false)}
+              disabled={bulkAdding}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              loading={bulkAdding}
+              disabled={bulkStats.validList.length === 0}
+              onClick={handleConfirmBulkAdd}
+            >
+              <PackagePlus className="w-3.5 h-3.5 mr-1" />
+              Confirm & Add {bulkStats.validList.length} Valid Products
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }
+

@@ -474,7 +474,9 @@ class MockStore {
     return this.products.filter(p => p && p.name && !p.name.includes('ZTIN:') && !p.name.includes('TAX Invoice'));
   }
   saveProduct(prodData: Partial<Product>): Product {
-    const existingIdx = this.products.findIndex((p) => p.id === prodData.id || (prodData.sku && p.sku === prodData.sku));
+    const existingIdx = this.products.findIndex(
+      (p) => p.id === prodData.id || (prodData.sku && p.sku.toUpperCase() === prodData.sku.toUpperCase())
+    );
     if (existingIdx >= 0) {
       // Protect existing product master data: preserve canonical name, mrp, rate
       return this.products[existingIdx];
@@ -483,11 +485,23 @@ class MockStore {
         id: prodData.id || `prod-${Date.now()}`,
         sku: prodData.sku || `SKU-${Date.now().toString().slice(-4)}`,
         name: prodData.name || 'New Product Item',
-        category: prodData.category || 'General',
+        category: prodData.category || null,
         mrp: Number(prodData.mrp || 0),
         rate: Number(prodData.rate || 0),
-        unit: prodData.unit || 'pcs',
+        unit: prodData.unit || (prodData.uom?.toLowerCase() === 'doz' ? 'doz' : 'pcs'),
         status: prodData.status || 'active',
+        brand: prodData.brand || null,
+        uom: prodData.uom || null,
+        active: prodData.active || null,
+        sub_category: prodData.sub_category || null,
+        sub_brand: prodData.sub_brand || null,
+        variant: prodData.variant || null,
+        ppg: prodData.ppg || null,
+        ppg_description: prodData.ppg_description || null,
+        material_group: prodData.material_group || null,
+        prod_hierarchy: prodData.prod_hierarchy || null,
+        is_sap_master: prodData.is_sap_master ?? true,
+        source: prodData.source || 'manual',
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
