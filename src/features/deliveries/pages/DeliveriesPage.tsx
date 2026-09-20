@@ -7,6 +7,7 @@ import { PageHeader, Button, Select, StatusBadge, EmptyState, LoadingState, Erro
 import { getDeliveries, updateDeliveryStatus, assignDeliveryWorker, deleteDelivery } from '../services/deliveryService';
 import { getWorkers } from '@/features/workers/services/workerService';
 import { formatCurrency, formatDate } from '@/shared/utils/format';
+import { QK } from '@/lib/queryKeys';
 import type { Delivery } from '@/lib/database.types';
 
 export function DeliveriesPage() {
@@ -21,8 +22,9 @@ export function DeliveriesPage() {
   const statusMut = useMutation({
     mutationFn: ({ id, status }: { id: string; status: Delivery['status'] }) => updateDeliveryStatus(id, status),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['deliveries'] });
-      qc.invalidateQueries({ queryKey: ['dashboard-stats'] });
+      qc.invalidateQueries({ queryKey: QK.deliveries });
+      qc.invalidateQueries({ queryKey: QK.dashboardStats });
+      qc.invalidateQueries({ queryKey: QK.masterOperations });
       toast.success('Delivery status updated');
     },
     onError: (e: Error) => toast.error(e.message),
@@ -31,7 +33,8 @@ export function DeliveriesPage() {
   const workerMut = useMutation({
     mutationFn: ({ id, workerId }: { id: string; workerId: string | null }) => assignDeliveryWorker(id, workerId),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['deliveries'] });
+      qc.invalidateQueries({ queryKey: QK.deliveries });
+      qc.invalidateQueries({ queryKey: QK.masterOperations });
       toast.success('Worker assigned');
     },
     onError: (e: Error) => toast.error(e.message),
@@ -40,10 +43,11 @@ export function DeliveriesPage() {
   const deleteMut = useMutation({
     mutationFn: deleteDelivery,
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['deliveries'] });
-      qc.invalidateQueries({ queryKey: ['payments'] });
-      qc.invalidateQueries({ queryKey: ['dashboard-stats'] });
-      qc.invalidateQueries({ queryKey: ['worker-today-route'] });
+      qc.invalidateQueries({ queryKey: QK.deliveries });
+      qc.invalidateQueries({ queryKey: QK.payments });
+      qc.invalidateQueries({ queryKey: QK.dashboardStats });
+      qc.invalidateQueries({ queryKey: QK.workerTodayRouteAny });
+      qc.invalidateQueries({ queryKey: QK.masterOperations });
       toast.success('Delivery order deleted');
     },
     onError: (e: Error) => toast.error(e.message),

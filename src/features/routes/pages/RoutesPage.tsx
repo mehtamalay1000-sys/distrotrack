@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { QK } from '@/lib/queryKeys';
 import { toast } from 'sonner';
-import { Plus, Search, MoreHorizontal, Edit2, Trash2, ChevronDown, ChevronUp, CheckCircle2, MapPin, Building2, Package, Settings2, RefreshCw, RotateCcw } from 'lucide-react';
+import { Plus, Search, MoreHorizontal, Edit2, Trash2, ChevronDown, ChevronUp, CheckCircle2, MapPin, Building2, Package, Settings2, RefreshCw, RotateCcw, Archive, AlertCircle } from 'lucide-react';
 import { PageHeader, Button, Input, Select, Modal, EmptyState, LoadingState, ErrorState, StatusBadge, Card } from '@/shared/ui';
-import { getRoutes, createRoute, updateRoute, deleteRoute, seedOfficialRoutes } from '../services/routeService';
+import { getRoutes, createRoute, updateRoute, deleteRoute, archiveRoute, unarchiveRoute, seedOfficialRoutes, getRouteDeletePreview } from '../services/routeService';
 import { getWorkers } from '@/features/workers/services/workerService';
 import { getParties } from '@/features/parties/services/partyService';
 import { getDeliveries } from '@/features/deliveries/services/deliveryService';
@@ -23,8 +24,11 @@ export function RoutesPage() {
   const [editing, setEditing] = useState<Route | null>(null);
   const [editingRouteForItems, setEditingRouteForItems] = useState<Route | null>(null);
   const [menuOpen, setMenuOpen] = useState<string | null>(null);
+  const [deletingRoute, setDeletingRoute] = useState<Route | null>(null);
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
   const [expandedRouteId, setExpandedRouteId] = useState<string | null>(null);
   const [showCompleted, setShowCompleted] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<'active' | 'completed' | 'archived' | 'all'>('active');
   const [form, setForm] = useState({ name: '', code: '', description: '', assigned_worker_id: '' });
 
   const { data: routes = [], isLoading: rLoading, error } = useQuery({ queryKey: ['routes'], queryFn: getRoutes });
@@ -37,10 +41,21 @@ export function RoutesPage() {
     queryKey: ['route-profitability'],
     queryFn: () => getRouteProfitability(),
   });
+  const { data: deletePreview, isLoading: previewLoading } = useQuery({
+    queryKey: ['route-delete-preview', deletingRoute?.id],
+    queryFn: () => (deletingRoute ? getRouteDeletePreview(deletingRoute.id) : null),
+    enabled: !!deletingRoute,
+  });
 
   const createMut = useMutation({
     mutationFn: createRoute,
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['routes'] }); toast.success('Route added'); closeModal(); },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['routes'] });
+      qc.invalidateQueries({ queryKey: QK.masterOperations });
+      qc.invalidateQueries({ queryKey: QK.masterAllWorkers });
+      toast.success('Route added');
+      closeModal();
+    },
     onError: (e: Error) => toast.error(e.message),
   });
   const updateMut = useMutation({
@@ -51,24 +66,63 @@ export function RoutesPage() {
       qc.invalidateQueries({ queryKey: ['deliveries'] });
       qc.invalidateQueries({ queryKey: ['worker-today-route'] });
       qc.invalidateQueries({ queryKey: ['dashboard-stats'] });
+      // Master Command Center
+      qc.invalidateQueries({ queryKey: QK.masterOperations });
+      qc.invalidateQueries({ queryKey: QK.masterAllWorkers });
       toast.success('Route updated');
       closeModal();
     },
     onError: (e: Error) => toast.error(e.message),
   });
-  const deleteMut = useMutation({
-    mutationFn: deleteRoute,
+  const archiveMut = useMutation({
+    mutationFn: archiveRoute,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['routes'] });
       qc.invalidateQueries({ queryKey: ['picklists'] });
       qc.invalidateQueries({ queryKey: ['deliveries'] });
       qc.invalidateQueries({ queryKey: ['payments'] });
       qc.invalidateQueries({ queryKey: ['expenses'] });
-      qc.invalidateQueries({ queryKey: ['worker-expenses'] });
-      qc.invalidateQueries({ queryKey: ['dashboard-stats'] });
+      qc.invalidateQueries({ queryKey: QK.masterOperations });
+      qc.invalidateQueries({ queryKey: QK.masterAllWorkers });
+      qc.invalidateQueries({ queryKey: QK.dashboardStats });
+      toast.success('Route archived. Historical records and inventory ledger preserved.');
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const unarchiveMut = useMutation({
+    mutationFn: unarchiveRoute,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['routes'] });
+      qc.invalidateQueries({ queryKey: QK.masterOperations });
+      qc.invalidateQueries({ queryKey: QK.masterAllWorkers });
+      toast.success('Route unarchived and restored to active status.');
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const deleteMut = useMutation({
+    mutationFn: (id: string) => deleteRoute(id, true, true),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['routes'] });
+      qc.invalidateQueries({ queryKey: ['picklists'] });
+      qc.invalidateQueries({ queryKey: ['deliveries'] });
+      qc.invalidateQueries({ queryKey: ['payments'] });
+      qc.invalidateQueries({ queryKey: ['expenses'] });
       qc.invalidateQueries({ queryKey: ['parties'] });
       qc.invalidateQueries({ queryKey: ['worker-today-route'] });
-      toast.success('Route, associated deliveries, and route expenses deleted!');
+      qc.invalidateQueries({ queryKey: ['worker-history'] });
+      qc.invalidateQueries({ queryKey: ['worker-route-deliveries'] });
+      qc.invalidateQueries({ queryKey: ['inventory-movements'] });
+      qc.invalidateQueries({ queryKey: ['route-profitability'] });
+      // Master Command Center & Dashboard
+      qc.invalidateQueries({ queryKey: QK.masterOperations });
+      qc.invalidateQueries({ queryKey: QK.masterAllWorkers });
+      qc.invalidateQueries({ queryKey: QK.dashboardStats });
+      qc.invalidateQueries({ queryKey: QK.deliveries });
+      qc.invalidateQueries({ queryKey: QK.payments });
+      qc.invalidateQueries({ queryKey: QK.inventory });
+      toast.success('Route and all route-owned operational data permanently deleted.');
+      setDeletingRoute(null);
+      setDeleteConfirmText('');
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -180,6 +234,9 @@ export function RoutesPage() {
       qc.invalidateQueries({ queryKey: ['dashboard-stats'] });
       qc.invalidateQueries({ queryKey: ['worker-today-route'] });
       qc.invalidateQueries({ queryKey: ['worker-history'] });
+      qc.invalidateQueries({ queryKey: QK.masterOperations });
+      qc.invalidateQueries({ queryKey: QK.masterAllWorkers });
+      qc.invalidateQueries({ queryKey: QK.dashboardStats });
       toast.success(`Route completed! Recorded ${formatCurrency(result?.totalCash || 0)} Cash collected.`);
     },
     onError: (e: Error) => toast.error(e.message),
@@ -192,6 +249,8 @@ export function RoutesPage() {
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['routes'] });
+      qc.invalidateQueries({ queryKey: QK.masterOperations });
+      qc.invalidateQueries({ queryKey: QK.masterAllWorkers });
       toast.success('Route reactivated!');
     },
     onError: (e: Error) => toast.error(e.message),
@@ -202,8 +261,9 @@ export function RoutesPage() {
     r.code.toLowerCase().includes(search.toLowerCase())
   );
 
-  const activeRoutes = filtered.filter((r) => r.status !== 'completed');
+  const activeRoutes = filtered.filter((r) => r.status === 'active' || (!['completed', 'archived'].includes(r.status)));
   const completedRoutes = filtered.filter((r) => r.status === 'completed');
+  const archivedRoutes = filtered.filter((r) => r.status === 'archived');
 
   function openCreate() {
     setEditing(null);
@@ -261,25 +321,55 @@ export function RoutesPage() {
         }
       />
 
-      <div className="mb-4 max-w-xs">
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-surface-400" />
-          <input
-            type="text"
-            placeholder="Search route code or name…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="w-full h-9 pl-9 pr-3 text-sm border border-surface-300 dark:border-surface-600 rounded-lg bg-white dark:bg-surface-800 text-surface-900 dark:text-surface-100 placeholder:text-surface-400 focus:outline-none focus:ring-2 focus:ring-primary-500/40 focus:ring-offset-1 dark:focus:ring-offset-surface-900"
-          />
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+        <div className="max-w-xs w-full">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-surface-400" />
+            <input
+              type="text"
+              placeholder="Search route code or name…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-full h-9 pl-9 pr-3 text-sm border border-surface-300 dark:border-surface-600 rounded-lg bg-white dark:bg-surface-800 text-surface-900 dark:text-surface-100 placeholder:text-surface-400 focus:outline-none focus:ring-2 focus:ring-primary-500/40 focus:ring-offset-1 dark:focus:ring-offset-surface-900"
+            />
+          </div>
+        </div>
+
+        {/* Status Filter Tabs */}
+        <div className="flex items-center gap-1 bg-surface-100 dark:bg-surface-800 p-1 rounded-lg self-start sm:self-auto text-xs font-medium border border-surface-200 dark:border-surface-700">
+          <button
+            onClick={() => setStatusFilter('active')}
+            className={`px-3 py-1.5 rounded-md transition-all ${statusFilter === 'active' ? 'bg-white dark:bg-surface-700 text-primary-600 dark:text-primary-400 shadow-xs font-bold' : 'text-surface-600 dark:text-surface-400 hover:text-surface-900 dark:hover:text-surface-200'}`}
+          >
+            Active ({activeRoutes.length})
+          </button>
+          <button
+            onClick={() => setStatusFilter('completed')}
+            className={`px-3 py-1.5 rounded-md transition-all ${statusFilter === 'completed' ? 'bg-white dark:bg-surface-700 text-emerald-600 dark:text-emerald-400 shadow-xs font-bold' : 'text-surface-600 dark:text-surface-400 hover:text-surface-900 dark:hover:text-surface-200'}`}
+          >
+            Completed ({completedRoutes.length})
+          </button>
+          <button
+            onClick={() => setStatusFilter('archived')}
+            className={`px-3 py-1.5 rounded-md transition-all ${statusFilter === 'archived' ? 'bg-white dark:bg-surface-700 text-amber-600 dark:text-amber-400 shadow-xs font-bold' : 'text-surface-600 dark:text-surface-400 hover:text-surface-900 dark:hover:text-surface-200'}`}
+          >
+            Archived ({archivedRoutes.length})
+          </button>
+          <button
+            onClick={() => setStatusFilter('all')}
+            className={`px-3 py-1.5 rounded-md transition-all ${statusFilter === 'all' ? 'bg-white dark:bg-surface-700 text-surface-900 dark:text-white shadow-xs font-bold' : 'text-surface-600 dark:text-surface-400 hover:text-surface-900 dark:hover:text-surface-200'}`}
+          >
+            All ({filtered.length})
+          </button>
         </div>
       </div>
 
-      {activeRoutes.length === 0 && completedRoutes.length === 0 ? (
+      {filtered.length === 0 ? (
         <EmptyState title="No routes found" description={search ? 'Try a different search' : 'Add your first route or import an SAP picklist'} action={!search ? <Button size="sm" onClick={openCreate}>Add Route</Button> : undefined} />
       ) : (
         <div className="space-y-6">
         {/* Active Routes Section */}
-        {activeRoutes.length > 0 && (
+        {(statusFilter === 'active' || statusFilter === 'all') && activeRoutes.length > 0 && (
         <div className="space-y-4">
           {activeRoutes.map((route) => {
             const isExpanded = expandedRouteId === route.id;
@@ -408,9 +498,24 @@ export function RoutesPage() {
                           <MoreHorizontal className="h-4 w-4" />
                         </button>
                         {menuOpen === route.id && (
-                          <div className="absolute right-0 top-full mt-1 w-36 bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-lg shadow-lg py-1 z-10">
-                            <button onClick={() => openEdit(route)} className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-700"><Edit2 className="h-3.5 w-3.5" /> Edit</button>
-                            <button onClick={() => { deleteMut.mutate(route.id); setMenuOpen(null); }} className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-danger-600 dark:text-danger-500 hover:bg-danger-50 dark:hover:bg-danger-950/40"><Trash2 className="h-3.5 w-3.5" /> Delete</button>
+                          <div className="absolute right-0 top-full mt-1 w-44 bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-lg shadow-lg py-1 z-10">
+                            <button onClick={() => openEdit(route)} className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-700">
+                              <Edit2 className="h-3.5 w-3.5" /> Edit
+                            </button>
+                            <button
+                              onClick={() => { archiveMut.mutate(route.id); setMenuOpen(null); }}
+                              className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-amber-600 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/40"
+                              title="Archive this route to preserve historical reports."
+                            >
+                              <Archive className="h-3.5 w-3.5" /> Archive Route
+                            </button>
+                            <button
+                              onClick={() => { setDeletingRoute(route); setDeleteConfirmText(''); setMenuOpen(null); }}
+                              className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-danger-600 dark:text-danger-500 hover:bg-danger-50 dark:hover:bg-danger-950/40"
+                              title="Delete route definition."
+                            >
+                              <Trash2 className="h-3.5 w-3.5" /> Delete Route
+                            </button>
                           </div>
                         )}
                       </div>
@@ -579,28 +684,105 @@ export function RoutesPage() {
                         </p>
                       </div>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        icon={<RotateCcw className="h-3.5 w-3.5" />}
-                        loading={reactivateRouteMut.isPending}
-                        onClick={() => reactivateRouteMut.mutate(route.id)}
-                      >
-                        Reactivate
-                      </Button>
-                      <button
-                        onClick={() => { deleteMut.mutate(route.id); }}
-                        className="p-1.5 rounded-lg hover:bg-danger-50 dark:hover:bg-danger-950/40 text-surface-400 hover:text-danger-600 transition-colors"
-                        title="Delete route"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
-                    </div>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          icon={<RotateCcw className="h-3.5 w-3.5" />}
+                          loading={reactivateRouteMut.isPending}
+                          onClick={() => reactivateRouteMut.mutate(route.id)}
+                        >
+                          Reactivate
+                        </Button>
+                        <button
+                          onClick={() => archiveMut.mutate(route.id)}
+                          className="p-1.5 rounded-lg hover:bg-amber-50 dark:hover:bg-amber-950/40 text-surface-400 hover:text-amber-600 transition-colors"
+                          title="Archive completed route (preserves all ledger & delivery records)"
+                        >
+                          <Archive className="h-4 w-4" />
+                        </button>
+                        <button
+                          onClick={() => { setDeletingRoute(route); setDeleteConfirmText(''); }}
+                          className="p-1.5 rounded-lg hover:bg-danger-50 dark:hover:bg-danger-950/40 text-surface-400 hover:text-danger-600 transition-colors"
+                          title="Delete route"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </div>
                   </div>
                 </Card>
               );
             })}
+          </div>
+        )}
+
+        {/* Archived Routes Section */}
+        {(statusFilter === 'archived' || statusFilter === 'all') && (
+          <div className="space-y-3">
+            <div className="flex items-center justify-between px-1 py-1">
+              <div className="flex items-center gap-2">
+                <Archive className="h-4 w-4 text-amber-600 dark:text-amber-400" />
+                <span className="text-sm font-bold text-surface-800 dark:text-surface-200">
+                  Archived Routes ({archivedRoutes.length})
+                </span>
+              </div>
+              <span className="text-xs text-surface-400">Ledger, delivery & payment history preserved</span>
+            </div>
+
+            {archivedRoutes.length === 0 ? (
+              <div className="text-center py-6 text-xs text-surface-400 border border-dashed border-surface-200 dark:border-surface-700 rounded-xl">
+                No archived routes found.
+              </div>
+            ) : (
+              archivedRoutes.map((route) => {
+                const routeParties = parties.filter(p => p.route_id === route.id || p.route?.code === route.code);
+                const routePicklists = picklists.filter(pl => pl.route_id === route.id || pl.route?.code === route.code);
+                const routeTotalAmount = routePicklists.reduce((sum, pl) => sum + Number(pl.total_amount || 0), 0);
+
+                return (
+                  <Card key={route.id} className="p-4 border border-amber-200 dark:border-amber-800/40 bg-amber-50/20 dark:bg-amber-950/10">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="flex items-center gap-3">
+                        <div className="h-8 w-8 rounded-lg bg-amber-100 dark:bg-amber-900/50 flex items-center justify-center">
+                          <Archive className="h-4.5 w-4.5 text-amber-600 dark:text-amber-400" />
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-xs bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-300 px-2 py-0.5 rounded font-bold">{route.code}</span>
+                            <h3 className="font-semibold text-sm text-surface-900 dark:text-white">{route.name}</h3>
+                            <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-surface-200 dark:bg-surface-700 text-surface-700 dark:text-surface-300">
+                              Archived
+                            </span>
+                          </div>
+                          <p className="text-xs text-surface-500 dark:text-surface-400 mt-0.5">
+                            {routeParties.length} parties • {formatCurrency(routeTotalAmount)} historical volume
+                            {route.worker && <> • Worker: {route.worker.name}</>}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          icon={<RotateCcw className="h-3.5 w-3.5" />}
+                          loading={unarchiveMut.isPending}
+                          onClick={() => unarchiveMut.mutate(route.id)}
+                        >
+                          Unarchive / Restore
+                        </Button>
+                        <button
+                          onClick={() => { setDeletingRoute(route); setDeleteConfirmText(''); }}
+                          className="p-1.5 rounded-lg hover:bg-danger-50 dark:hover:bg-danger-950/40 text-surface-400 hover:text-danger-600 transition-colors"
+                          title="Delete route"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </div>
+                    </div>
+                  </Card>
+                );
+              })
+            )}
           </div>
         )}
         </div>
@@ -623,6 +805,166 @@ export function RoutesPage() {
           onClose={() => setEditingRouteForItems(null)}
         />
       )}
+
+      {/* Delete Route Confirmation Modal */}
+      <Modal
+        open={!!deletingRoute}
+        onClose={() => {
+          setDeletingRoute(null);
+          setDeleteConfirmText('');
+        }}
+        title="Delete Route — Permanent Operational Data Reset"
+        footer={
+          <>
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setDeletingRoute(null);
+                setDeleteConfirmText('');
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              loading={deleteMut.isPending}
+              disabled={deleteConfirmText.trim().toUpperCase() !== 'DELETE ROUTE' || deleteMut.isPending || Boolean(deletePreview && !deletePreview.can_delete)}
+              onClick={() => {
+                if (deletingRoute && deleteConfirmText.trim().toUpperCase() === 'DELETE ROUTE') {
+                  deleteMut.mutate(deletingRoute.id);
+                }
+              }}
+            >
+              Delete Route
+            </Button>
+          </>
+        }
+      >
+        {deletingRoute && (
+          <div className="space-y-4 text-xs">
+            {/* Destructive Warning Alert */}
+            <div className="p-3.5 rounded-xl bg-danger-50 dark:bg-danger-950/40 border border-danger-200 dark:border-danger-800 flex items-start gap-2.5">
+              <AlertCircle className="h-5 w-5 text-danger-600 shrink-0 mt-0.5" />
+              <div className="text-danger-900 dark:text-danger-200 space-y-1.5">
+                <div className="font-bold text-sm">
+                  Permanently Delete Route {deletingRoute.name} ({deletingRoute.code})?
+                </div>
+                <p className="text-[12px] leading-relaxed text-danger-800 dark:text-danger-300">
+                  This permanently deletes the route and all operational data belonging exclusively to this route,
+                  including deliveries, payments, expenses, returns, route stock activity, and route-specific records.
+                </p>
+                <p className="text-[11px] font-semibold text-emerald-700 dark:text-emerald-400">
+                  ✓ Shared Product Master, Workers, and Customers are preserved.
+                </p>
+              </div>
+            </div>
+
+            {/* Offline block reason warning if applicable */}
+            {deletePreview?.block_reason && (
+              <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-300 flex items-center gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0" />
+                <span>{deletePreview.block_reason}</span>
+              </div>
+            )}
+
+            {/* Dynamic Live Delete Scope Breakdown */}
+            <div className="border border-surface-200 dark:border-surface-700 rounded-xl overflow-hidden bg-surface-50 dark:bg-surface-900/50">
+              <div className="px-3 py-2 bg-surface-100 dark:bg-surface-800/80 border-b border-surface-200 dark:border-surface-700 font-bold text-surface-800 dark:text-surface-200 text-xs">
+                Operational Records To Be Removed:
+              </div>
+              {previewLoading ? (
+                <div className="py-4 text-center text-surface-500">Calculating deletion scope...</div>
+              ) : (
+                <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 p-3 text-[11px]">
+                  <div className="flex justify-between border-b border-surface-100 dark:border-surface-800 pb-1">
+                    <span className="text-surface-600 dark:text-surface-400">Route:</span>
+                    <span className="font-bold text-surface-900 dark:text-surface-100">1</span>
+                  </div>
+                  <div className="flex justify-between border-b border-surface-100 dark:border-surface-800 pb-1">
+                    <span className="text-surface-600 dark:text-surface-400">Assignments:</span>
+                    <span className="font-bold text-surface-900 dark:text-surface-100">
+                      {deletePreview?.assignments_count ?? (deletingRoute.assigned_worker_id ? 1 : 0)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between border-b border-surface-100 dark:border-surface-800 pb-1">
+                    <span className="text-surface-600 dark:text-surface-400">Picklists/links:</span>
+                    <span className="font-bold text-surface-900 dark:text-surface-100">
+                      {deletePreview?.picklists_count ?? 0}
+                    </span>
+                  </div>
+                  <div className="flex justify-between border-b border-surface-100 dark:border-surface-800 pb-1">
+                    <span className="text-surface-600 dark:text-surface-400">Deliveries:</span>
+                    <span className="font-bold text-surface-900 dark:text-surface-100">
+                      {deletePreview?.deliveries_count ?? 0}
+                    </span>
+                  </div>
+                  <div className="flex justify-between border-b border-surface-100 dark:border-surface-800 pb-1">
+                    <span className="text-surface-600 dark:text-surface-400">Delivery Items:</span>
+                    <span className="font-bold text-surface-900 dark:text-surface-100">
+                      {deletePreview?.delivery_items_count ?? 0}
+                    </span>
+                  </div>
+                  <div className="flex justify-between border-b border-surface-100 dark:border-surface-800 pb-1">
+                    <span className="text-surface-600 dark:text-surface-400">Payments:</span>
+                    <span className="font-bold text-surface-900 dark:text-surface-100">
+                      {deletePreview?.payments_count ?? 0}
+                    </span>
+                  </div>
+                  <div className="flex justify-between border-b border-surface-100 dark:border-surface-800 pb-1">
+                    <span className="text-surface-600 dark:text-surface-400">Expenses:</span>
+                    <span className="font-bold text-surface-900 dark:text-surface-100">
+                      {deletePreview?.expenses_count ?? 0}
+                    </span>
+                  </div>
+                  <div className="flex justify-between border-b border-surface-100 dark:border-surface-800 pb-1">
+                    <span className="text-surface-600 dark:text-surface-400">Returns:</span>
+                    <span className="font-bold text-surface-900 dark:text-surface-100">
+                      {deletePreview?.returns_count ?? 0}
+                    </span>
+                  </div>
+                  <div className="flex justify-between border-b border-surface-100 dark:border-surface-800 pb-1">
+                    <span className="text-surface-600 dark:text-surface-400">Inventory Movements:</span>
+                    <span className="font-bold text-surface-900 dark:text-surface-100">
+                      {deletePreview?.inventory_movements_count ?? 0}
+                    </span>
+                  </div>
+                  <div className="flex justify-between border-b border-surface-100 dark:border-surface-800 pb-1">
+                    <span className="text-surface-600 dark:text-surface-400">Financial Records:</span>
+                    <span className="font-bold text-surface-900 dark:text-surface-100">
+                      {deletePreview?.financial_records_count ?? 0}
+                    </span>
+                  </div>
+                  <div className="flex justify-between border-b border-surface-100 dark:border-surface-800 pb-1">
+                    <span className="text-surface-600 dark:text-surface-400">Exceptions:</span>
+                    <span className="font-bold text-surface-900 dark:text-surface-100">
+                      {deletePreview?.exceptions_count ?? 0}
+                    </span>
+                  </div>
+                  <div className="flex justify-between border-b border-surface-100 dark:border-surface-800 pb-1">
+                    <span className="text-surface-600 dark:text-surface-400">Unlinked Parties:</span>
+                    <span className="font-bold text-emerald-600 dark:text-emerald-400">
+                      {deletePreview?.parties_unlinked_count ?? 0} (preserved)
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Confirmation input */}
+            <div className="space-y-1.5 pt-1">
+              <label className="block text-xs font-semibold text-surface-800 dark:text-surface-200">
+                To confirm permanent deletion, type <span className="font-mono font-bold text-danger-600 dark:text-danger-400 select-all">DELETE ROUTE</span> below:
+              </label>
+              <Input
+                value={deleteConfirmText}
+                onChange={(e) => setDeleteConfirmText(e.target.value)}
+                placeholder="DELETE ROUTE"
+                autoFocus
+              />
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

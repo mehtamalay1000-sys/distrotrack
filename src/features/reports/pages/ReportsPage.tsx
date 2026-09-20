@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import {
   TrendingUp, DollarSign, Receipt, Download,
   Calendar, Building2, CreditCard, Banknote, RefreshCw,
-  Truck, ArrowUpRight, Package, Users
+  Truck, ArrowUpRight, Package, Users, FileSpreadsheet
 } from 'lucide-react';
 import { PageHeader, Card, StatCard, Button, LoadingState } from '@/shared/ui';
 import { getPicklists } from '@/features/picklists/services/picklistService';
@@ -11,6 +11,8 @@ import { getPayments } from '@/features/payments/services/paymentService';
 import { getParties } from '@/features/parties/services/partyService';
 import { getExpenses, getRouteProfitability } from '@/features/expenses/services/expenseService';
 import { supabase } from '@/lib/supabase';
+import { mockStore } from '@/lib/mockStore';
+import * as XLSX from 'xlsx';
 import { formatCurrency, formatDate } from '@/shared/utils/format';
 
 type PeriodPreset =
@@ -74,6 +76,7 @@ export function ReportsPage() {
   const [reportType, setReportType] = useState<
     'profitability' | 'sales' | 'collections' | 'monthly' | 'udhari' | 'expenses' | 'products' | 'workers'
   >('profitability');
+  const [salesSourceFilter, setSalesSourceFilter] = useState<'all' | 'sap' | 'distrotrack'>('all');
 
   // ── 1. Calculate Date Filter Range ──────────────────────────────────
   const dateRange = useMemo<{
@@ -231,6 +234,18 @@ export function ReportsPage() {
     enabled: reportType === 'udhari',
   });
 
+  // P7: Authoritative SAP baseline sales for period reports
+  const { data: sapSalesItems = [], refetch: refetchSapSales } = useQuery({
+    queryKey: ['sap-sales-items-reports'],
+    queryFn: async () => {
+      try {
+        const { data, error } = await supabase.from('sap_sales_import_items').select('*');
+        if (!error && data && data.length > 0) return data;
+      } catch {}
+      return mockStore.getSapSalesImportItems();
+    },
+  });
+
   const isDataLoading = rpLoading || plLoading || payLoading || partLoading || expLoading;
 
   const handleRefresh = () => {
@@ -241,6 +256,7 @@ export function ReportsPage() {
     refetchExp();
     refetchDi();
     refetchLedger();
+    refetchSapSales();
   };
 
   // ── Helper: Check if item date is within range ──────────────────────
@@ -258,6 +274,13 @@ export function ReportsPage() {
   };
 
   // ── Filtered Datasets ───────────────────────────────────────────────
+  const filteredSapSales = useMemo(() => {
+    return sapSalesItems.filter((s: any) => {
+      const d = s.invoice_date || (s.created_at ? s.created_at.split('T')[0] : null);
+      return isDateInRange(d);
+    });
+  }, [sapSalesItems, dateRange]);
+
   const filteredPicklists = useMemo(() => {
     return picklists.filter((pl) => isDateInRange(pl.date || pl.created_at));
   }, [picklists, dateRange]);
@@ -281,9 +304,31 @@ export function ReportsPage() {
   }, [filteredExpenses]);
 
   // ── Authoritative Totals ────────────────────────────────────────────
-  // When available, prefer PostgreSQL authoritative totals from routeProfitability
-  const totalSalesValue = routeProfitability?.totals?.sales ??
+  // Calculate SAP baseline sales for selected period
+  const sapSalesPeriodValue = useMemo(() => {
+    return filteredSapSales.reduce((sum: number, s: any) => {
+      const isCancel = Boolean(s.is_cancellation);
+      const qty = Number(s.quantity || 0);
+      const rate = Number(s.rate || 0);
+      const val = Number(
+        s.net_val !== null && s.net_val !== undefined
+          ? s.net_val
+          : (isCancel ? -qty : qty) * rate
+      );
+      return sum + val;
+    }, 0);
+  }, [filteredSapSales]);
+
+  // When available, prefer PostgreSQL authoritative totals from routeProfitability for operational sales
+  const operationalSalesValue = routeProfitability?.totals?.sales ??
     filteredPicklists.reduce((sum, p) => sum + Number(p.total_amount || 0), 0);
+
+  const totalSalesValue =
+    salesSourceFilter === 'sap'
+      ? sapSalesPeriodValue
+      : salesSourceFilter === 'distrotrack'
+      ? operationalSalesValue
+      : operationalSalesValue + sapSalesPeriodValue;
 
   const totalCashCollected = routeProfitability?.totals?.cash_collected ??
     filteredPayments
@@ -440,41 +485,106 @@ export function ReportsPage() {
       }
     });
 
-    return Object.values(monthsMap);
-  }, [routeProfitability, picklists, payments, expenses, currentYear, currentMonth]);
+    // Add SAP baseline sales to monthly trend if source filter includes SAP
+    if (salesSourceFilter !== 'distrotrack') {
+      sapSalesItems.forEach((s: any) => {
+        const dStr = s.invoice_date || (s.created_at ? s.created_at.split('T')[0] : '');
+        if (!dStr) return;
+        const d = new Date(dStr);
+        const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+        if (monthsMap[key]) {
+          const isCancel = Boolean(s.is_cancellation);
+          const qty = Number(s.quantity || 0);
+          const rate = Number(s.rate || 0);
+          const val = Number(
+            s.net_val !== null && s.net_val !== undefined
+              ? s.net_val
+              : (isCancel ? -qty : qty) * rate
+          );
+          if (salesSourceFilter === 'sap') {
+            // SAP only: replace operational sales with SAP baseline
+            if (!monthsMap[key].label.includes('(SAP)')) {
+              monthsMap[key].sales = 0;
+              monthsMap[key].label += ' ';
+            }
+          }
+          monthsMap[key].sales += val;
+        }
+      });
+    } else {
+      // DistroTrack only: ensure no SAP sales are included
+    }
 
-  // ── P5: SKU Aggregation from delivery_items ──────────────────────────
+    return Object.values(monthsMap);
+  }, [routeProfitability, picklists, payments, expenses, sapSalesItems, salesSourceFilter, currentYear, currentMonth]);
+
+  // ── P5: SKU Aggregation from delivery_items and SAP baseline sales ────
   const skuRows = useMemo((): SkuRow[] => {
     const skuMap: Record<string, SkuRow> = {};
-    for (const item of deliveryItemsRaw) {
-      const delivery = item.delivery as any;
-      // Only include delivered/partial status deliveries for delivered qty/value
-      const isDelivered = delivery?.status === 'delivered' || delivery?.status === 'partial';
-      const sku = String(item.sku || 'UNKNOWN');
-      if (!skuMap[sku]) {
-        skuMap[sku] = {
-          sku,
-          productName: '—',
-          orderedQty: 0,
-          deliveredQty: 0,
-          refusedQty: 0,
-          deliveredValue: 0,
-        };
+
+    // 1. DistroTrack operational delivery items
+    if (salesSourceFilter !== 'sap') {
+      for (const item of deliveryItemsRaw) {
+        const delivery = item.delivery as any;
+        // Only include delivered/partial status deliveries for delivered qty/value
+        const isDelivered = delivery?.status === 'delivered' || delivery?.status === 'partial';
+        const sku = String(item.sku || 'UNKNOWN');
+        if (!skuMap[sku]) {
+          skuMap[sku] = {
+            sku,
+            productName: '—',
+            orderedQty: 0,
+            deliveredQty: 0,
+            refusedQty: 0,
+            deliveredValue: 0,
+          };
+        }
+        const ordered = Number(item.ordered_qty || 0);
+        const delivered = isDelivered ? Number(item.delivered_qty || 0) : 0;
+        const rate = Number(item.rate || 0);
+        skuMap[sku].orderedQty += ordered;
+        skuMap[sku].deliveredQty += delivered;
+        // Refused = ordered - delivered (for completed deliveries only; pending = 0 refused)
+        if (isDelivered) {
+          skuMap[sku].refusedQty += Math.max(0, ordered - delivered);
+        }
+        // Delivered commercial value = delivered qty × rate (refused qty contributes 0)
+        skuMap[sku].deliveredValue += delivered * rate;
       }
-      const ordered = Number(item.ordered_qty || 0);
-      const delivered = isDelivered ? Number(item.delivered_qty || 0) : 0;
-      const rate = Number(item.rate || 0);
-      skuMap[sku].orderedQty += ordered;
-      skuMap[sku].deliveredQty += delivered;
-      // Refused = ordered - delivered (for completed deliveries only; pending = 0 refused)
-      if (isDelivered) {
-        skuMap[sku].refusedQty += Math.max(0, ordered - delivered);
-      }
-      // Delivered commercial value = delivered qty × rate (refused qty contributes 0)
-      skuMap[sku].deliveredValue += delivered * rate;
     }
+
+    // 2. SAP baseline sales items for the period
+    if (salesSourceFilter !== 'distrotrack') {
+      for (const sItem of filteredSapSales) {
+        const sku = String(sItem.sku || 'UNKNOWN').trim().toUpperCase();
+        if (!sku) continue;
+        if (!skuMap[sku]) {
+          skuMap[sku] = {
+            sku,
+            productName: sItem.product_name || '—',
+            orderedQty: 0,
+            deliveredQty: 0,
+            refusedQty: 0,
+            deliveredValue: 0,
+          };
+        }
+        const isCancel = Boolean(sItem.is_cancellation);
+        const qty = Number(sItem.quantity || 0);
+        const rate = Number(sItem.rate || 0);
+        const netQty = isCancel ? -qty : qty;
+        const val = Number(
+          sItem.net_val !== null && sItem.net_val !== undefined
+            ? sItem.net_val
+            : netQty * rate
+        );
+        skuMap[sku].orderedQty += netQty;
+        skuMap[sku].deliveredQty += netQty;
+        skuMap[sku].deliveredValue += val;
+      }
+    }
+
     return Object.values(skuMap).sort((a, b) => b.deliveredValue - a.deliveredValue);
-  }, [deliveryItemsRaw]);
+  }, [deliveryItemsRaw, filteredSapSales, salesSourceFilter]);
 
   // ── P7: Worker Performance from routeProfitability ───────────────────
   const workerPerfRows = useMemo((): WorkerPerfRow[] => {
@@ -523,6 +633,50 @@ export function ReportsPage() {
 
   const availableYears = Array.from({ length: 5 }, (_, i) => currentYear - i);
 
+  const handleExportExcel = () => {
+    const wb = XLSX.utils.book_new();
+
+    const summaryData = [
+      { Metric: 'Reporting Period', Value: dateRange.label },
+      { Metric: 'Total Delivered Sales', Value: totalSalesValue },
+      { Metric: 'Total Realized Collections', Value: totalActualCollections },
+      { Metric: 'Cash Collections', Value: totalCashCollected },
+      { Metric: 'UPI Collections', Value: totalUpiCollected },
+      { Metric: 'Cheque Collections', Value: totalChequeCollected },
+      { Metric: 'Total Approved Operating Expenses', Value: totalApprovedExpenses },
+      { Metric: 'Total Outstanding Receivables (Udhari)', Value: totalOutstandingBalance },
+    ];
+    const wsSummary = XLSX.utils.json_to_sheet(summaryData);
+    XLSX.utils.book_append_sheet(wb, wsSummary, 'Financial Summary');
+
+    if (workerPerfRows.length > 0) {
+      const wsWorkers = XLSX.utils.json_to_sheet(
+        workerPerfRows.map((w) => ({
+          'Worker Name': w.worker_name,
+          'Picklists': w.picklist_count,
+          'Commercial Sales': w.sales,
+          'Cash Collected': w.cash_collected,
+          'UPI Collected': w.upi_collected,
+          'Cheque Total': w.cheque_total,
+          'Credit Sales': w.credit_sales,
+          'Approved Expenses': w.approved_expenses,
+          'Contribution Before COGS': w.contribution_before_cogs,
+        }))
+      );
+      XLSX.utils.book_append_sheet(wb, wsWorkers, 'Worker Performance');
+    }
+
+    const partyData = parties.map((p) => ({
+      'Party Code': p.code,
+      'Party Name': p.name,
+      'Outstanding Udhari': Math.max(0, Number(p.outstanding_amount || 0)),
+    }));
+    const wsParties = XLSX.utils.json_to_sheet(partyData);
+    XLSX.utils.book_append_sheet(wb, wsParties, 'Customer Receivables');
+
+    XLSX.writeFile(wb, `DistroTrack_Financial_Report_${dateRange.startDateStr || 'all'}.xlsx`);
+  };
+
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
       {/* ── Page Header ──────────────────────────────────────────────── */}
@@ -539,11 +693,18 @@ export function ReportsPage() {
               Refresh
             </Button>
             <Button
+              variant="outline"
+              icon={<FileSpreadsheet className="h-4 w-4" />}
+              onClick={handleExportExcel}
+            >
+              Export Excel
+            </Button>
+            <Button
               variant="primary"
               icon={<Download className="h-4 w-4" />}
               onClick={() => window.print()}
             >
-              Export Report
+              Print / PDF
             </Button>
           </div>
         }
@@ -580,6 +741,17 @@ export function ReportsPage() {
               <option value="custom_month">🗓️ Select Month & Year</option>
               <option value="custom_range">📐 Custom Date Range</option>
               <option value="all">♾️ All Time</option>
+            </select>
+
+            {/* Source Filter (Section 27) */}
+            <select
+              value={salesSourceFilter}
+              onChange={(e) => setSalesSourceFilter(e.target.value as 'all' | 'sap' | 'distrotrack')}
+              className="h-9 px-3 text-xs font-bold border border-surface-200 dark:border-surface-600 rounded-xl bg-surface-50 dark:bg-surface-900 text-surface-800 dark:text-surface-100 outline-none focus:ring-2 focus:ring-blue-500/20"
+            >
+              <option value="all">📦 All Sources (Combined)</option>
+              <option value="sap">🏛️ SAP Baseline Only</option>
+              <option value="distrotrack">🚚 DistroTrack Only</option>
             </select>
 
             {preset === 'custom_month' && (
@@ -877,53 +1049,196 @@ export function ReportsPage() {
         )}
 
         {/* ── 1. SALES REPORT ────────────────────────────────────────── */}
-        {reportType === 'sales' && (
-          <div className="overflow-x-auto">
-            <table className="dt-table w-full">
-              <thead>
-                <tr>
-                  <th>Picklist / Invoice #</th>
-                  <th>Date</th>
-                  <th>Route</th>
-                  <th>Assigned Salesman</th>
-                  <th>Items / SKUs</th>
-                  <th className="text-right">Total Invoice Value</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredPicklists.length === 0 && (
-                  <tr>
-                    <td colSpan={6} className="text-center py-10 text-xs text-surface-400">
-                      No picklist sales recorded for {dateRange.label}.
-                    </td>
-                  </tr>
-                )}
-                {filteredPicklists.map((pl) => (
-                  <tr key={pl.id}>
-                    <td className="font-mono text-xs font-extrabold text-blue-700 dark:text-blue-300">
-                      {pl.picklist_number}
-                    </td>
-                    <td className="text-xs text-surface-600 dark:text-surface-400">
-                      {formatDate(pl.date || pl.created_at)}
-                    </td>
-                    <td className="text-xs font-semibold text-surface-800 dark:text-surface-200">
-                      {pl.route?.name || 'Main Route'}
-                    </td>
-                    <td className="text-xs text-surface-700 dark:text-surface-300">
-                      {pl.worker?.name || '—'}
-                    </td>
-                    <td className="text-xs text-surface-700 dark:text-surface-300">
-                      {pl.total_items || pl.completed_parties || 0} SKUs
-                    </td>
-                    <td className="text-right font-extrabold text-surface-900 dark:text-white">
-                      {formatCurrency(pl.total_amount)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+        {reportType === 'sales' && (() => {
+          const sapSalesTotal = filteredSapSales.reduce(
+            (sum, s: any) => sum + Number(s.net_val !== null && s.net_val !== undefined ? s.net_val : s.quantity * (s.rate || 0)),
+            0
+          );
+          const dtSalesTotal = filteredPicklists.reduce((sum, pl) => sum + Number(pl.total_amount || 0), 0);
+          const grandTotal =
+            (salesSourceFilter === 'all' ? sapSalesTotal + dtSalesTotal : salesSourceFilter === 'sap' ? sapSalesTotal : dtSalesTotal);
+
+          const handleExportSalesExcel = () => {
+            const exportRows: any[] = [];
+            if (salesSourceFilter === 'all' || salesSourceFilter === 'sap') {
+              filteredSapSales.forEach((s: any) => {
+                exportRows.push({
+                  Source: 'SAP Baseline',
+                  Date: s.invoice_date,
+                  'Invoice / Doc No': s.invoice_no,
+                  'Customer Code': s.cust_code || '',
+                  'Customer Name': s.cust_name || '',
+                  SKU: s.sku,
+                  'Product Description': s.product_name || '',
+                  Quantity: s.quantity,
+                  UOM: s.uom || 'EA',
+                  Rate: s.rate,
+                  'Sales Amount': s.net_val !== null && s.net_val !== undefined ? s.net_val : s.quantity * (s.rate || 0),
+                });
+              });
+            }
+            if (salesSourceFilter === 'all' || salesSourceFilter === 'distrotrack') {
+              filteredPicklists.forEach((pl: any) => {
+                exportRows.push({
+                  Source: 'DistroTrack Delivery',
+                  Date: pl.date || pl.created_at,
+                  'Invoice / Doc No': pl.picklist_number,
+                  'Customer Code': '',
+                  'Customer Name': pl.route?.name || 'Main Route',
+                  SKU: 'Multiple',
+                  'Product Description': `${pl.total_items || 0} SKUs`,
+                  Quantity: pl.total_items || 0,
+                  UOM: 'pcs',
+                  Rate: 0,
+                  'Sales Amount': pl.total_amount || 0,
+                });
+              });
+            }
+            const ws = XLSX.utils.json_to_sheet(exportRows);
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, 'Sales Report');
+            XLSX.writeFile(wb, `Sales_Report_${dateRange.label.replace(/\s+/g, '_')}.xlsx`);
+          };
+
+          return (
+            <div className="space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 bg-surface-50 dark:bg-surface-850 border border-surface-200 dark:border-surface-700 rounded-xl">
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className="text-xs font-semibold text-surface-500 mr-1">Source Filter:</span>
+                  {([
+                    { id: 'all', label: 'All Sources' },
+                    { id: 'sap', label: `SAP Baseline (₹${Math.round(sapSalesTotal).toLocaleString()})` },
+                    { id: 'distrotrack', label: `DistroTrack (₹${Math.round(dtSalesTotal).toLocaleString()})` },
+                  ] as const).map((s) => (
+                    <button
+                      key={s.id}
+                      onClick={() => setSalesSourceFilter(s.id)}
+                      className={`px-3 py-1 text-xs font-medium rounded-lg transition-colors cursor-pointer ${
+                        salesSourceFilter === s.id
+                          ? s.id === 'sap'
+                            ? 'bg-purple-600 text-white shadow-xs'
+                            : 'bg-primary-600 text-white shadow-xs'
+                          : 'bg-white dark:bg-surface-800 text-surface-600 dark:text-surface-300 border border-surface-200 dark:border-surface-700 hover:bg-surface-100'
+                      }`}
+                    >
+                      {s.label}
+                    </button>
+                  ))}
+                </div>
+
+                <Button
+                  size="sm"
+                  variant="outline"
+                  icon={<FileSpreadsheet className="h-4 w-4 text-emerald-600" />}
+                  onClick={handleExportSalesExcel}
+                >
+                  Export Sales XLSX
+                </Button>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="dt-table w-full">
+                  <thead>
+                    <tr>
+                      <th>Source</th>
+                      <th>Picklist / Invoice #</th>
+                      <th>Date</th>
+                      <th>Route / Customer</th>
+                      <th>Assigned Salesman / Code</th>
+                      <th>Items / SKUs</th>
+                      <th className="text-right">Total Value</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {/* SAP Baseline Sales Rows */}
+                    {(salesSourceFilter === 'all' || salesSourceFilter === 'sap') &&
+                      filteredSapSales.map((s: any, idx: number) => {
+                        const val =
+                          s.net_val !== null && s.net_val !== undefined
+                            ? Number(s.net_val)
+                            : Number(s.quantity || 0) * Number(s.rate || 0);
+                        return (
+                          <tr key={`sap_${s.id || idx}`} className="hover:bg-surface-50/60 dark:hover:bg-surface-750/50">
+                            <td>
+                              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-purple-100 dark:bg-purple-950/70 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800 uppercase">
+                                SAP Baseline
+                              </span>
+                            </td>
+                            <td className="font-mono text-xs font-bold text-purple-700 dark:text-purple-300">
+                              {s.invoice_no}
+                            </td>
+                            <td className="text-xs text-surface-600 dark:text-surface-400">
+                              {formatDate(s.invoice_date || s.created_at)}
+                            </td>
+                            <td className="text-xs font-medium text-surface-800 dark:text-surface-200 max-w-xs truncate">
+                              {s.cust_name || 'SAP Customer'}
+                            </td>
+                            <td className="text-xs font-mono text-surface-500">
+                              {s.cust_code || 'SAP'}
+                            </td>
+                            <td className="text-xs text-surface-700 dark:text-surface-300">
+                              <span className="font-mono font-semibold">{s.sku}</span> ({s.quantity} {s.uom || 'pcs'})
+                            </td>
+                            <td className="text-right font-bold text-surface-900 dark:text-white tabular-nums">
+                              {formatCurrency(val)}
+                            </td>
+                          </tr>
+                        );
+                      })}
+
+                    {/* DistroTrack Operational Picklist Deliveries */}
+                    {(salesSourceFilter === 'all' || salesSourceFilter === 'distrotrack') &&
+                      filteredPicklists.map((pl) => (
+                        <tr key={pl.id} className="hover:bg-surface-50/60 dark:hover:bg-surface-750/50">
+                          <td>
+                            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-blue-100 dark:bg-blue-950/70 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800 uppercase">
+                              DistroTrack
+                            </span>
+                          </td>
+                          <td className="font-mono text-xs font-extrabold text-blue-700 dark:text-blue-300">
+                            {pl.picklist_number}
+                          </td>
+                          <td className="text-xs text-surface-600 dark:text-surface-400">
+                            {formatDate(pl.date || pl.created_at)}
+                          </td>
+                          <td className="text-xs font-semibold text-surface-800 dark:text-surface-200">
+                            {pl.route?.name || 'Main Route'}
+                          </td>
+                          <td className="text-xs text-surface-700 dark:text-surface-300">
+                            {pl.worker?.name || '—'}
+                          </td>
+                          <td className="text-xs text-surface-700 dark:text-surface-300">
+                            {pl.total_items || pl.completed_parties || 0} SKUs
+                          </td>
+                          <td className="text-right font-extrabold text-surface-900 dark:text-white tabular-nums">
+                            {formatCurrency(pl.total_amount)}
+                          </td>
+                        </tr>
+                      ))}
+
+                    {filteredSapSales.length === 0 && filteredPicklists.length === 0 && (
+                      <tr>
+                        <td colSpan={7} className="text-center py-10 text-xs text-surface-400">
+                          No sales recorded for {dateRange.label}.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                  <tfoot>
+                    <tr className="bg-surface-100 dark:bg-surface-750 font-bold">
+                      <td colSpan={6} className="text-right text-xs">
+                        Authoritative Sales Total ({salesSourceFilter.toUpperCase()}):
+                      </td>
+                      <td className="text-right text-xs font-extrabold text-primary-700 dark:text-primary-300 tabular-nums">
+                        {formatCurrency(grandTotal)}
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* ── 2. COLLECTIONS REPORT ──────────────────────────────────── */}
         {reportType === 'collections' && (

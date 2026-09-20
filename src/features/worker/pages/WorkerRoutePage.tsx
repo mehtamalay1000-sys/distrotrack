@@ -1,5 +1,6 @@
 import { useAuth } from '@/app/AuthProvider';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { QK } from '@/lib/queryKeys';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import {
@@ -11,7 +12,7 @@ import {
   AlertCircle,
   Loader2,
   Package,
-  ShieldAlert,
+  AlertTriangle,
   RotateCcw,
   Boxes,
   ArrowRight,
@@ -24,8 +25,7 @@ import {
   getRouteDeliveries,
   startRoute,
   getRouteStockCheck,
-  closeRouteReconciliation,
-  reconcileRouteFinances,
+  submitRouteCheckin,
 } from '../services/workerRouteService';
 import { getOfficialProductName } from '@/features/products/data/productMaster';
 import { formatCurrency } from '@/shared/utils/format';
@@ -56,19 +56,13 @@ export function WorkerRoutePage() {
   const [showCheckIn, setShowCheckIn] = useState(false);
   const [checkInStep, setCheckInStep] = useState<'stock' | 'finance'>('stock');
 
-  // Stock check-in state
+  // Stock check-in state (NO PIN REQUIRED)
   const [returnEntries, setReturnEntries] = useState<Record<string, ItemReturnEntry>>({});
-  const [adminPin, setAdminPin] = useState('');
   const [adjustmentReason, setAdjustmentReason] = useState('');
-  const [approvedAdminId, setApprovedAdminId] = useState<string | null>(null);
-  const [isVerifyingPin, setIsVerifyingPin] = useState(false);
 
-  // Financial check-in state
+  // Financial check-in state (NO PIN REQUIRED)
   const [actualCashHandedOver, setActualCashHandedOver] = useState<string>('');
   const [cashDiscrepancyReason, setCashDiscrepancyReason] = useState<string>('');
-  const [cashAdminPin, setCashAdminPin] = useState<string>('');
-  const [isVerifyingCashPin, setIsVerifyingCashPin] = useState(false);
-  const [approvedCashAdminId, setApprovedCashAdminId] = useState<string | null>(null);
 
   // Expenses state
   const [expenseItems, setExpenseItems] = useState<RouteExpenseItem[]>([
@@ -102,7 +96,8 @@ export function WorkerRoutePage() {
     // Only fetch after profile is fully resolved; workerId derived from profile.id
     enabled: !!workerId && !!profile,
     refetchInterval: 30_000,
-    staleTime: 20_000,
+    // Do NOT set staleTime here — if staleTime > 0, invalidateQueries won't trigger
+    // a real refetch after startRoute. We need the data to refresh immediately.
   });
 
   const { data: deliveries = [], isLoading: delLoading } = useQuery({
@@ -160,9 +155,15 @@ export function WorkerRoutePage() {
     mutationFn: async () => {
       await startRoute(picklist!.id, workerId, workerName);
     },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['worker-today-route'] });
-      qc.invalidateQueries({ queryKey: ['worker-route-deliveries'] });
+    onSuccess: async () => {
+      // Force immediate refetch — refetchType: 'all' bypasses staleTime checks
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ['worker-today-route'], refetchType: 'all' }),
+        qc.invalidateQueries({ queryKey: ['worker-route-deliveries'], refetchType: 'all' }),
+        qc.invalidateQueries({ queryKey: QK.masterOperations }),
+        qc.invalidateQueries({ queryKey: QK.masterAllWorkers }),
+        qc.invalidateQueries({ queryKey: QK.picklists }),
+      ]);
       toast.success('Route started! Stock loaded onto vehicle.');
     },
     onError: (e: Error) => toast.error(e.message),
@@ -171,7 +172,6 @@ export function WorkerRoutePage() {
   const closeRouteMut = useMutation({
     mutationFn: async () => {
       if (!picklist) throw new Error('Missing picklist data');
-
       if (!stockCheck) throw new Error('Missing stock check data');
 
       // 1. Build return items payload
@@ -187,18 +187,14 @@ export function WorkerRoutePage() {
 
         return {
           product_id: item.product_id,
+          sku: item.sku,
           returned_qty: ret,
           damaged_warehouse_qty: dam,
-          adjustment_qty: diff !== 0 ? diff : undefined,
-          adjustment_reason: diff !== 0 ? adjustmentReason || 'Check-in discrepancy approved' : undefined,
+          reason: diff !== 0 ? adjustmentReason || 'Check-in discrepancy reported' : undefined,
         };
       });
 
-      // 2. Execute atomic closure with stock reconciliation
-      const actorId = approvedAdminId || workerId;
-      await closeRouteReconciliation(picklist.id, actorId, returnPayload);
-
-      // 3. Format valid route expenses
+      // 2. Format valid route expenses
       const validExpenses = expenseItems
         .filter((i) => parseFloat(i.amount) > 0)
         .map((i) => ({
@@ -207,46 +203,26 @@ export function WorkerRoutePage() {
           description: i.notes || `${i.category} for ${picklist?.route?.name || 'Route'}`,
         }));
 
-      // 4. Calculate expected cash and discrepancy
+      // 3. Calculate expected cash and net expected cash
       const expectedCashAmt = Number(routeFinances?.cash || 0);
       const totalExpensesAmt = validExpenses.reduce((s, i) => s + i.amount, 0);
       const netExpectedCash = Math.max(0, expectedCashAmt - totalExpensesAmt);
       const actualCashNum = actualCashHandedOver === '' ? netExpectedCash : parseFloat(actualCashHandedOver) || 0;
-      const discrepancyAmt = actualCashNum - netExpectedCash;
-      const isDiscrepancy = Math.abs(discrepancyAmt) > 0.01;
 
-      if (isDiscrepancy && !approvedCashAdminId) {
-        throw new Error('Cash discrepancy must be authorized with Admin/Master PIN');
-      }
-
-      // 5. Execute atomic route financial reconciliation
-      await reconcileRouteFinances({
+      // 4. Submit route check-in via server-authoritative RPC (NO ADMIN PIN REQUIRED)
+      const res = await submitRouteCheckin({
         picklistId: picklist.id,
         workerId,
+        returnItems: returnPayload,
         actualCash: actualCashNum,
         expenses: validExpenses,
-        discrepancyAuthorized: isDiscrepancy ? !!approvedCashAdminId : false,
-        discrepancyReason: isDiscrepancy ? cashDiscrepancyReason || 'Cash discrepancy authorized' : undefined,
-        actorId: approvedCashAdminId || approvedAdminId || workerId,
+        stockReason: adjustmentReason || undefined,
+        cashReason: cashDiscrepancyReason || undefined,
       });
 
-      if (isDiscrepancy && approvedCashAdminId) {
-        try {
-          await supabase.rpc('log_system_event', {
-            p_user_id: approvedCashAdminId,
-            p_user_name: 'Admin',
-            p_role: 'admin',
-            p_module: 'reconciliation',
-            p_action: 'cash_discrepancy_authorized',
-            p_status: 'warning',
-            p_detail: `Cash discrepancy authorized via PIN for picklist ${picklist.picklist_number || picklist.id}: Discrepancy ₹${discrepancyAmt.toFixed(2)}. Reason: ${cashDiscrepancyReason || 'Authorized by Admin'}`,
-            p_entity_type: 'picklist',
-            p_entity_id: picklist.id,
-          });
-        } catch {}
-      }
+      return res;
     },
-    onSuccess: () => {
+    onSuccess: (data) => {
       qc.invalidateQueries({ queryKey: ['worker-today-route'] });
       qc.invalidateQueries({ queryKey: ['worker-recent-routes'] });
       qc.invalidateQueries({ queryKey: ['worker-performance-metrics'] });
@@ -254,14 +230,16 @@ export function WorkerRoutePage() {
       qc.invalidateQueries({ queryKey: ['expenses'] });
       qc.invalidateQueries({ queryKey: ['picklists'] });
       qc.invalidateQueries({ queryKey: ['payments'] });
-      // NOTE: 'dashboard-stats' is intentionally NOT invalidated here.
-      // That query calls the owner/master-only get_financial_summary RPC.
-      // Invalidating it from a Worker session causes a 401 when React Query
-      // attempts a background refetch with the Worker's JWT. The admin
-      // dashboard refreshes itself via its own polling and window-focus refetch.
+      qc.invalidateQueries({ queryKey: QK.masterOperations });
+      qc.invalidateQueries({ queryKey: QK.masterAllWorkers });
+      qc.invalidateQueries({ queryKey: QK.picklists });
       setShowCheckIn(false);
-      const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
-      toast.success(isOnline ? 'Route closed: Physical stock & finances successfully reconciled!' : 'Route close requested — waiting for server sync and verification.');
+
+      if (data?.requires_admin_review || data?.status === 'pending_reconciliation') {
+        toast.info('Route submitted for Admin/Master review. Field work completed.');
+      } else {
+        toast.success('Route closed: Physical stock & finances successfully reconciled!');
+      }
       navigate('/w');
     },
     onError: (e: Error) => toast.error(e.message),
@@ -307,77 +285,21 @@ export function WorkerRoutePage() {
 
   // Calculate total discrepancy across all items in stockCheck
   const computeDiscrepancy = () => {
-    if (!stockCheck?.items) return { totalDiff: 0, hasDiscrepancy: false };
+    if (!stockCheck?.items) return { totalDiff: 0, hasDiscrepancy: false, discrepantCount: 0 };
     let totalDiff = 0;
+    let discrepantCount = 0;
     for (const item of stockCheck.items) {
       const entry = getEntry(item.product_id, item.expected_vehicle_qty);
       const diff = item.expected_vehicle_qty - (entry.returned_qty + entry.damaged_warehouse_qty);
-      totalDiff += diff;
-    }
-    return { totalDiff, hasDiscrepancy: totalDiff !== 0 };
-  };
-
-  const { totalDiff, hasDiscrepancy } = computeDiscrepancy();
-
-  // Authorize discrepancy with Admin PIN
-  const handleVerifyAdminPin = async () => {
-    if (!adminPin) {
-      toast.error('Please enter Admin or Master PIN');
-      return;
-    }
-    if (!adjustmentReason.trim()) {
-      toast.error('Please provide a mandatory reason for the discrepancy adjustment');
-      return;
-    }
-
-    setIsVerifyingPin(true);
-    try {
-      const { data, error } = await supabase.rpc('verify_admin_pin', {
-        p_pin: adminPin,
-      });
-
-      if (error || !data || !data.valid) {
-        toast.error('Invalid Admin or Master PIN. Discrepancy cannot be approved.');
-      } else {
-        setApprovedAdminId(data.user_id);
-        toast.success(`Discrepancy approved by ${data.role.toUpperCase()} (${data.name})`);
+      if (diff !== 0) {
+        totalDiff += diff;
+        discrepantCount++;
       }
-    } catch (err: any) {
-      toast.error(err.message || 'Verification failed');
-    } finally {
-      setIsVerifyingPin(false);
     }
+    return { totalDiff, hasDiscrepancy: discrepantCount > 0, discrepantCount };
   };
 
-  // Authorize cash discrepancy with Admin PIN
-  const handleVerifyCashAdminPin = async () => {
-    if (!cashAdminPin) {
-      toast.error('Please enter Admin or Master PIN');
-      return;
-    }
-    if (!cashDiscrepancyReason.trim()) {
-      toast.error('Please provide a mandatory reason for the cash discrepancy');
-      return;
-    }
-
-    setIsVerifyingCashPin(true);
-    try {
-      const { data, error } = await supabase.rpc('verify_admin_pin', {
-        p_pin: cashAdminPin,
-      });
-
-      if (error || !data || !data.valid) {
-        toast.error('Invalid Admin or Master PIN. Discrepancy cannot be approved.');
-      } else {
-        setApprovedCashAdminId(data.user_id);
-        toast.success(`Cash discrepancy approved by ${data.role.toUpperCase()} (${data.name})`);
-      }
-    } catch (err: any) {
-      toast.error(err.message || 'Verification failed');
-    } finally {
-      setIsVerifyingCashPin(false);
-    }
-  };
+  const { totalDiff, hasDiscrepancy, discrepantCount } = computeDiscrepancy();
 
   // Financial reconciliation calculations
   const expectedCashAmt = Number(routeFinances?.cash || 0);
@@ -556,8 +478,8 @@ export function WorkerRoutePage() {
               <button
                 type="button"
                 onClick={() => {
-                  if (hasDiscrepancy && !approvedAdminId) {
-                    toast.error('Please resolve or authorize the inventory discrepancy first');
+                  if (hasDiscrepancy && !adjustmentReason.trim()) {
+                    toast.error('Please enter a reason for the stock difference before proceeding');
                     return;
                   }
                   setCheckInStep('finance');
@@ -705,57 +627,33 @@ export function WorkerRoutePage() {
                       })}
                     </div>
 
-                    {/* Discrepancy Alert & Authorization */}
-                    {hasDiscrepancy && (
-                      <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/30 border border-rose-300 dark:border-rose-800 space-y-2">
-                        <div className="flex items-center gap-2 text-rose-800 dark:text-rose-300 font-bold text-xs">
-                          <ShieldAlert className="h-4 w-4 text-rose-600" />
-                          <span>Stock Discrepancy Detected (Net: {totalDiff} pcs)</span>
+                    {/* Discrepancy Alert & Reason (NO ADMIN PIN REQUIRED) */}
+                    {hasDiscrepancy ? (
+                      <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-800 space-y-2">
+                        <div className="flex items-center gap-2 text-amber-800 dark:text-amber-300 font-bold text-xs">
+                          <AlertTriangle className="h-4 w-4 text-amber-600" />
+                          <span>Stock Difference Found ({discrepantCount} item{discrepantCount > 1 ? 's' : ''}, Net: {totalDiff > 0 ? `-${totalDiff} pcs shortage` : `+${Math.abs(totalDiff)} pcs surplus`})</span>
                         </div>
-                        <p className="text-[11px] text-rose-700 dark:text-rose-300">
-                          The system enforces strict stock conservation. Workers cannot self-approve
-                          discrepancies. An Admin or Master PIN is required to authorize this adjustment.
+                        <p className="text-[11px] text-amber-700 dark:text-amber-300">
+                          Please provide a reason. Your report will be submitted for Admin/Master review. You do not need to enter an Admin PIN.
                         </p>
-
-                        {!approvedAdminId ? (
-                          <div className="space-y-2 pt-1">
-                            <div>
-                              <label className="text-[10px] font-bold uppercase text-surface-500">
-                                Discrepancy Reason (Mandatory)
-                              </label>
-                              <input
-                                type="text"
-                                placeholder="e.g. Broken carton on truck, physical count error"
-                                value={adjustmentReason}
-                                onChange={(e) => setAdjustmentReason(e.target.value)}
-                                className="w-full h-8 px-2 text-xs rounded border border-surface-300 dark:border-surface-700 bg-white dark:bg-surface-800"
-                              />
-                            </div>
-                            <div className="flex gap-2">
-                              <input
-                                type="password"
-                                maxLength={6}
-                                placeholder="Admin PIN"
-                                value={adminPin}
-                                onChange={(e) => setAdminPin(e.target.value)}
-                                className="w-32 h-8 px-2 text-xs font-mono tracking-widest text-center rounded border border-surface-300 dark:border-surface-700 bg-white dark:bg-surface-800"
-                              />
-                              <button
-                                type="button"
-                                onClick={handleVerifyAdminPin}
-                                disabled={isVerifyingPin}
-                                className="px-3 h-8 rounded bg-rose-600 text-white text-xs font-bold hover:bg-rose-700 transition-colors cursor-pointer"
-                              >
-                                {isVerifyingPin ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Authorize'}
-                              </button>
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="text-xs text-emerald-700 dark:text-emerald-300 font-bold flex items-center gap-1.5">
-                            <CheckCircle2 className="h-4 w-4" />
-                            Adjustment authorized by supervisor. Reason: {adjustmentReason}
-                          </div>
-                        )}
+                        <div>
+                          <label className="text-[10px] font-bold uppercase text-surface-500">
+                            Reason for difference (Required)
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="e.g. Broken carton on truck, physical count discrepancy"
+                            value={adjustmentReason}
+                            onChange={(e) => setAdjustmentReason(e.target.value)}
+                            className="w-full h-8 px-2 text-xs rounded border border-surface-300 dark:border-surface-700 bg-white dark:bg-surface-800 font-medium"
+                          />
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="p-2.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 flex items-center gap-2 text-xs text-emerald-800 dark:text-emerald-300 font-semibold">
+                        <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                        <span>✓ Stock Balanced — All physical counts match expected return.</span>
                       </div>
                     )}
 
@@ -763,8 +661,8 @@ export function WorkerRoutePage() {
                     <button
                       type="button"
                       onClick={() => {
-                        if (hasDiscrepancy && !approvedAdminId) {
-                          toast.error('Authorize inventory discrepancy with Admin PIN before proceeding');
+                        if (hasDiscrepancy && !adjustmentReason.trim()) {
+                          toast.error('Please enter a brief reason for the stock difference before continuing');
                           return;
                         }
                         setCheckInStep('finance');
@@ -944,57 +842,28 @@ export function WorkerRoutePage() {
                   </div>
                 </div>
 
-                {/* 4. Discrepancy Authorization with Admin PIN */}
+                {/* 4. Discrepancy Reason (NO ADMIN PIN REQUIRED) */}
                 {hasCashDiscrepancy && (
-                  <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/30 border border-rose-300 dark:border-rose-800 space-y-2">
-                    <div className="flex items-center gap-2 text-rose-800 dark:text-rose-300 font-bold text-xs">
-                      <ShieldAlert className="h-4 w-4 text-rose-600" />
-                      <span>Cash Discrepancy Authorization Required</span>
+                  <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-800 space-y-2">
+                    <div className="flex items-center gap-2 text-amber-800 dark:text-amber-300 font-bold text-xs">
+                      <AlertTriangle className="h-4 w-4 text-amber-600" />
+                      <span>Cash Difference Found ({cashDiscrepancy > 0 ? `Surplus +₹${cashDiscrepancy.toFixed(2)}` : `Shortage -₹${Math.abs(cashDiscrepancy).toFixed(2)}`})</span>
                     </div>
-                    <p className="text-[11px] text-rose-700 dark:text-rose-300">
-                      Declared actual cash differs from net expected cash. A supervisor or admin PIN
-                      is required to authorize this difference.
+                    <p className="text-[11px] text-amber-700 dark:text-amber-300">
+                      Declared actual cash differs from net expected collections. Please provide a reason. This will be submitted for Admin/Master review without requiring a supervisor PIN.
                     </p>
-
-                    {!approvedCashAdminId ? (
-                      <div className="space-y-2 pt-1">
-                        <div>
-                          <label className="text-[10px] font-bold uppercase text-surface-500">
-                            Discrepancy Reason (Mandatory)
-                          </label>
-                          <input
-                            type="text"
-                            placeholder="e.g. Counter change shortage, denomination mismatch"
-                            value={cashDiscrepancyReason}
-                            onChange={(e) => setCashDiscrepancyReason(e.target.value)}
-                            className="w-full h-8 px-2 text-xs rounded border border-surface-300 dark:border-surface-700 bg-white dark:bg-surface-800"
-                          />
-                        </div>
-                        <div className="flex gap-2">
-                          <input
-                            type="password"
-                            maxLength={6}
-                            placeholder="Admin PIN"
-                            value={cashAdminPin}
-                            onChange={(e) => setCashAdminPin(e.target.value)}
-                            className="w-32 h-8 px-2 text-xs font-mono tracking-widest text-center rounded border border-surface-300 dark:border-surface-700 bg-white dark:bg-surface-800"
-                          />
-                          <button
-                            type="button"
-                            onClick={handleVerifyCashAdminPin}
-                            disabled={isVerifyingCashPin}
-                            className="px-3 h-8 rounded bg-rose-600 text-white text-xs font-bold hover:bg-rose-700 transition-colors cursor-pointer"
-                          >
-                            {isVerifyingCashPin ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Authorize'}
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="text-xs text-emerald-700 dark:text-emerald-300 font-bold flex items-center gap-1.5">
-                        <CheckCircle2 className="h-4 w-4" />
-                        Discrepancy authorized by supervisor. Reason: {cashDiscrepancyReason}
-                      </div>
-                    )}
+                    <div>
+                      <label className="text-[10px] font-bold uppercase text-surface-500">
+                        Reason for cash difference (Required)
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="e.g. Counter change shortage, denomination mismatch"
+                        value={cashDiscrepancyReason}
+                        onChange={(e) => setCashDiscrepancyReason(e.target.value)}
+                        className="w-full h-8 px-2 text-xs rounded border border-surface-300 dark:border-surface-700 bg-white dark:bg-surface-800 font-medium"
+                      />
+                    </div>
                   </div>
                 )}
 
@@ -1002,13 +871,23 @@ export function WorkerRoutePage() {
                 <div className="pt-2 space-y-2">
                   <button
                     type="button"
-                    onClick={() => closeRouteMut.mutate()}
-                    disabled={closeRouteMut.isPending || (hasCashDiscrepancy && !approvedCashAdminId)}
+                    onClick={() => {
+                      if (hasCashDiscrepancy && !cashDiscrepancyReason.trim()) {
+                        toast.error('Please enter a reason for the cash difference before submitting');
+                        return;
+                      }
+                      closeRouteMut.mutate();
+                    }}
+                    disabled={closeRouteMut.isPending}
                     className="w-full py-3 rounded-xl font-bold text-xs text-white bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 disabled:opacity-50 transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-md"
                   >
                     {closeRouteMut.isPending ? (
                       <>
-                        <Loader2 className="h-4 w-4 animate-spin" /> Reconciling Stock & Finances...
+                        <Loader2 className="h-4 w-4 animate-spin" /> Submitting Route Check-In...
+                      </>
+                    ) : (hasDiscrepancy || hasCashDiscrepancy) ? (
+                      <>
+                        <CheckCircle2 className="h-4 w-4" /> Submit Route with Discrepancy for Review
                       </>
                     ) : (
                       <>
@@ -1058,13 +937,18 @@ export function WorkerRoutePage() {
                 {getStatusIcon(d)}
                 <div className="flex-1 min-w-0">
                   <div
-                    className={`text-sm font-medium truncate ${
+                    className={`text-sm font-medium truncate flex items-center gap-1.5 ${
                       isDone
                         ? 'text-surface-500 dark:text-surface-400 line-through'
                         : 'text-surface-900 dark:text-white'
                     }`}
                   >
-                    {d.party?.name || 'Unknown Party'}
+                    <span className="truncate">{d.party?.name || 'Unknown Party'}</span>
+                    {!isDone && Number(d.party?.outstanding_amount || 0) > 0 && (
+                      <span className="no-underline inline-flex items-center text-[9px] font-bold px-1.5 py-0.2 rounded bg-amber-100 text-amber-800 dark:bg-amber-900/50 dark:text-amber-300 flex-shrink-0">
+                        Udhar: {formatCurrency(Number(d.party?.outstanding_amount))}
+                      </span>
+                    )}
                   </div>
                   <div className="text-[10px] text-surface-500 dark:text-surface-400 mt-0.5">
                     {d.party?.code}
@@ -1074,10 +958,15 @@ export function WorkerRoutePage() {
                   </div>
                 </div>
                 {isDone ? (
-                  <div className="text-right">
+                  <div className="text-right flex-shrink-0">
                     <div className="text-xs font-semibold text-emerald-600 dark:text-emerald-400">
                       {formatCurrency(d.collected_amount)}
                     </div>
+                    {Math.max(0, Number(d.delivered_amount || d.total_amount || 0) - Number(d.collected_amount || 0)) > 0 && (
+                      <div className="text-[10px] font-bold text-amber-600 dark:text-amber-400">
+                        Udhar: {formatCurrency(Math.max(0, Number(d.delivered_amount || d.total_amount || 0) - Number(d.collected_amount || 0)))}
+                      </div>
+                    )}
                   </div>
                 ) : canOpen ? (
                   <ChevronRight className="h-4 w-4 text-surface-400" />

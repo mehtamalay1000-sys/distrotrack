@@ -3,10 +3,13 @@ import React from 'react';
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '@/app/AuthProvider';
 import { useTheme } from '@/shared/theme/ThemeProvider';
+import { useRealtimeSync } from '@/lib/useRealtimeSync';
 import {
   LayoutDashboard, Users, BarChart3, Activity, History,
   Menu, X, LogOut, ChevronDown, Sun, Moon, Shield,
   Briefcase, ChevronRight,
+  Package, FileSpreadsheet, AlertTriangle, Cpu,
+  MapPin, Building2, TrendingUp,
 } from 'lucide-react';
 import { NotificationBell } from '@/shared/ui';
 
@@ -15,24 +18,46 @@ const navSections: Array<{
   items: Array<{ to: string; label: string; icon: React.ElementType; end?: boolean }>;
 }> = [
   {
-    label: 'Executive Control',
+    label: 'Command Center',
     items: [
-      { to: '/master', label: 'Dashboard', icon: LayoutDashboard, end: true },
+      { to: '/master', label: 'Command Center', icon: LayoutDashboard, end: true },
     ],
   },
   {
-    label: 'Oversight & Intelligence',
+    label: 'Live Operations',
+    items: [
+      { to: '/master/operations', label: 'Live Operations', icon: Activity },
+      { to: '/master/workers', label: 'Worker Monitor', icon: Users },
+    ],
+  },
+  {
+    label: 'Business Oversight',
     items: [
       { to: '/master/business', label: 'Business Data & Stock', icon: Briefcase },
-      { to: '/master/workers', label: 'Worker Monitor', icon: Users },
-      { to: '/master/reports', label: 'Analytical Reports', icon: BarChart3 },
-      { to: '/master/history', label: 'Historical Analysis', icon: History },
+      { to: '/master/financial', label: 'Financial Oversight', icon: TrendingUp },
+      { to: '/master/inventory', label: 'Inventory Deep-Dive', icon: Package },
     ],
   },
   {
-    label: 'Governance & Audit',
+    label: 'Business Data',
     items: [
-      { to: '/master/system', label: 'System & Audit Log', icon: Activity },
+      { to: '/master/routes', label: 'All Routes', icon: MapPin },
+      { to: '/master/parties', label: 'All Parties', icon: Building2 },
+      { to: '/master/sap', label: 'SAP / Imports', icon: FileSpreadsheet },
+    ],
+  },
+  {
+    label: 'Reporting & History',
+    items: [
+      { to: '/master/reports', label: 'Analytical Reports', icon: BarChart3 },
+      { to: '/master/history', label: 'Historical Analysis', icon: History },
+      { to: '/master/exceptions', label: 'Exception Center', icon: AlertTriangle },
+    ],
+  },
+  {
+    label: 'Governance',
+    items: [
+      { to: '/master/system', label: 'System Health & Audit', icon: Cpu },
     ],
   },
 ];
@@ -44,6 +69,9 @@ export function MasterLayout() {
   const { profile, signOut } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
+
+  // Activate Realtime subscriptions for Master — invalidates React Query cache on DB changes
+  useRealtimeSync('master');
 
   const handleSignOut = async () => {
     await signOut();

@@ -19,7 +19,11 @@ import {
   findProductMasterByDescription,
   getProductMasterSKUs,
   updateProductMasterMrp,
+  findSapReferenceCatalog,
+  registerProductMasterEntry,
+  getCanonicalSapCatalogCount,
 } from '../src/features/products/data/productMaster.ts';
+import { RAW_SAP_PRODUCTS } from '../src/features/products/data/sapCatalogData.ts';
 import {
   getProducts,
   lookupProductBySku,
@@ -83,17 +87,22 @@ async function runTests() {
   // ── 1. TEST SKU 1600908 ──────────────────────────────────────────
   console.log('--- 1. TEST SKU 1600908 & CANONICAL SAP LOOKUP ---');
   const sku1600908 = '1600908';
-  const entry = findProductMasterEntry(sku1600908);
-  assert(entry !== undefined, `SAP master lookup for SKU ${sku1600908}`);
+  const refEntry = findSapReferenceCatalog(sku1600908);
+  assert(refEntry !== undefined, `SAP reference catalog lookup for SKU ${sku1600908}`);
   assert(
-    Boolean(entry?.name === 'Col ActSalt Tpst200' || entry?.name?.includes('Active Salt')),
-    `Official SAP product name resolution: "${entry?.name}"`
+    Boolean(refEntry?.name === 'Col ActSalt Tpst200' || refEntry?.name?.includes('Active Salt')),
+    `Official SAP product name resolution: "${refEntry?.name}"`
   );
-  assert(Boolean(entry?.category === 'Toothpaste' || entry?.category?.includes('Oral Care')), `Category is Oral Care / Toothpaste: "${entry?.category}"`);
+  assert(Boolean(refEntry?.category === 'Toothpaste' || refEntry?.category?.includes('Oral Care')), `Category is Oral Care / Toothpaste: "${refEntry?.category}"`);
 
-  // Leading zeroes handling
-  const paddedEntry = findProductMasterEntry('000000000001600908');
+  // Leading zeroes handling in reference catalog
+  const paddedEntry = findSapReferenceCatalog('000000000001600908');
   assert(paddedEntry !== undefined && paddedEntry.sku === sku1600908, 'Normalized unpadded lookup matches padded SKU 000000000001600908');
+
+  // Register product into active operational Product Master
+  registerProductMasterEntry(refEntry!);
+  const entry = findProductMasterEntry(sku1600908);
+  assert(entry !== undefined, `Active Product Master lookup after registration for SKU ${sku1600908}`);
 
   // Official product name helper
   const officialName = getOfficialProductName(sku1600908, 'Fallback');
@@ -101,17 +110,18 @@ async function runTests() {
 
   // ── 2. PRODUCT MASTER CATALOG & SEARCH ───────────────────────────
   console.log('\n--- 2. PRODUCT MASTER INTEGRATION & SEARCH ---');
-  assert(SAP_PRODUCT_MASTER.length >= 2300, `SAP Product Master contains ${SAP_PRODUCT_MASTER.length} products (>= 2,300)`);
+  const catalogCount = getCanonicalSapCatalogCount();
+  assert(catalogCount >= 2300, `Official SAP reference catalog contains ${catalogCount} products (>= 2,300)`);
 
-  // SKU Uniqueness check
+  // SKU Uniqueness check in reference catalog
   const skuSet = new Set<string>();
   let duplicates = 0;
-  for (const p of SAP_PRODUCT_MASTER) {
-    const norm = p.sku.trim().toUpperCase();
+  for (const p of RAW_SAP_PRODUCTS) {
+    const norm = (p.sku || '').trim().toUpperCase();
     if (skuSet.has(norm)) duplicates++;
     skuSet.add(norm);
   }
-  assert(duplicates === 0, `SKU Uniqueness check: ${duplicates} duplicate SKUs in master`);
+  assert(duplicates === 0, `SKU Uniqueness check: ${duplicates} duplicate SKUs in reference catalog`);
 
   // Unknown SKU must not guess or create fake product
   const unknownSku = '9999999999';
@@ -127,12 +137,13 @@ async function runTests() {
   const unmappedFound = unmappedList.some(u => u.sku === unknownSku);
   assert(unmappedFound, 'Unmapped SKU logged into unmappedSkuExceptions for Admin/Master');
 
-  // Search by brand & category
+  // Search by brand & category on registered products
+  await upsertProductBySku(sku1600908, refEntry!.name, refEntry!.mrp, 120);
   const colgateItems = await getProducts({ brand: 'Colgate' });
   assert(colgateItems.length > 0, `Search by Brand 'Colgate' returned ${colgateItems.length} items`);
 
-  const toothpastes = await getProducts({ category: 'Toothpaste' });
-  assert(toothpastes.length > 0, `Search by Category 'Toothpaste' returned ${toothpastes.length} items`);
+  const oralCareItems = await getProducts({ category: 'Oral Care' });
+  assert(oralCareItems.length > 0, `Search by Category 'Oral Care' returned ${oralCareItems.length} items`);
 
   // ── 3. ROUTE START & NON-BLOCKING WAREHOUSE STOCK ────────────────
   console.log('\n--- 3. NON-BLOCKING ROUTE START & STOCK EXCEPTION ---');
@@ -251,6 +262,10 @@ async function runTests() {
 
   // ── 5. SAP STOCK RECONCILIATION ──────────────────────────────────
   console.log('\n--- 5. SAP STOCK RECONCILIATION & SNAPSHOTS ---');
+  // Register known SAP product 61061321
+  const ref61061321 = findSapReferenceCatalog('61061321');
+  if (ref61061321) registerProductMasterEntry(ref61061321);
+
   const mockSapUpload = [
     { sku: '1600908', stockQty: 100 }, // Matches SKU 1600908
     { sku: '61061321', stockQty: 50 },  // Incomplete history in mockStore
@@ -302,6 +317,10 @@ async function runTests() {
   // Pre-test: verify initial calculated stock for SKU 1600908
   const initialStock = await getDistroTrackOperationalStock('1600908');
   assert(initialStock.calculatedStock === null || initialStock.calculatedStock === 0, 'SKU 1600908 initial stock is 0/unrecorded prior to purchase import');
+
+  // Register SKU 61059907 in active Product Master
+  const ref61059907 = findSapReferenceCatalog('61059907');
+  if (ref61059907) registerProductMasterEntry(ref61059907);
 
   // Realistic sample batch mirroring SAP purchase file columns (confirmed vs ordered, GR status, etc.)
   const samplePurchaseRows: ParsedPurchaseRow[] = [
@@ -877,6 +896,21 @@ async function runTests() {
   await updateProductMrp({ sku: sku1600958, newMrp: 79 });
 
   // Test 15: Bulk MRP updates
+  const ref61010962 = findSapReferenceCatalog('61010962');
+  if (ref61010962) {
+    registerProductMasterEntry(ref61010962);
+    mockStore.saveProduct({
+      sku: '61010962',
+      name: ref61010962.name,
+      category: ref61010962.category,
+      mrp: ref61010962.mrp,
+      rate: ref61010962.mrp,
+      unit: ref61010962.unit,
+      status: 'active',
+      brand: ref61010962.brand,
+    });
+  }
+
   const bulkUpdates = [
     { sku: '1600908', newMrp: 160 },
     { sku: '61010962', newMrp: 85 },

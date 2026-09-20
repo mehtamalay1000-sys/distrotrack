@@ -92,3 +92,38 @@ export interface MatchResult {
   isFullyMatched: boolean;
   warnings: string[];
 }
+
+// ── Product / SKU Level Matching Types ───────────────────────────────
+
+export type SkuMatchStatus = 'matched' | 'historical_match' | 'unmapped' | 'mismatch';
+export type SkuMatchSource = 'product_master' | 'historical_sales' | 'historical_purchases' | null;
+
+export interface SkuMatchResult {
+  sku: string;
+  productName: string;
+  category?: string;
+  picklistTotalQty: number;
+  picklistMrp?: number;
+  picklistRate?: number;
+  picklistRowsCount: number;
+  status: SkuMatchStatus;
+  source: SkuMatchSource;
+  productMasterEntry?: any;
+  historicalSalesProduct?: any;
+  mismatchReason?: string;
+  notes: string[];
+}
+
+export interface ProductMatchSummary {
+  picklistNumber: string;
+  totalUniqueSkus: number;
+  totalPicklistItems: number;
+  matchedProductMasterCount: number;
+  historicalMatchesCount: number;
+  unmappedCount: number;
+  mismatchesCount: number;
+  totalMatchedCount: number; // matchedProductMasterCount + historicalMatchesCount
+  isFullyMatched: boolean;   // unmappedCount === 0 && mismatchesCount === 0
+  skuResults: SkuMatchResult[];
+  warnings: string[];
+}

@@ -335,10 +335,12 @@ export async function parsePicklist(file: File): Promise<ParsedPicklist> {
           continue;
         }
 
-        // Check for duplicate item (continuation page)
-        const existingItem = allItems.find(i => i.sku === sku && i.quantity === totalQty);
+        // Check for exact duplicate item (same raw text line appearing on continuation pages due to PDF pagination reprint).
+        // NOTE: Same SKU with different quantities is NOT a duplicate — it is a legitimate aggregate picklist entry.
+        // Deduplication to unique canonical SKUs is done by the SKU matcher, not the parser.
+        const existingItem = allItems.find(i => i.sku === sku && i.rawText === line);
         if (existingItem) {
-          console.log(`[PICKLIST PARSER] Skipping duplicate: ${sku} qty=${totalQty}`);
+          console.log(`[PICKLIST PARSER] Skipping exact raw-text duplicate: ${sku} (pagination reprint)`);
           continue;
         }
 

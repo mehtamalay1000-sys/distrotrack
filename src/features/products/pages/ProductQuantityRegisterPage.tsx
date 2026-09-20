@@ -1,8 +1,10 @@
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
   Layers, Download, FileSpreadsheet, Search,
-  TrendingUp, Truck, RotateCcw, DollarSign, RefreshCw, CheckCircle2
+  TrendingUp, Truck, RotateCcw, DollarSign, RefreshCw, CheckCircle2,
+  UploadCloud
 } from 'lucide-react';
 import { PageHeader, Card, Button, LoadingState, EmptyState } from '@/shared/ui';
 import {
@@ -15,6 +17,7 @@ import {
 import { formatCurrency, getLocalDateString } from '@/shared/utils/format';
 
 export function ProductQuantityRegisterPage() {
+  const navigate = useNavigate();
   const [datePreset, setDatePreset] = useState<'today' | 'week' | 'month' | 'custom'>('month');
   const [startDate, setStartDate] = useState(() => {
     const d = new Date();
@@ -22,6 +25,7 @@ export function ProductQuantityRegisterPage() {
   });
   const [endDate, setEndDate] = useState(getLocalDateString());
   const [routeFilter, setRouteFilter] = useState('all');
+  const [sourceFilter, setSourceFilter] = useState<'all' | 'sap' | 'distrotrack'>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [aggregation, setAggregation] = useState<AggregationMode>('detailed');
 
@@ -44,12 +48,13 @@ export function ProductQuantityRegisterPage() {
   };
 
   const { data, isLoading, refetch } = useQuery({
-    queryKey: ['product_quantity_register', startDate, endDate, routeFilter, searchQuery],
+    queryKey: ['product_quantity_register', startDate, endDate, routeFilter, searchQuery, sourceFilter],
     queryFn: () => getProductQuantityRegister({
       startDate,
       endDate,
       routeCode: routeFilter,
       searchQuery,
+      source: sourceFilter,
     }),
   });
 
@@ -81,6 +86,14 @@ export function ProductQuantityRegisterPage() {
         description="Authoritative operational product movement and net sales derived from verified deliveries and returns."
         actions={
           <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              icon={<UploadCloud className="h-4 w-4" />}
+              onClick={() => navigate('/admin/inventory/import-sales')}
+            >
+              Import SAP Sales
+            </Button>
             <Button
               variant="outline"
               size="sm"
@@ -190,6 +203,29 @@ export function ProductQuantityRegisterPage() {
                 {p === 'today' ? 'Daily (Today)' : p === 'week' ? 'Weekly (Last 7d)' : p === 'month' ? 'Monthly (MTD)' : 'Custom'}
               </button>
             ))}
+
+            <div className="h-4 w-px bg-surface-300 dark:bg-surface-700 mx-1.5" />
+
+            <span className="text-xs font-semibold text-surface-500 mr-1">Source:</span>
+            {([
+              { id: 'all', label: 'All Sources' },
+              { id: 'sap', label: 'SAP Baseline' },
+              { id: 'distrotrack', label: 'DistroTrack Delivery' },
+            ] as const).map((s) => (
+              <button
+                key={s.id}
+                onClick={() => setSourceFilter(s.id)}
+                className={`px-2.5 py-1 text-xs font-medium rounded-lg transition-colors cursor-pointer ${
+                  sourceFilter === s.id
+                    ? s.id === 'sap'
+                      ? 'bg-purple-600 text-white shadow-xs'
+                      : 'bg-primary-600 text-white shadow-xs'
+                    : 'bg-surface-100 dark:bg-surface-800 text-surface-600 dark:text-surface-300 hover:bg-surface-200'
+                }`}
+              >
+                {s.label}
+              </button>
+            ))}
           </div>
 
           {/* Date range pickers (for custom) */}
@@ -227,7 +263,7 @@ export function ProductQuantityRegisterPage() {
               <Search className="h-4 w-4 text-surface-400 absolute left-3 top-1/2 -translate-y-1/2" />
               <input
                 type="text"
-                placeholder="Search by SKU, Product Name, Brand, Picklist…"
+                placeholder="Search by SKU, Product Name, Brand, Picklist, Invoice…"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="w-full pl-9 pr-3 py-1.5 text-xs rounded-lg border border-surface-300 dark:border-surface-600 bg-white dark:bg-surface-800 text-surface-900 dark:text-surface-100"
@@ -278,12 +314,12 @@ export function ProductQuantityRegisterPage() {
 
       {/* Data Table */}
       {isLoading ? (
-        <LoadingState message="Deriving authoritative product quantities from delivery records…" />
+        <LoadingState message="Deriving authoritative product quantities from delivery records and SAP sales…" />
       ) : rows.length === 0 ? (
         <EmptyState
           icon={<Layers className="h-10 w-10 text-surface-400" />}
           title="No Product Quantity Records Found"
-          description="No delivery or picklist movements match the selected period or filters."
+          description="No delivery, picklist, or SAP sales baseline movements match the selected period or filters."
         />
       ) : aggregation === 'detailed' ? (
         /* Detailed Line Items View */
@@ -292,16 +328,17 @@ export function ProductQuantityRegisterPage() {
             <table className="dt-table">
               <thead>
                 <tr>
+                  <th>Source</th>
                   <th>Date</th>
-                  <th>Picklist</th>
-                  <th>Route</th>
+                  <th>Doc / Invoice</th>
+                  <th>Route / Customer</th>
                   <th>SKU</th>
                   <th>Official Product Name</th>
                   <th>Brand</th>
                   <th>UOM</th>
-                  <th className="text-right">Picklist Qty</th>
-                  <th className="text-right">Delivered Qty</th>
-                  <th className="text-right">Returned Qty</th>
+                  <th className="text-right">Ordered / Qty</th>
+                  <th className="text-right">Delivered</th>
+                  <th className="text-right">Returned</th>
                   <th className="text-right">Net Sold Qty</th>
                   <th className="text-right">Rate</th>
                   <th className="text-right">Sales Amount</th>
@@ -309,7 +346,16 @@ export function ProductQuantityRegisterPage() {
               </thead>
               <tbody>
                 {rows.map((r, idx) => (
-                  <tr key={`${r.picklistId}_${r.sku}_${idx}`} className="hover:bg-surface-50 dark:hover:bg-surface-700/50">
+                  <tr key={`${r.source}_${r.picklistId}_${r.sku}_${idx}`} className="hover:bg-surface-50 dark:hover:bg-surface-700/50">
+                    <td className="text-xs whitespace-nowrap">
+                      <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider ${
+                        r.source === 'SAP'
+                          ? 'bg-purple-100 dark:bg-purple-950/70 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800'
+                          : 'bg-blue-100 dark:bg-blue-950/70 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800'
+                      }`}>
+                        {r.source === 'SAP' ? 'SAP Baseline' : 'DistroTrack'}
+                      </span>
+                    </td>
                     <td className="text-xs whitespace-nowrap">{r.date}</td>
                     <td className="text-xs font-mono font-medium text-primary-700 dark:text-primary-400">{r.picklistNumber}</td>
                     <td className="text-xs whitespace-nowrap">{r.routeName}</td>
@@ -332,7 +378,7 @@ export function ProductQuantityRegisterPage() {
               </tbody>
               <tfoot>
                 <tr className="bg-surface-100 dark:bg-surface-750 font-bold">
-                  <td colSpan={7} className="text-right text-xs">Total:</td>
+                  <td colSpan={8} className="text-right text-xs">Total:</td>
                   <td className="text-right text-xs font-bold">{summary.totalPicklistQty.toLocaleString()}</td>
                   <td className="text-right text-xs font-bold text-emerald-600">{summary.totalDeliveredQty.toLocaleString()}</td>
                   <td className="text-right text-xs font-bold text-rose-600">{summary.totalReturnedQty.toLocaleString()}</td>

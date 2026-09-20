@@ -1,23 +1,12 @@
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { RouterProvider } from 'react-router-dom';
 import { Toaster } from 'sonner';
+import { ThemeProvider } from '@/shared/theme/ThemeProvider';
 import { AuthProvider } from './AuthProvider';
 import { router } from './router';
+import { queryClient } from './queryClient';
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      retry: 1,
-      refetchOnWindowFocus: true, // Refetch immediately when worker/admin returns to the browser tab or wakes phone
-      refetchOnReconnect: true,   // Refetch immediately when internet reconnects
-      staleTime: 5000,            // 5s fresh window before background refetch
-      refetchInterval: 10000,     // Auto-poll every 10 seconds so worker phone and admin laptop stay in 100% real-time sync without manual refresh
-      refetchIntervalInBackground: false,
-    },
-  },
-});
-
-import { ThemeProvider } from '@/shared/theme/ThemeProvider';
+export { queryClient };
 
 export function App() {
   return (
@@ -31,3 +20,4 @@ export function App() {
     </QueryClientProvider>
   );
 }
+

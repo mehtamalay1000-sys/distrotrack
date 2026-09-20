@@ -10,8 +10,11 @@ import * as XLSX from 'xlsx';
 
 export interface SapUploadRow {
   sku: string;
-  stockQty: number;
+  stockQty?: number;
   rawName?: string;
+  productName?: string;
+  sapStock?: number;
+  uom?: string;
 }
 
 export interface ReconciledItem {
@@ -164,7 +167,6 @@ export async function getDistroTrackOperationalStock(sku: string): Promise<{
         let opening = 0;
         let inbound = 0;
         let delivered = 0;
-        let returned = 0;
         let damaged = 0;
         let adjustments = 0;
         let hasAuthoritativeOpeningOrInbound = false;
@@ -180,11 +182,16 @@ export async function getDistroTrackOperationalStock(sku: string): Promise<{
               inbound += q;
               hasAuthoritativeOpeningOrInbound = true;
               break;
-            case 'delivery_fulfilled':
+            case 'sap_sales_baseline':
+              // Stock out for pre-go-live SAP sales baseline
               delivered += q;
               break;
+            case 'route_load':
             case 'route_return':
-              returned += q;
+              // Location transfer between warehouse and vehicle: net 0 effect on total operational stock
+              break;
+            case 'delivery_fulfilled':
+              delivered += q;
               break;
             case 'damaged_transit':
             case 'damaged_warehouse':
@@ -194,13 +201,20 @@ export async function getDistroTrackOperationalStock(sku: string): Promise<{
               adjustments += (m.direction === 'in' ? q : -q);
               break;
             default:
-              if (m.to_location === 'warehouse') inbound += q;
-              else if (m.from_location === 'warehouse') delivered += q;
+              if (m.from_location === 'warehouse' && m.to_location === 'vehicle') {
+                // Location transfer
+              } else if (m.from_location === 'vehicle' && m.to_location === 'warehouse') {
+                // Location transfer
+              } else if (m.to_location === 'warehouse' && m.direction === 'in') {
+                inbound += q;
+              } else if (m.to_location === 'customer') {
+                delivered += q;
+              }
           }
         }
 
         if (hasAuthoritativeOpeningOrInbound) {
-          const calculatedStock = opening + inbound - delivered + returned - damaged + adjustments;
+          const calculatedStock = opening + inbound - delivered - damaged + adjustments;
           return { calculatedStock, isIncomplete: false };
         }
       }
@@ -215,7 +229,6 @@ export async function getDistroTrackOperationalStock(sku: string): Promise<{
     let opening = 0;
     let inbound = 0;
     let delivered = 0;
-    let returned = 0;
     let damaged = 0;
     let adjustments = 0;
     let hasAuthoritativeOpeningOrInbound = false;
@@ -231,11 +244,15 @@ export async function getDistroTrackOperationalStock(sku: string): Promise<{
           inbound += q;
           hasAuthoritativeOpeningOrInbound = true;
           break;
-        case 'delivery_fulfilled':
+        case 'sap_sales_baseline':
           delivered += q;
           break;
+        case 'route_load':
         case 'route_return':
-          returned += q;
+          // Location transfer
+          break;
+        case 'delivery_fulfilled':
+          delivered += q;
           break;
         case 'damaged_transit':
         case 'damaged_warehouse':
@@ -245,13 +262,20 @@ export async function getDistroTrackOperationalStock(sku: string): Promise<{
           adjustments += (m.direction === 'in' ? q : -q);
           break;
         default:
-          if (m.to_location === 'warehouse') inbound += q;
-          else if (m.from_location === 'warehouse') delivered += q;
+          if (m.from_location === 'warehouse' && m.to_location === 'vehicle') {
+            // Location transfer
+          } else if (m.from_location === 'vehicle' && m.to_location === 'warehouse') {
+            // Location transfer
+          } else if (m.to_location === 'warehouse' && m.direction === 'in') {
+            inbound += q;
+          } else if (m.to_location === 'customer') {
+            delivered += q;
+          }
       }
     }
 
     if (hasAuthoritativeOpeningOrInbound) {
-      const calculatedStock = opening + inbound - delivered + returned - damaged + adjustments;
+      const calculatedStock = opening + inbound - delivered - damaged + adjustments;
       return { calculatedStock, isIncomplete: false };
     }
   }
@@ -286,7 +310,7 @@ export async function getDistroTrackOperationalStock(sku: string): Promise<{
  */
 export async function performSapStockReconciliation(
   sapRows: SapUploadRow[],
-  period: string,
+  period: string = new Date().toISOString().slice(0, 7),
   fileName: string = 'sap_stock_upload.xlsx'
 ): Promise<ReconciliationResult> {
   const items: ReconciledItem[] = [];
@@ -300,6 +324,7 @@ export async function performSapStockReconciliation(
 
   for (const row of sapRows) {
     const sku = row.sku.trim();
+    const sapStock = Number(row.stockQty ?? row.sapStock ?? 0);
     const masterEntry = findProductMasterEntry(sku);
 
     if (!masterEntry) {
@@ -307,9 +332,9 @@ export async function performSapStockReconciliation(
       unmapped += 1;
       items.push({
         sku,
-        productName: row.rawName || 'UNMAPPED SKU',
-        uom: 'EA',
-        sapStock: row.stockQty,
+        productName: row.productName || row.rawName || 'UNMAPPED SKU',
+        uom: row.uom || 'EA',
+        sapStock,
         distrotrackStock: null,
         variance: null,
         status: 'UNMAPPED SKU',
@@ -318,8 +343,8 @@ export async function performSapStockReconciliation(
       continue;
     }
 
-    const officialName = masterEntry.name;
-    const uom = masterEntry.uom || 'EA';
+    const officialName = row.productName || masterEntry.name;
+    const uom = row.uom || masterEntry.uom || 'EA';
 
     const { calculatedStock, isIncomplete, notes } = await getDistroTrackOperationalStock(sku);
 
@@ -329,7 +354,7 @@ export async function performSapStockReconciliation(
         sku,
         productName: officialName,
         uom,
-        sapStock: row.stockQty,
+        sapStock,
         distrotrackStock: null,
         variance: null,
         status: 'INCOMPLETE DATA',
@@ -339,7 +364,7 @@ export async function performSapStockReconciliation(
     }
 
     // Variance = SAP Stock - DistroTrack Calculated Stock
-    const diff = row.stockQty - calculatedStock;
+    const diff = sapStock - calculatedStock;
     const isMatched = Math.abs(diff) < 0.001;
 
     if (isMatched) {
@@ -348,7 +373,7 @@ export async function performSapStockReconciliation(
         sku,
         productName: officialName,
         uom,
-        sapStock: row.stockQty,
+        sapStock,
         distrotrackStock: calculatedStock,
         variance: 0,
         status: 'MATCHED',
@@ -362,7 +387,7 @@ export async function performSapStockReconciliation(
         sku,
         productName: officialName,
         uom,
-        sapStock: row.stockQty,
+        sapStock,
         distrotrackStock: calculatedStock,
         variance: diff,
         status: 'VARIANCE',

@@ -1,11 +1,11 @@
 export type UserRole = 'owner' | 'worker' | 'master';
 
 export type WorkerStatus = 'active' | 'inactive';
-export type RouteStatus = 'active' | 'inactive' | 'completed';
+export type RouteStatus = 'active' | 'inactive' | 'completed' | 'archived';
 export type PartyStatus = 'active' | 'inactive';
 export type ProductStatus = 'active' | 'inactive';
 
-export type PicklistStatus = 'draft' | 'confirmed' | 'assigned' | 'in_progress' | 'completed';
+export type PicklistStatus = 'draft' | 'confirmed' | 'assigned' | 'in_progress' | 'pending_reconciliation' | 'completed';
 export type InvoiceStatus = 'pending' | 'delivered' | 'paid' | 'partial';
 export type DeliveryStatus = 'pending' | 'out_for_delivery' | 'delivered' | 'failed' | 'partial' | 'refused' | 'cancelled';
 export type PaymentMode = 'cash' | 'cheque' | 'credit' | 'upi';
@@ -25,6 +25,7 @@ export type FinancialReconciliationStatus = 'pending' | 'reconciled' | 'discrepa
 export type InventoryMovementType =
   | 'opening_balance'
   | 'purchase_inward'
+  | 'sap_sales_baseline'
   | 'route_load'
   | 'delivery_fulfilled'
   | 'route_return'
@@ -94,6 +95,46 @@ export interface Route {
   updated_at: string;
   // Joined
   worker?: Worker | null;
+}
+
+export interface RouteDeletePreview {
+  route_id: string;
+  route_code: string;
+  route_name: string;
+  assigned_worker_id: string | null;
+  assigned_worker_name?: string | null;
+  assignments_count: number;
+  picklists_count: number;
+  deliveries_count: number;
+  delivery_items_count: number;
+  payments_count: number;
+  expenses_count: number;
+  returns_count: number;
+  inventory_movements_count: number;
+  financial_records_count: number;
+  exceptions_count: number;
+  parties_unlinked_count: number;
+  has_pending_offline_mutations: boolean;
+  can_delete: boolean;
+  block_reason?: string | null;
+}
+
+export interface RouteHardDeleteResult {
+  success: boolean;
+  route_id: string;
+  route_code?: string;
+  route_name?: string;
+  picklists_deleted?: number;
+  deliveries_deleted?: number;
+  delivery_items_deleted?: number;
+  payments_deleted?: number;
+  expenses_deleted?: number;
+  returns_deleted?: number;
+  movements_deleted?: number;
+  exceptions_deleted?: number;
+  financial_records_deleted?: number;
+  parties_unlinked?: number;
+  message: string;
 }
 
 export interface Party {
@@ -323,6 +364,7 @@ export interface RouteStockItem {
   damaged_transit_qty: number;
   route_return_qty: number;
   expected_vehicle_qty: number;
+  vehicle_balance?: number;
 }
 
 export interface RouteStockCheck {
@@ -344,8 +386,10 @@ export interface RouteStockCheck {
 
 export interface RouteReturnItemInput {
   product_id: string;
+  sku?: string;
   returned_qty: number;
   damaged_warehouse_qty: number;
+  reason?: string;
   adjustment_qty?: number;
   adjustment_reason?: string;
 }
@@ -386,6 +430,9 @@ export interface Payment {
   invoice?: Invoice | null;
   picklist?: Picklist | null;
   route?: Route | null;
+  // Pending credit receivable attributes
+  is_pending_credit?: boolean;
+  days_outstanding?: number;
 }
 
 export interface SplitPaymentInput {
@@ -427,6 +474,9 @@ export interface FinancialSummary {
   // Supabase get_financial_summary RPC keys
   total_revenue?: number;
   total_collected?: number;
+  current_period_collected?: number;
+  prior_period_collected?: number;
+  credit_sales_created?: number;
   cash_collected?: number;
   upi_collected?: number;
   cheque_collected?: number;
@@ -437,6 +487,7 @@ export interface FinancialSummary {
   cash_expenses?: number;
   bank_expenses?: number;
   total_outstanding?: number;
+  customer_advance?: number;
   net_cash_deposit?: number;
   cash_discrepancy?: number;
 
@@ -447,6 +498,7 @@ export interface FinancialSummary {
   cheque_cleared?: number;
   cheque_pending?: number;
   credit_extended?: number;
+  pending_credit?: number;       // Migration 038: explicit pending credit (= total_credit)
   expenses?: number;
   net_cash?: number;
   contribution_before_cogs?: number;
@@ -701,6 +753,49 @@ export interface SapPurchaseImportItem {
   gr_doc_no: string | null;
   po_number: string | null;
   invoice_no: string | null;
+  item_no?: string | null;
+  idempotency_key: string;
+  movement_id: string | null;
+  status: 'created' | 'duplicate' | 'unmapped' | 'error';
+  notes?: string | null;
+  created_at: string;
+}
+
+export interface SapSalesImport {
+  id: string;
+  batch_ref: string;
+  file_name: string | null;
+  cutoff_date: string;
+  imported_at: string;
+  imported_by: string | null;
+  total_rows: number;
+  movements_created: number;
+  skipped_duplicate: number;
+  skipped_unmapped: number;
+  total_quantity: number;
+  total_net_amount: number;
+  notes?: string | null;
+  created_at: string;
+}
+
+export interface SapSalesImportItem {
+  id: string;
+  import_id: string;
+  invoice_no: string;
+  invoice_date: string | null;
+  item_seq: number;
+  sku: string;
+  product_id: string | null;
+  product_name: string;
+  cust_code: string | null;
+  cust_name: string | null;
+  quantity: number;
+  uom: string;
+  rate: number | null;
+  gross_val: number | null;
+  net_val: number | null;
+  is_cancellation: boolean;
+  reference_doc: string | null;
   idempotency_key: string;
   movement_id: string | null;
   status: 'created' | 'duplicate' | 'unmapped' | 'error';
@@ -726,6 +821,11 @@ export interface ProductQuantityRegisterRow {
   rate: number;
   mrp: number;
   salesAmount: number;
+  source?: 'SAP' | 'DistroTrack';
+  transactionType?: 'SAP Baseline Sale' | 'SAP Sales Cancellation' | 'DistroTrack Delivery';
+  invoiceNumber?: string;
+  customerCode?: string;
+  customerName?: string;
 }
 
 // ── Master Audit Log ────────────────────────────────────────────────
@@ -760,6 +860,29 @@ export interface ProductMrpHistory {
   import_reference: string | null;
   changed_by?: string | null;
   created_at: string;
+}
+
+// ── Historical Sales Products (Product Discovery Source) ───────────
+
+export interface HistoricalSalesProduct {
+  id: string;
+  sku: string;
+  product_name: string;
+  category?: string | null;
+  subcategory?: string | null;
+  hsn_code?: string | null;
+  uom?: string | null;
+  first_sale_date?: string | null;
+  latest_sale_date?: string | null;
+  total_historical_qty: number;
+  historical_invoice_count: number;
+  historical_row_count: number;
+  average_rate?: number | null;
+  latest_rate?: number | null;
+  source_file?: string | null;
+  import_hash?: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 // ── Database type for Supabase client ───────────────────────────────
@@ -800,9 +923,78 @@ export interface Database {
       sap_stock_reconciliation_items: { Row: SapStockReconciliationItem; Insert: Omit<SapStockReconciliationItem, 'id' | 'created_at'>; Update: Partial<SapStockReconciliationItem> };
       sap_purchase_imports: { Row: SapPurchaseImport; Insert: Omit<SapPurchaseImport, 'id' | 'created_at'>; Update: Partial<SapPurchaseImport> };
       sap_purchase_import_items: { Row: SapPurchaseImportItem; Insert: Omit<SapPurchaseImportItem, 'id' | 'created_at'>; Update: Partial<SapPurchaseImportItem> };
+      sap_sales_imports: { Row: SapSalesImport; Insert: Omit<SapSalesImport, 'id' | 'created_at'>; Update: Partial<SapSalesImport> };
+      sap_sales_import_items: { Row: SapSalesImportItem; Insert: Omit<SapSalesImportItem, 'id' | 'created_at'>; Update: Partial<SapSalesImportItem> };
+      historical_sales_products: { Row: HistoricalSalesProduct; Insert: Omit<HistoricalSalesProduct, 'id' | 'created_at' | 'updated_at'>; Update: Partial<HistoricalSalesProduct> };
     };
     Views: Record<string, never>;
-    Functions: Record<string, never>;
+    Functions: {
+      admin_get_reset_preview: {
+        Args: Record<string, never>;
+        Returns: {
+          live_operational_transactions_count: number;
+          can_reset: boolean;
+          block_reason: string | null;
+          live_breakdown: {
+            completed_deliveries: number;
+            collected_payments: number;
+            approved_expenses: number;
+            closed_routes: number;
+            operational_movements: number;
+          };
+          inventory: {
+            movements_count: number;
+            stock_exceptions_count: number;
+            vehicle_stock_records_count: number;
+            reconciliations_count: number;
+          };
+          sap_sales: {
+            batches_count: number;
+            items_count: number;
+            baseline_movements_count: number;
+            total_quantity: number;
+            total_net_amount: number;
+          };
+          timestamp: string;
+        };
+      };
+      admin_reset_test_inventory: {
+        Args: Record<string, never>;
+        Returns: {
+          success: boolean;
+          movements_deleted: number;
+          exceptions_deleted: number;
+          reconciliations_deleted: number;
+          live_operational_transactions: number;
+          timestamp: string;
+        };
+      };
+      admin_clear_inventory: {
+        Args: Record<string, never>;
+        Returns: {
+          success: boolean;
+          movements_deleted: number;
+          exceptions_deleted: number;
+          reconciliations_deleted: number;
+          live_operational_transactions: number;
+          timestamp: string;
+        };
+      };
+      admin_delete_sap_sales_history: {
+        Args: {
+          p_import_id?: string | null;
+        };
+        Returns: {
+          success: boolean;
+          batches_deleted: number;
+          items_deleted: number;
+          movements_deleted: number;
+          total_quantity: number;
+          total_net_amount: number;
+          timestamp: string;
+        };
+      };
+    };
     Enums: Record<string, never>;
   };
 }

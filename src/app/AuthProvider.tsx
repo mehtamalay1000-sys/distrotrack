@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState, useCallback, type ReactNode } from 'react';
 import type { Session, User } from '@supabase/supabase-js';
 import { supabase } from '@/lib/supabase';
+import { queryClient } from '@/app/queryClient';
 import type { Profile, UserRole, Worker, PinUser } from '@/lib/database.types';
 
 interface AuthState {
@@ -132,6 +133,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (!mounted) return;
 
       if (event === 'SIGNED_OUT' || !newSession?.user) {
+        // Clear ALL React Query cache on sign-out to prevent previous user's
+        // business data from leaking to the next user/role that logs in.
+        queryClient.clear();
         setSession(null);
         setProfile(null);
         setLoading(false);
@@ -360,6 +364,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (session?.user && profile) {
       void logEvent(session.user.id, profile.full_name, profile.role, 'auth', 'logout', 'success', 'User signed out');
     }
+
+    // Clear ALL React Query cache before signing out so the next user/role
+    // cannot see cached business data from the previous session.
+    queryClient.clear();
 
     try {
       await supabase.auth.signOut();

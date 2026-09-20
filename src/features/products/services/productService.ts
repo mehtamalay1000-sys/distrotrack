@@ -1,6 +1,6 @@
 import { supabase } from '@/lib/supabase';
 import { mockStore } from '@/lib/mockStore';
-import { SAP_PRODUCT_MASTER, findProductMasterEntry, findProductMasterByDescription, registerProductMasterEntry, updateProductMasterMrp } from '@/features/products/data/productMaster';
+import { SAP_PRODUCT_MASTER, findProductMasterEntry, findProductMasterByDescription, registerProductMasterEntry, updateProductMasterMrp, resetProductMasterMemory } from '@/features/products/data/productMaster';
 import type { Product, ProductMrpHistory } from '@/lib/database.types';
 
 export interface ProductFilterOptions {
@@ -25,26 +25,19 @@ export async function getProducts(filter?: ProductFilterOptions): Promise<Produc
     }
 
     const { data, error } = await query;
-    if (error || !data || data.length === 0) {
+    if (error || !data) {
       allProds = mockStore.getProducts();
     } else {
       const filtered = (data as Product[]).filter(p => p && p.name && !p.name.includes('ZTIN:') && !p.name.includes('TAX Invoice'));
-      allProds = filtered.length > 0 ? filtered : mockStore.getProducts();
+      allProds = filtered;
     }
   } catch {
     allProds = mockStore.getProducts();
   }
 
-  // If mockStore has SAP master items not yet in DB, merge them
-  const existingSkus = new Set(allProds.map(p => p.sku.toUpperCase()));
-  const mockProds = mockStore.getProducts();
-  if (mockProds.length > allProds.length) {
-    for (const mp of mockProds) {
-      if (!existingSkus.has(mp.sku.toUpperCase())) {
-        allProds.push(mp);
-        existingSkus.add(mp.sku.toUpperCase());
-      }
-    }
+  // Fallback to mockStore only if Supabase returned nothing and mockStore has products
+  if (allProds.length === 0) {
+    allProds = mockStore.getProducts();
   }
 
   // Client-side filtering
@@ -160,37 +153,36 @@ export async function lookupProductBySku(sku: string): Promise<Product | null> {
   );
   if (found) return found;
 
-  // 3. Fallback: check SAP Product Master catalog directly
-  const masterEntry = findProductMasterEntry(normalizedSku);
-  if (masterEntry) {
-    const prod: Product = {
-      id: `prod-sap-${masterEntry.sku}`,
-      sku: masterEntry.sku,
-      name: masterEntry.name,
-      category: masterEntry.category,
-      mrp: masterEntry.mrp,
-      rate: masterEntry.mrp,
-      unit: masterEntry.unit,
-      status: 'active',
-      brand: masterEntry.brand,
-      uom: masterEntry.uom,
-      active: masterEntry.active,
-      sub_category: masterEntry.subCategory,
-      sub_brand: masterEntry.subBrand,
-      variant: masterEntry.variant,
-      ppg: masterEntry.ppg,
-      ppg_description: masterEntry.ppgDescription,
-      material_group: masterEntry.materialGroup,
-      prod_hierarchy: masterEntry.prodHierarchy,
-      is_sap_master: true,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    };
-    mockStore.saveProduct(prod);
-    return prod;
+  return null;
+}
+
+/**
+ * Cleans all current product records from the database and local memory stores.
+ * Strictly requires explicit manualConfirmation flag to prevent any automatic deletion.
+ */
+export async function clearAllOperationalProducts(manualConfirmation?: boolean): Promise<{ count: number }> {
+  if (!manualConfirmation) {
+    console.warn('[GUARD] clearAllOperationalProducts blocked: explicit manualConfirmation required to delete inventory/products');
+    return { count: 0 };
   }
 
-  return null;
+  try {
+    const { error } = await supabase.rpc('clean_all_operational_products');
+    if (error) {
+      await supabase.from('inventory_movements').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+      await supabase.from('delivery_items').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+      await supabase.from('deliveries').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+      await supabase.from('picklist_items').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+      await supabase.from('picklists').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+      await supabase.from('products').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+    }
+  } catch {
+    // Supabase query optional
+  }
+  const prevCount = mockStore.getProducts().length;
+  mockStore.resetToDefaults();
+  resetProductMasterMemory();
+  return { count: prevCount };
 }
 
 /**
@@ -357,6 +349,8 @@ export interface ProductMonthlyStat {
   totalFreeUnits: number;
   totalRevenue: number;
   percentageShare: number;
+  sapUnits?: number;
+  distrotrackUnits?: number;
 }
 
 export interface RouteSalesItem {
@@ -375,17 +369,27 @@ export interface RouteSalesItem {
   amount: number;
 }
 
-/**
- * Aggregates monthly sales stats for all products for a given YYYY-MM month string.
- * Also identifies the Highest Selling Product of the month.
- */
-export async function getProductMonthlyAnalytics(yearMonthStr: string): Promise<{
+export interface ProductMonthlyAnalyticsResult {
   productStats: ProductMonthlyStat[];
   highestSellingProduct: ProductMonthlyStat | null;
   totalUnitsSold: number;
   totalFreeUnits: number;
   totalRevenue: number;
-}> {
+  sapBaselineRevenue: number;
+  sapBaselineUnits: number;
+  distrotrackRevenue: number;
+  distrotrackUnits: number;
+  totalTransactions: number;
+  uniqueCustomers: number;
+  uniqueSkus: number;
+}
+
+/**
+ * Aggregates monthly sales stats for all products for a given YYYY-MM month string.
+ * Combines SAP baseline sales and DistroTrack operational sales without double-counting.
+ * Also identifies the Highest Selling Product of the month.
+ */
+export async function getProductMonthlyAnalytics(yearMonthStr: string): Promise<ProductMonthlyAnalyticsResult> {
   const products = await getProducts();
 
   let picklistsData: Array<{ id: string; date: string }> = [];
@@ -402,22 +406,33 @@ export async function getProductMonthlyAnalytics(yearMonthStr: string): Promise<
     amount: number;
   }> = [];
 
-  // 1. Fetch real picklists and items from Supabase
+  let sapSalesItemsData: any[] = [];
+  let sapImportsData: any[] = [];
+
+  let isAnalyticsSupabaseSuccess = false;
+
+  // 1. Fetch real picklists, items, and SAP baseline sales from Supabase
   try {
-    const { data: dbPicklists } = await supabase.from('picklists').select('id, date');
-    if (dbPicklists && dbPicklists.length > 0) {
-      picklistsData = dbPicklists;
-      const { data: dbItems } = await supabase.from('picklist_items').select('*');
-      if (dbItems && dbItems.length > 0) {
-        picklistItemsData = dbItems as any;
-      }
+    const [dbPicklistsRes, dbItemsRes, dbSapRes, dbImpRes] = await Promise.all([
+      supabase.from('picklists').select('id, date'),
+      supabase.from('picklist_items').select('*'),
+      supabase.from('sap_sales_import_items').select('*'),
+      supabase.from('sap_sales_imports').select('*'),
+    ]);
+
+    if (!dbPicklistsRes.error && !dbItemsRes.error && !dbSapRes.error && !dbImpRes.error) {
+      isAnalyticsSupabaseSuccess = true;
+      picklistsData = dbPicklistsRes.data || [];
+      picklistItemsData = (dbItemsRes.data as any) || [];
+      sapSalesItemsData = dbSapRes.data || [];
+      sapImportsData = dbImpRes.data || [];
     }
   } catch (err) {
     console.error('Error fetching analytics from Supabase:', err);
   }
 
   // 2. Fallback to mockStore if Supabase has no picklist_items (with strict deduplication)
-  if (picklistItemsData.length === 0) {
+  if (!isAnalyticsSupabaseSuccess || picklistItemsData.length === 0) {
     const mockPicklists = mockStore.getPicklists();
     picklistsData = mockPicklists.map((pl) => ({ id: pl.id, date: pl.date }));
 
@@ -437,28 +452,136 @@ export async function getProductMonthlyAnalytics(yearMonthStr: string): Promise<
     picklistItemsData = deduped as any;
   }
 
+  // Fallback to mockStore for SAP baseline sales ONLY if Supabase query failed
+  if (!isAnalyticsSupabaseSuccess) {
+    sapSalesItemsData = mockStore.getSapSalesImportItems();
+    sapImportsData = mockStore.getSapSalesImports();
+  }
+
+  // Determine latest cutoff date for this month if available
+  let latestCutoffDate: string | null = null;
+  for (const imp of sapImportsData) {
+    if (imp.cutoff_date && imp.cutoff_date.startsWith(yearMonthStr)) {
+      if (!latestCutoffDate || imp.cutoff_date > latestCutoffDate) {
+        latestCutoffDate = imp.cutoff_date;
+      }
+    }
+  }
+
   const picklistDateMap = new Map<string, string>();
   picklistsData.forEach((pl) => {
     if (pl.date) picklistDateMap.set(pl.id, pl.date);
   });
 
-  const statMap = new Map<string, { paid: number; free: number; rev: number; name: string }>();
+  const statMap = new Map<string, {
+    paid: number;
+    free: number;
+    rev: number;
+    name: string;
+    sapUnits: number;
+    distrotrackUnits: number;
+  }>();
 
-  picklistItemsData.forEach((item) => {
+  let sapBaselineRevenue = 0;
+  let sapBaselineUnits = 0;
+  let distrotrackRevenue = 0;
+  let distrotrackUnits = 0;
+  let sapTransactions = 0;
+  let distroTransactions = 0;
+
+  const uniqueCustomers = new Set<string>();
+  const uniqueSkus = new Set<string>();
+
+  // A. Process SAP baseline sales for the selected month
+  for (const sItem of sapSalesItemsData) {
+    const invDate = sItem.invoice_date || (sItem.created_at ? sItem.created_at.split('T')[0] : '');
+    if (!invDate.startsWith(yearMonthStr)) continue;
+
+    const sku = (sItem.sku || '').trim().toUpperCase();
+    if (!sku) continue;
+
+    const qty = Number(sItem.quantity || 0);
+    const isCancel = Boolean(sItem.is_cancellation);
+    const netUnits = isCancel ? -qty : qty;
+    const netVal = Number(
+      sItem.net_val !== null && sItem.net_val !== undefined
+        ? sItem.net_val
+        : (isCancel ? -qty : qty) * Number(sItem.rate || 0)
+    );
+
+    sapBaselineUnits += netUnits;
+    sapBaselineRevenue += netVal;
+    sapTransactions += 1;
+
+    if (sItem.cust_code || sItem.cust_name) {
+      uniqueCustomers.add(sItem.cust_code || sItem.cust_name);
+    }
+    uniqueSkus.add(sku);
+
+    if (!statMap.has(sku)) {
+      const master = findProductMasterEntry(sku);
+      statMap.set(sku, {
+        paid: 0,
+        free: 0,
+        rev: 0,
+        name: master?.name || sItem.product_name || `Product ${sku}`,
+        sapUnits: 0,
+        distrotrackUnits: 0,
+      });
+    }
+
+    const st = statMap.get(sku)!;
+    st.paid += netUnits;
+    st.rev += netVal;
+    st.sapUnits += netUnits;
+  }
+
+  // B. Process DistroTrack operational picklist items for the selected month
+  // Non-overlapping guarantee: picklists dated after latest cutoff date (or all if no cutoff)
+  for (const item of picklistItemsData) {
     const plDate = picklistDateMap.get(item.picklist_id);
     if (plDate && plDate.startsWith(yearMonthStr)) {
+      // If cutoff date exists for this month, operational transactions must be after cutoff
+      if (latestCutoffDate && plDate <= latestCutoffDate) {
+        // Prevent double counting of pre-go-live transactions
+        continue;
+      }
+
       const sku = (item.sku || '').trim().toUpperCase();
-      if (!sku) return;
+      if (!sku) continue;
+
+      const qty = Number(item.quantity || 0);
+      const freeQty = Number(item.free_quantity || 0);
+      const rev = Number(item.amount || 0);
+
+      distrotrackUnits += qty;
+      distrotrackRevenue += rev;
+      distroTransactions += 1;
+
+      if (item.party_id) {
+        uniqueCustomers.add(item.party_id);
+      }
+      uniqueSkus.add(sku);
 
       if (!statMap.has(sku)) {
-        statMap.set(sku, { paid: 0, free: 0, rev: 0, name: item.product_name || '' });
+        const master = findProductMasterEntry(sku);
+        statMap.set(sku, {
+          paid: 0,
+          free: 0,
+          rev: 0,
+          name: master?.name || item.product_name || `Product ${sku}`,
+          sapUnits: 0,
+          distrotrackUnits: 0,
+        });
       }
+
       const st = statMap.get(sku)!;
-      st.paid += Number(item.quantity || 0);
-      st.free += Number(item.free_quantity || 0);
-      st.rev += Number(item.amount || 0);
+      st.paid += qty;
+      st.free += freeQty;
+      st.rev += rev;
+      st.distrotrackUnits += qty;
     }
-  });
+  }
 
   let grandTotalUnits = 0;
   let grandTotalFree = 0;
@@ -473,7 +596,7 @@ export async function getProductMonthlyAnalytics(yearMonthStr: string): Promise<
   const existingSkus = new Set(products.map((p) => p.sku.toUpperCase()));
   const allProducts = [...products];
 
-  // Include any items sold in picklists that aren't yet in product master
+  // Include any items sold that aren't yet in product master
   statMap.forEach((val, sku) => {
     if (!existingSkus.has(sku)) {
       allProducts.push({
@@ -492,7 +615,14 @@ export async function getProductMonthlyAnalytics(yearMonthStr: string): Promise<
   });
 
   const productStats: ProductMonthlyStat[] = allProducts.map((prod) => {
-    const st = statMap.get(prod.sku.toUpperCase()) || { paid: 0, free: 0, rev: 0, name: prod.name };
+    const st = statMap.get(prod.sku.toUpperCase()) || {
+      paid: 0,
+      free: 0,
+      rev: 0,
+      name: prod.name,
+      sapUnits: 0,
+      distrotrackUnits: 0,
+    };
     const share = grandTotalRevenue > 0 ? (st.rev / grandTotalRevenue) * 100 : 0;
     return {
       sku: prod.sku,
@@ -504,6 +634,8 @@ export async function getProductMonthlyAnalytics(yearMonthStr: string): Promise<
       totalFreeUnits: st.free,
       totalRevenue: st.rev,
       percentageShare: Math.round(share * 10) / 10,
+      sapUnits: st.sapUnits,
+      distrotrackUnits: st.distrotrackUnits,
     };
   });
 
@@ -518,6 +650,13 @@ export async function getProductMonthlyAnalytics(yearMonthStr: string): Promise<
     totalUnitsSold: grandTotalUnits,
     totalFreeUnits: grandTotalFree,
     totalRevenue: grandTotalRevenue,
+    sapBaselineRevenue,
+    sapBaselineUnits,
+    distrotrackRevenue,
+    distrotrackUnits,
+    totalTransactions: sapTransactions + distroTransactions,
+    uniqueCustomers: uniqueCustomers.size,
+    uniqueSkus: uniqueSkus.size,
   };
 }
 

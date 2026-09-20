@@ -1,12 +1,14 @@
 import { useState } from 'react';
 import { useAuth } from '@/app/AuthProvider';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { QK } from '@/lib/queryKeys';
 import { toast } from 'sonner';
 import {
   Plus, CreditCard, DollarSign, Search, Filter, CheckCircle2,
-  Clock, ArrowUpRight, ArrowDownRight, Loader2, X, Wifi,
+  Clock, ArrowUpRight, ArrowDownRight, Loader2, X, Wifi, Check, Bell,
 } from 'lucide-react';
 import { getWorkerPayments, createPayment } from '@/features/payments/services/paymentService';
+import { addNotification } from '@/features/notifications/services/notificationService';
 import { getParties } from '@/features/parties/services/partyService';
 import { getRoutes } from '@/features/routes/services/routeService';
 import { formatCurrency, formatDate } from '@/shared/utils/format';
@@ -29,6 +31,7 @@ export function WorkerPaymentsPage() {
 
   const [form, setForm] = useState({
     party_id: '',
+    delivery_id: '',
     amount: 0,
     payment_mode: 'cash' as PaymentMode,
     cheque_number: '',
@@ -68,6 +71,9 @@ export function WorkerPaymentsPage() {
       qc.invalidateQueries({ queryKey: ['worker-payments'] });
       qc.invalidateQueries({ queryKey: ['worker-performance-metrics'] });
       qc.invalidateQueries({ queryKey: ['payments'] });
+      // Propagate to Master Command Center
+      qc.invalidateQueries({ queryKey: QK.masterOperations });
+      qc.invalidateQueries({ queryKey: QK.payments });
       toast.success('Payment collection recorded');
       closeModal();
     },
@@ -77,6 +83,7 @@ export function WorkerPaymentsPage() {
   function openCreate() {
     setForm({
       party_id: '',
+      delivery_id: '',
       amount: 0,
       payment_mode: 'cash',
       cheque_number: '',
@@ -391,17 +398,62 @@ export function WorkerPaymentsPage() {
                   </div>
                 </div>
 
-                <div className="text-right flex-shrink-0 ml-2">
-                  <div
-                    className={`text-xs font-black ${
-                      isPaid ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'
-                    }`}
-                  >
-                    {formatCurrency(p.amount)}
+                <div className="text-right flex-shrink-0 ml-2 flex flex-col items-end gap-1">
+                  <div>
+                    <div
+                      className={`text-xs font-black ${
+                        isPaid ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'
+                      }`}
+                    >
+                      {formatCurrency(p.amount)}
+                    </div>
+                    <div className="text-[9px] font-bold text-surface-400 uppercase">
+                      {isPaid ? p.payment_mode : 'Credit / Udhar'}
+                    </div>
                   </div>
-                  <div className="text-[9px] font-bold text-surface-400 uppercase">
-                    {isPaid ? p.payment_mode : 'Credit / Udhar'}
-                  </div>
+                  {!isPaid && (
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={() => {
+                          try {
+                            addNotification({
+                              recipient_role: 'admin',
+                              title: 'Payment Reminder from Salesman',
+                              message: `${profile?.full_name || 'Salesman'} sent a reminder: Pending credit payment of ${formatCurrency(p.amount)} for ${p.party?.name || 'Customer'} (Invoice: ${p.invoice?.invoice_number || (p as any).invoice_number || 'N/A'}). Ready for admin verification/completion.`,
+                              type: 'payment',
+                              link: '/admin/payments',
+                            });
+                            toast.success(`Admin notified for ${p.party?.name || 'Customer'}!`);
+                          } catch {
+                            toast.error('Failed to notify admin');
+                          }
+                        }}
+                        className="p-1 rounded-lg border border-surface-200 dark:border-surface-700 bg-surface-50 dark:bg-surface-800 text-surface-600 dark:text-surface-300 hover:text-blue-600 hover:border-blue-400 transition-colors cursor-pointer"
+                        title="Inform Admin about this credit payment"
+                      >
+                        <Bell className="h-3 w-3" />
+                      </button>
+                      <button
+                        onClick={() => {
+                          setForm({
+                            party_id: p.party_id,
+                            delivery_id: p.delivery_id || '',
+                            amount: p.amount,
+                            payment_mode: 'cash',
+                            cheque_number: '',
+                            cheque_date: '',
+                            cheque_bank: '',
+                            notes: `Credit collected by worker for ${p.party?.name || 'Customer'}`,
+                          });
+                          setModalOpen(true);
+                        }}
+                        className="px-2 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white text-[10px] font-bold flex items-center gap-1 cursor-pointer shadow-xs transition-colors"
+                        title="Collect and record payment"
+                      >
+                        <Check className="h-3 w-3" /> Collect
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
             );

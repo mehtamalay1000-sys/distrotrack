@@ -3,6 +3,7 @@ import { mockStore } from '@/lib/mockStore';
 import type { ParsedPicklist, MatchResult } from '../parsers/types';
 import { upsertPartyByCode } from '@/features/parties/services/partyService';
 import { lookupProductBySku, upsertProductBySku } from '@/features/products/services/productService';
+import { resolveCanonicalProductIdentity } from '@/features/products/services/skuResolutionService';
 import { validateProductRow } from '../parsers/helpers';
 import type { Picklist } from '@/lib/database.types';
 import { addNotification } from '@/features/notifications/services/notificationService';
@@ -206,8 +207,18 @@ export async function confirmImportToDatabase(
   }
 
   // 3. Process Parties & Products & Deliveries
+  const processedBatchInvoiceNumbers = new Set<string>();
   for (const pair of matchResult.pairs) {
     if (!pair.partyCode) continue;
+
+    if (pair.invoice?.invoiceNumber) {
+      const normNo = pair.invoice.invoiceNumber.trim().toUpperCase();
+      if (processedBatchInvoiceNumbers.has(normNo)) {
+        console.warn(`[IMPORT] Invoice ${normNo} already processed in current batch — skipping duplicate.`);
+        continue;
+      }
+      processedBatchInvoiceNumbers.add(normNo);
+    }
 
     const party = await upsertPartyByCode(pair.partyCode, pair.partyName, routeId || undefined);
 
@@ -218,13 +229,69 @@ export async function confirmImportToDatabase(
         const cleanInvNo = pair.invoice.invoiceNumber.trim();
         const { data: existingInvoice } = await supabase
           .from('invoices')
-          .select('id, invoice_number')
+          .select('id, invoice_number, net_amount, total_amount')
           .eq('invoice_number', cleanInvNo)
           .maybeSingle();
 
         if (existingInvoice) {
-          console.warn(`[IMPORT] Skipping duplicate invoice: ${cleanInvNo} already exists (id: ${existingInvoice.id})`);
+          console.warn(`[IMPORT] Existing invoice found: ${cleanInvNo} (id: ${existingInvoice.id})`);
           invoiceId = existingInvoice.id;
+          // If incoming parsed invoice has authoritative non-zero amount and existing record had 0 or different amount, update it
+          if (pair.invoice.netAmount > 0 && (Number(existingInvoice.net_amount) === 0 || Math.abs(Number(existingInvoice.net_amount) - pair.invoice.netAmount) > 0.01)) {
+            await supabase
+              .from('invoices')
+              .update({
+                net_amount: pair.invoice.netAmount,
+                total_amount: pair.invoice.totalAmount > 0 ? pair.invoice.totalAmount : pair.invoice.netAmount,
+                tax_amount: pair.invoice.taxAmount,
+              })
+              .eq('id', existingInvoice.id);
+          }
+
+          // Check if existing invoice is missing invoice_items
+          const { count: invItemCount } = await supabase
+            .from('invoice_items')
+            .select('*', { count: 'exact', head: true })
+            .eq('invoice_id', existingInvoice.id);
+
+          if ((invItemCount || 0) === 0 && pair.invoice.items && pair.invoice.items.length > 0) {
+            for (const item of pair.invoice.items) {
+              const validationError = validateProductRow({
+                sku: item.sku,
+                productName: item.productName,
+                mrp: item.mrp,
+                rate: item.rate,
+                quantity: item.quantity,
+                amount: item.amount,
+              });
+              if (validationError) {
+                console.warn(`[IMPORT] Skipping invalid invoice item: ${validationError}`, item);
+                continue;
+              }
+
+              const resolved = resolveCanonicalProductIdentity(item.sku, item.productName, item.rate || item.mrp);
+              const finalSku = resolved.isCanonical && resolved.canonicalSku ? resolved.canonicalSku : item.sku;
+              const finalName = resolved.isCanonical && resolved.officialName ? resolved.officialName : item.productName;
+
+              let product = await lookupProductBySku(finalSku);
+              if (!product) {
+                product = await upsertProductBySku(finalSku, finalName, item.mrp, item.rate);
+              }
+
+              await supabase.from('invoice_items').insert({
+                invoice_id: invoiceId,
+                product_id: product.id,
+                sku: finalSku,
+                product_name: finalName,
+                quantity: item.quantity,
+                free_quantity: item.freeQuantity || 0,
+                mrp: item.mrp,
+                rate: item.rate,
+                amount: item.amount,
+                tax_amount: item.taxAmount,
+              });
+            }
+          }
         } else {
           const { data: invRecord, error: invError } = await supabase
             .from('invoices')
@@ -263,21 +330,25 @@ export async function confirmImportToDatabase(
                 continue;
               }
 
+              const resolved = resolveCanonicalProductIdentity(item.sku, item.productName, item.rate || item.mrp);
+              const finalSku = resolved.isCanonical && resolved.canonicalSku ? resolved.canonicalSku : item.sku;
+              const finalName = resolved.isCanonical && resolved.officialName ? resolved.officialName : item.productName;
+
               // Lookup-first: find existing product by SKU, or create if validated
-              let product = await lookupProductBySku(item.sku);
+              let product = await lookupProductBySku(finalSku);
               if (product) {
-                console.log(`[IMPORT] Invoice item: SKU ${item.sku} → matched Product Master "${product.name}"`);
+                console.log(`[IMPORT] Invoice item: SKU ${finalSku} → matched Product Master "${product.name}"`);
               } else {
-                console.log(`[IMPORT] Invoice item: SKU ${item.sku} → not in master, creating new product "${item.productName}"`);
-                product = await upsertProductBySku(item.sku, item.productName, item.mrp, item.rate);
+                console.log(`[IMPORT] Invoice item: SKU ${finalSku} → not in master, creating new product "${finalName}"`);
+                product = await upsertProductBySku(finalSku, finalName, item.mrp, item.rate);
               }
 
               // Store document-specific MRP/rate/free_quantity on the line item, NOT on the product master
               await supabase.from('invoice_items').insert({
                 invoice_id: invoiceId,
                 product_id: product.id,
-                sku: item.sku,
-                product_name: item.productName,
+                sku: finalSku,
+                product_name: finalName,
                 quantity: item.quantity,
                 free_quantity: item.freeQuantity || 0,
                 mrp: item.mrp,
@@ -314,13 +385,17 @@ export async function confirmImportToDatabase(
           continue;
         }
 
+        const resolved = resolveCanonicalProductIdentity(item.sku, item.productName, item.rate);
+        const finalSku = resolved.isCanonical && resolved.canonicalSku ? resolved.canonicalSku : item.sku;
+        const finalName = resolved.isCanonical && resolved.officialName ? resolved.officialName : item.productName;
+
         // Lookup-first: find existing product by SKU, or create if validated
-        let product = await lookupProductBySku(item.sku);
+        let product = await lookupProductBySku(finalSku);
         if (product) {
-          console.log(`[IMPORT] Picklist item: SKU ${item.sku} → matched Product Master "${product.name}"`);
+          console.log(`[IMPORT] Picklist item: SKU ${finalSku} → matched Product Master "${product.name}"`);
         } else {
-          console.log(`[IMPORT] Picklist item: SKU ${item.sku} → not in master, creating new product "${item.productName}"`);
-          product = await upsertProductBySku(item.sku, item.productName, 0, item.rate);
+          console.log(`[IMPORT] Picklist item: SKU ${finalSku} → not in master, creating new product "${finalName}"`);
+          product = await upsertProductBySku(finalSku, finalName, 0, item.rate);
         }
 
         // Store document-specific rate/qty/free_quantity/amount on the line item
@@ -329,8 +404,8 @@ export async function confirmImportToDatabase(
             picklist_id: picklistRecord.id,
             party_id: party.id,
             product_id: product.id,
-            sku: item.sku,
-            product_name: item.productName,
+            sku: finalSku,
+            product_name: finalName,
             quantity: item.quantity,
             free_quantity: item.freeQuantity || 0,
             rate: item.rate,
@@ -343,8 +418,8 @@ export async function confirmImportToDatabase(
           picklist_id: picklistRecord.id,
           party_id: party.id,
           product_id: product.id,
-          sku: item.sku,
-          product_name: item.productName,
+          sku: finalSku,
+          product_name: finalName,
           quantity: item.quantity,
           free_quantity: item.freeQuantity || 0,
           rate: item.rate,
@@ -425,22 +500,38 @@ export async function confirmImportToDatabase(
 
     const targetDelId = deliveryId || mockDel.id;
 
-    // ── Delivery Items: ONLY insert if this is a NEW delivery ────────
-    // If the delivery already existed, delivery_items already exist.
-    // Re-inserting would duplicate line items for the delivery.
-    if (!isExistingDelivery && targetDelId) {
+    // ── Delivery Items: Insert if delivery currently has 0 line items ────────
+    // If delivery items already exist, do not duplicate. But if 0 exist, populate them.
+    let existingItemCount = 0;
+    if (deliveryId) {
+      const { count } = await supabase
+        .from('delivery_items')
+        .select('*', { count: 'exact', head: true })
+        .eq('delivery_id', deliveryId);
+      existingItemCount = count || 0;
+    }
+
+    if ((!isExistingDelivery || existingItemCount === 0) && targetDelId) {
       const sourceItems = (pair.invoice?.items && pair.invoice.items.length > 0)
         ? pair.invoice.items
         : (pair.picklistParty?.items || []);
 
       for (const item of sourceItems) {
-        let prod = await lookupProductBySku(item.sku);
+        const resolved = resolveCanonicalProductIdentity(item.sku, item.productName, item.rate);
+        const finalSku = resolved.isCanonical && resolved.canonicalSku ? resolved.canonicalSku : item.sku;
+        const finalName = resolved.isCanonical && resolved.officialName ? resolved.officialName : item.productName;
+
+        let prod = await lookupProductBySku(finalSku);
+        if (!prod && resolved.isCanonical && finalSku) {
+          prod = await upsertProductBySku(finalSku, finalName, resolved.mrp || item.rate, item.rate);
+        }
+
         try {
           await supabase.from('delivery_items').insert({
             delivery_id: targetDelId,
             product_id: prod?.id || null,
-            sku: item.sku,
-            product_name: item.productName,
+            sku: finalSku,
+            product_name: finalName,
             ordered_qty: item.quantity,
             delivered_qty: 0,
             delivered_free_qty: 0,
@@ -458,8 +549,8 @@ export async function confirmImportToDatabase(
         mockStore.saveDeliveryItem({
           delivery_id: targetDelId,
           product_id: prod?.id || null,
-          sku: item.sku,
-          product_name: item.productName,
+          sku: finalSku,
+          product_name: finalName,
           ordered_qty: item.quantity,
           delivered_qty: 0,
           delivered_free_qty: 0,

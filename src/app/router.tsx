@@ -14,6 +14,7 @@ import { ProductsPage } from '@/features/products/pages/ProductsPage';
 import { ProductQuantityRegisterPage } from '@/features/products/pages/ProductQuantityRegisterPage';
 import { SapReconciliationPage } from '@/features/products/pages/SapReconciliationPage';
 import { ImportNewStockPage } from '@/features/inventory/pages/ImportNewStockPage';
+import { ImportSapSalesPage } from '@/features/inventory/pages/ImportSapSalesPage';
 import { ExpensesPage } from '@/features/expenses/pages/ExpensesPage';
 import { ImportPage } from '@/features/import/pages/ImportPage';
 import { MasterDataPage } from '@/features/import/pages/MasterDataPage';
@@ -39,6 +40,12 @@ import { MasterWorkerMonitorPage } from '@/features/master/pages/MasterWorkerMon
 import { MasterSystemPage } from '@/features/master/pages/MasterSystemPage';
 import { MasterHistoryPage } from '@/features/master/pages/MasterHistoryPage';
 import { MasterReportsPage } from '@/features/master/pages/MasterReportsPage';
+// New Command Center pages
+import { MasterOperationsPage } from '@/features/master/pages/MasterOperationsPage';
+import { MasterFinancialPage } from '@/features/master/pages/MasterFinancialPage';
+import { MasterInventoryPage } from '@/features/master/pages/MasterInventoryPage';
+import { MasterSapImportsPage } from '@/features/master/pages/MasterSapImportsPage';
+import { MasterExceptionsPage } from '@/features/master/pages/MasterExceptionsPage';
 
 export const router = createBrowserRouter([
   // Public
@@ -63,11 +70,14 @@ export const router = createBrowserRouter([
               { path: '/admin/routes', element: <RoutesPage /> },
               { path: '/admin/parties', element: <PartiesPage /> },
               { path: '/admin/products', element: <ProductsPage /> },
+              { path: '/admin/inventory', element: <ProductsPage defaultTab="inventory" /> },
               { path: '/admin/inventory/import-stock', element: <ImportNewStockPage /> },
+              { path: '/admin/inventory/import-sales', element: <ImportSapSalesPage /> },
               { path: '/admin/inventory/import', element: <ImportNewStockPage /> },
               { path: '/admin/inventory/register', element: <ProductQuantityRegisterPage /> },
               { path: '/admin/inventory/reconciliation', element: <SapReconciliationPage /> },
               { path: '/admin/products/import-stock', element: <ImportNewStockPage /> },
+              { path: '/admin/products/import-sales', element: <ImportSapSalesPage /> },
               { path: '/admin/products/register', element: <ProductQuantityRegisterPage /> },
               { path: '/admin/products/reconciliation', element: <SapReconciliationPage /> },
               { path: '/admin/picklists', element: <PicklistsPage /> },
@@ -118,6 +128,16 @@ export const router = createBrowserRouter([
               { path: '/master/system', element: <MasterSystemPage /> },
               { path: '/master/history', element: <MasterHistoryPage /> },
               { path: '/master/reports', element: <MasterReportsPage /> },
+              // ── New Command Center pages ────────────────────────
+              { path: '/master/operations', element: <MasterOperationsPage /> },
+              { path: '/master/financial', element: <MasterFinancialPage /> },
+              { path: '/master/inventory', element: <MasterInventoryPage /> },
+              { path: '/master/sap', element: <MasterSapImportsPage /> },
+              { path: '/master/exceptions', element: <MasterExceptionsPage /> },
+              // Reuse existing Admin pages — MasterGuard ensures only Master accesses these.
+              // RLS policies on each table still apply; Master has read access by policy.
+              { path: '/master/routes', element: <RoutesPage /> },
+              { path: '/master/parties', element: <PartiesPage /> },
             ],
           },
         ],

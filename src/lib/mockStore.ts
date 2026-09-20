@@ -1,9 +1,11 @@
 import type {
   Worker, Route, Party, Product, Picklist, Delivery, Payment, Expense, PicklistItem, DeliveryItem,
   RouteStockException, UnmappedSkuException, SapStockReconciliation, SapStockReconciliationItem,
-  InventoryMovement, SapPurchaseImport, SapPurchaseImportItem, ProductMrpHistory
+  InventoryMovement, SapPurchaseImport, SapPurchaseImportItem, ProductMrpHistory, HistoricalSalesProduct,
+  SapSalesImport, SapSalesImportItem, RouteDeletePreview
 } from '@/lib/database.types';
-import { SAP_PRODUCT_MASTER } from '@/features/products/data/productMaster';
+import { registerProductMasterEntry, findSapReferenceCatalog } from '@/features/products/data/productMaster';
+import { HISTORICAL_SALES_CATALOG } from '@/features/products/data/historicalSalesCatalog';
 import { getLocalDateString } from '@/shared/utils/format';
 
 const INITIAL_WORKERS: Worker[] = [
@@ -60,29 +62,7 @@ const INITIAL_ROUTES: Route[] = [
 ];
 
 const INITIAL_PARTIES: Party[] = [];
-const INITIAL_PRODUCTS: Product[] = SAP_PRODUCT_MASTER.map((entry, idx) => ({
-  id: `prod-master-${entry.sku || idx}`,
-  sku: entry.sku,
-  name: entry.name,
-  category: entry.category,
-  mrp: entry.mrp,
-  rate: entry.mrp,
-  unit: entry.unit,
-  status: 'active' as const,
-  brand: entry.brand || 'Colgate',
-  uom: entry.uom || 'EA',
-  active: entry.active || '',
-  sub_category: entry.subCategory || '',
-  sub_brand: entry.subBrand || '',
-  variant: entry.variant || '',
-  ppg: entry.ppg || '',
-  ppg_description: entry.ppgDescription || '',
-  material_group: entry.materialGroup || '',
-  prod_hierarchy: entry.prodHierarchy || '',
-  is_sap_master: true,
-  created_at: new Date().toISOString(),
-  updated_at: new Date().toISOString(),
-}));
+const INITIAL_PRODUCTS: Product[] = [];
 const INITIAL_PICKLISTS: Picklist[] = [];
 const INITIAL_DELIVERIES: Delivery[] = [];
 const INITIAL_PAYMENTS: Payment[] = [];
@@ -124,6 +104,22 @@ export function isPaymentLinkedToActiveRoute(
   return true;
 }
 
+export function isLegacyManualProduct(sku: string, name?: string): boolean {
+  if (!sku) return false;
+  const s = sku.trim().toUpperCase();
+  const n = (name || '').trim().toLowerCase();
+  if (
+    s === '12000-130908-0' || s === 'CIBACA' || s === '34800-309336-0' || s === 'TOTAL' ||
+    s === 'CAS-38G-BUNDLE' || s.startsWith('CDC-') || s === 'COL-ZZ-PO3' || s === 'SUPER' ||
+    s.startsWith('KIDS-') || s === 'COLGATE' || s === 'PAIN-OUT-TUBE' || s.startsWith('SF-') ||
+    s === 'COLACTSALT' || s.startsWith('VW-') || s === 'VISIBLE' || s.startsWith('ZZ-') ||
+    n.includes('manual master') || n.includes('ztin:') || n.includes('tax invoice')
+  ) {
+    return true;
+  }
+  return false;
+}
+
 class MockStore {
   private workers: Worker[] = [];
   private routes: Route[] = [];
@@ -142,7 +138,11 @@ class MockStore {
   private inventoryMovements: InventoryMovement[] = [];
   private sapPurchaseImports: SapPurchaseImport[] = [];
   private sapPurchaseImportItems: SapPurchaseImportItem[] = [];
+  private sapSalesImports: SapSalesImport[] = [];
+  private sapSalesImportItems: SapSalesImportItem[] = [];
   private productMrpHistory: ProductMrpHistory[] = [];
+  private historicalSalesProducts: HistoricalSalesProduct[] = [];
+  private deletedRouteCodes: Set<string> = new Set();
 
   constructor() {
     this.loadFromStorage();
@@ -154,37 +154,77 @@ class MockStore {
       return;
     }
     try {
-      const stored = localStorage.getItem('distrotrack_clean_v3');
+      // Clean reset: purge all previous legacy stores containing old test products
+      const legacyKeys = [
+        'distrotrack_clean_v5',
+        'distrotrack_clean_v4',
+        'distrotrack_clean_v3',
+        'distrotrack_clean_v2',
+        'distrotrack_storage_v2',
+        'distrotrack_mock_store',
+        'distrotrack_store',
+      ];
+      for (const k of legacyKeys) {
+        if (localStorage.getItem(k)) {
+          localStorage.removeItem(k);
+        }
+      }
+
+      let stored = localStorage.getItem('distrotrack_v6_clean');
+      if (!stored) {
+        this.resetToDefaults();
+        return;
+      }
+
       if (stored) {
         const parsed = JSON.parse(stored);
         this.workers = parsed.workers || INITIAL_WORKERS;
+        this.deletedRouteCodes = new Set(parsed.deletedRouteCodes || []);
 
         const loadedRoutes: Route[] = parsed.routes || [];
         const existingRouteCodes = new Set(loadedRoutes.map((r) => r.code.toUpperCase()));
         const mergedRoutes = [...loadedRoutes];
         INITIAL_ROUTES.forEach((initR) => {
-          if (!existingRouteCodes.has(initR.code.toUpperCase())) {
+          if (!existingRouteCodes.has(initR.code.toUpperCase()) && !this.deletedRouteCodes.has(initR.code.toUpperCase())) {
             mergedRoutes.push(initR);
           }
         });
         this.routes = mergedRoutes;
         this.parties = parsed.parties || INITIAL_PARTIES;
 
-        const loadedProds: Product[] = (parsed.products || INITIAL_PRODUCTS).filter(
-          (p: Product) => p && p.name && !p.name.includes('ZTIN:') && !p.name.includes('TAX Invoice')
+        this.products = (parsed.products || []).filter(
+          (p: Product) => p && p.name && !isLegacyManualProduct(p.sku, p.name)
         );
 
-        const existingSKUs = new Set(loadedProds.map((p) => p.sku.toUpperCase()));
-        const mergedProds = [...loadedProds];
-        INITIAL_PRODUCTS.forEach((initP) => {
-          if (!existingSKUs.has(initP.sku.toUpperCase())) {
-            mergedProds.push(initP);
-          }
-        });
-
-        this.products = mergedProds;
         this.picklists = parsed.picklists || INITIAL_PICKLISTS;
-        this.deliveries = parsed.deliveries || INITIAL_DELIVERIES;
+        
+        // Deduplicate deliveries by canonical identity to prevent duplicate UI cards from cached state
+        const rawDeliveries: Delivery[] = parsed.deliveries || INITIAL_DELIVERIES;
+        const seenDelKeys = new Map<string, Delivery>();
+        const dedupedDeliveries: Delivery[] = [];
+        for (const del of rawDeliveries) {
+          const delKey = del.invoice_id
+            ? `inv:${del.invoice_id}`
+            : (del.picklist_id && del.party_id)
+            ? `pl:${del.picklist_id}_${del.party_id}`
+            : `id:${del.id}`;
+
+          const existing = seenDelKeys.get(delKey);
+          if (!existing) {
+            seenDelKeys.set(delKey, del);
+            dedupedDeliveries.push(del);
+          } else {
+            // Keep the one with higher or non-zero total_amount
+            if ((existing.total_amount === 0 && del.total_amount > 0) || (del.total_amount > existing.total_amount)) {
+              const idx = dedupedDeliveries.indexOf(existing);
+              if (idx !== -1) {
+                dedupedDeliveries[idx] = { ...existing, ...del };
+                seenDelKeys.set(delKey, dedupedDeliveries[idx]);
+              }
+            }
+          }
+        }
+        this.deliveries = dedupedDeliveries;
         this.payments = parsed.payments || INITIAL_PAYMENTS;
         this.expenses = parsed.expenses || [];
 
@@ -211,10 +251,15 @@ class MockStore {
         this.unmappedSkuExceptions = parsed.unmappedSkuExceptions || [];
         this.sapStockReconciliations = parsed.sapStockReconciliations || [];
         this.sapStockReconciliationItems = parsed.sapStockReconciliationItems || [];
-        this.inventoryMovements = parsed.inventoryMovements || [];
+        this.inventoryMovements = (parsed.inventoryMovements || []).filter(
+          (m: InventoryMovement) => m && m.sku && !isLegacyManualProduct(m.sku)
+        );
         this.sapPurchaseImports = parsed.sapPurchaseImports || [];
         this.sapPurchaseImportItems = parsed.sapPurchaseImportItems || [];
+        this.sapSalesImports = parsed.sapSalesImports || [];
+        this.sapSalesImportItems = parsed.sapSalesImportItems || [];
         this.productMrpHistory = parsed.productMrpHistory || [];
+        this.historicalSalesProducts = parsed.historicalSalesProducts || [...HISTORICAL_SALES_CATALOG];
       } else {
         this.resetToDefaults();
       }
@@ -229,7 +274,7 @@ class MockStore {
     }
     try {
       localStorage.setItem(
-        'distrotrack_clean_v3',
+        'distrotrack_v6_clean',
         JSON.stringify({
           workers: this.workers,
           routes: this.routes,
@@ -248,7 +293,10 @@ class MockStore {
           inventoryMovements: this.inventoryMovements,
           sapPurchaseImports: this.sapPurchaseImports,
           sapPurchaseImportItems: this.sapPurchaseImportItems,
+          sapSalesImports: this.sapSalesImports,
+          sapSalesImportItems: this.sapSalesImportItems,
           productMrpHistory: this.productMrpHistory,
+          deletedRouteCodes: Array.from(this.deletedRouteCodes),
         })
       );
     } catch (e) {
@@ -267,6 +315,18 @@ class MockStore {
     this.expenses = [...INITIAL_EXPENSES];
     this.picklistItems = [];
     this.deliveryItems = [];
+    this.routeStockExceptions = [];
+    this.unmappedSkuExceptions = [];
+    this.sapStockReconciliations = [];
+    this.sapStockReconciliationItems = [];
+    this.inventoryMovements = [];
+    this.sapPurchaseImports = [];
+    this.sapPurchaseImportItems = [];
+    this.sapSalesImports = [];
+    this.sapSalesImportItems = [];
+    this.productMrpHistory = [];
+    this.historicalSalesProducts = [...HISTORICAL_SALES_CATALOG];
+    this.deletedRouteCodes.clear();
     this.saveToStorage();
   }
 
@@ -329,7 +389,10 @@ class MockStore {
     }));
   }
   saveRoute(rData: Partial<Route>): Route {
-    const existingIdx = this.routes.findIndex((r) => r.id === rData.id || (rData.code && r.code === rData.code));
+    if (rData.code) {
+      this.deletedRouteCodes.delete(rData.code.toUpperCase());
+    }
+    const existingIdx = this.routes.findIndex((r) => r.id === rData.id || (rData.code && r.code === rData.code && r.status !== 'archived'));
     if (existingIdx >= 0) {
       const updated = { ...this.routes[existingIdx], ...rData, updated_at: new Date().toISOString() };
       this.routes[existingIdx] = updated;
@@ -351,85 +414,222 @@ class MockStore {
       return created;
     }
   }
-  deleteRoute(id: string) {
-    const route = this.routes.find((r) => r.id === id);
-    const routeCode = route?.code;
-    const routeName = route?.name;
 
-    // Find all picklists associated with this route (by route_id or route code or route name)
-    const picklistIds = new Set(
-      this.picklists
-        .filter(
-          (pl) =>
-            pl.route_id === id ||
-            (routeCode && pl.route?.code?.toLowerCase() === routeCode.toLowerCase()) ||
-            (routeName && pl.route?.name?.toLowerCase() === routeName.toLowerCase()) ||
-            (routeCode && (pl as any).route_code?.toLowerCase() === routeCode.toLowerCase())
-        )
-        .map((pl) => pl.id)
+  deleteRoute(id: string, force: boolean = true, hardDelete: boolean = true) {
+    const route = this.routes.find(
+      (r) =>
+        r.id === id ||
+        (r.code && r.code.toLowerCase() === id.toLowerCase()) ||
+        (r.name && r.name.toLowerCase() === id.toLowerCase())
     );
+    if (!route) return;
+    const targetId = route.id;
+    const routeCode = route.code;
+    const routeName = route.name;
 
-    // Find all parties associated with this route
-    const partyIds = new Set(
-      this.parties
-        .filter(
-          (p) =>
-            p.route_id === id ||
-            (routeCode && (p as any).route_code?.toLowerCase() === routeCode.toLowerCase()) ||
-            (routeCode && p.route?.code?.toLowerCase() === routeCode.toLowerCase())
-        )
-        .map((p) => p.id)
-    );
+    if (hardDelete) {
+      const routePicklists = this.picklists.filter(
+        (pl) =>
+          pl.route_id === id ||
+          pl.route_id === targetId ||
+          (routeCode && pl.route?.code?.toLowerCase() === routeCode.toLowerCase()) ||
+          (routeName && pl.route?.name?.toLowerCase() === routeName.toLowerCase()) ||
+          (routeCode && (pl as any).route_code?.toLowerCase() === routeCode.toLowerCase())
+      );
+      const plIds = new Set(routePicklists.map((pl) => pl.id));
 
-    // Find all deliveries linked to these picklists, parties, or route directly
-    const deliveryIds = new Set(
-      this.deliveries
-        .filter(
-          (d) =>
-            (d.picklist_id && picklistIds.has(d.picklist_id)) ||
-            (d.party_id && partyIds.has(d.party_id)) ||
-            (d as any).route_id === id ||
-            (routeCode && (d as any).route_code?.toLowerCase() === routeCode.toLowerCase())
-        )
-        .map((d) => d.id)
-    );
+      const routeDeliveries = this.deliveries.filter(
+        (d: any) =>
+          d.route_id === id ||
+          d.route_id === targetId ||
+          (d.picklist_id && plIds.has(d.picklist_id)) ||
+          (routeCode && d.route_code?.toLowerCase() === routeCode.toLowerCase())
+      );
+      const delIds = new Set(routeDeliveries.map((d) => d.id));
 
-    // Filter out expenses linked to this route by route_id or route name/code
-    const routeNameLower = routeName?.toLowerCase();
-    const rCodeLower = routeCode?.toLowerCase();
+      // 1. Remove delivery items
+      this.deliveryItems = this.deliveryItems.filter((di) => !delIds.has(di.delivery_id));
 
-    this.expenses = this.expenses.filter((e) => {
-      if (e.route_id === id) return false;
-      const desc = (e.description || '').toLowerCase();
-      if (routeNameLower && desc.includes(routeNameLower)) return false;
-      if (rCodeLower && desc.includes(rCodeLower)) return false;
-      return true;
-    });
+      // 2. Remove deliveries
+      this.deliveries = this.deliveries.filter((d) => !delIds.has(d.id));
 
-    // Delete ALL payments belonging to this route, its deliveries, or its parties
-    this.payments = this.payments.filter((p) => {
-      if (p.delivery_id && deliveryIds.has(p.delivery_id)) return false;
-      if (p.party_id && partyIds.has(p.party_id)) return false;
-      if ((p as any).route_id === id) return false;
-      if (routeCode && (p as any).route_code?.toLowerCase() === routeCode.toLowerCase()) return false;
-      return true;
-    });
+      // 3. Remove picklist items
+      this.picklistItems = this.picklistItems.filter((pi) => !plIds.has(pi.picklist_id));
 
-    this.routes = this.routes.filter((r) => r.id !== id);
-    this.picklists = this.picklists.filter((pl) => !picklistIds.has(pl.id));
-    this.picklistItems = this.picklistItems.filter((pli) => !picklistIds.has(pli.picklist_id));
-    this.deliveries = this.deliveries.filter((d) => !deliveryIds.has(d.id));
-    this.deliveryItems = this.deliveryItems.filter((dli) => !deliveryIds.has(dli.delivery_id));
-    this.parties = this.parties.filter((p) => !partyIds.has(p.id));
+      // 4. Remove picklists
+      this.picklists = this.picklists.filter((pl) => !plIds.has(pl.id));
 
-    // Also purge orphan payments: if a payment references a delivery that no longer exists
-    const remainingDeliveryIds = new Set(this.deliveries.map((d) => d.id));
-    this.payments = this.payments.filter((p) => {
-      if (p.delivery_id && !remainingDeliveryIds.has(p.delivery_id)) return false;
-      return true;
-    });
+      // 6. Remove payments linked specifically to this route / picklist / delivery
+      this.payments = this.payments.filter(
+        (p: any) =>
+          p.route_id !== id &&
+          p.route_id !== targetId &&
+          (!p.picklist_id || !plIds.has(p.picklist_id)) &&
+          (!p.delivery_id || !delIds.has(p.delivery_id))
+      );
+
+      // 7. Remove expenses linked specifically to this route / picklist
+      this.expenses = this.expenses.filter(
+        (e: any) =>
+          e.route_id !== id &&
+          e.route_id !== targetId &&
+          (!e.picklist_id || !plIds.has(e.picklist_id))
+      );
+
+      // 8. Remove route stock exceptions
+      this.routeStockExceptions = this.routeStockExceptions.filter(
+        (rse: any) =>
+          rse.route_id !== id &&
+          rse.route_id !== targetId &&
+          (!rse.picklist_id || !plIds.has(rse.picklist_id))
+      );
+
+      // 9. Remove route-owned inventory movements ONLY (NEVER purchase_inward or sap_sales_baseline or opening_balance)
+      if (this.inventoryMovements) {
+        this.inventoryMovements = this.inventoryMovements.filter((im) => {
+          const isThisRoute =
+            im.route_id === id ||
+            im.route_id === targetId ||
+            (im.picklist_id && plIds.has(im.picklist_id)) ||
+            (im.delivery_id && delIds.has(im.delivery_id));
+          const isSharedMaster = ['purchase_inward', 'sap_sales_baseline', 'opening_balance'].includes(
+            im.movement_type
+          );
+          return !(isThisRoute && !isSharedMaster);
+        });
+      }
+
+      // 10. Unlink parties assigned to this route (preserve customer master & balances)
+      this.parties = this.parties.map((p) =>
+        p.route_id === id || p.route_id === targetId ? { ...p, route_id: null, route: null } : p
+      );
+
+      // 11. Remove route record
+      this.routes = this.routes.filter((r) => r.id !== id && r.id !== targetId);
+
+      // 12. Track deleted route code so it doesn't reappear on reload
+      if (route.code) {
+        this.deletedRouteCodes.add(route.code.toUpperCase());
+      }
+    } else {
+      // Legacy decoupling if hardDelete is false
+      if (!force) {
+        throw new Error('This route contains operational history and cannot be permanently deleted. Archive it instead.');
+      }
+      this.routes = this.routes.filter((r) => r.id !== id);
+      this.parties = this.parties.map((p) => (p.route_id === id ? { ...p, route_id: null, route: null } : p));
+      this.picklists = this.picklists.map((pl) => (pl.route_id === id ? { ...pl, route_id: null, route: null } : pl));
+      this.deliveries = this.deliveries.map((d: any) => (d.route_id === id ? { ...d, route_id: null, route: null } : d));
+      this.payments = this.payments.map((p) => (p.route_id === id ? { ...p, route_id: null } : p));
+      this.expenses = this.expenses.map((e) => (e.route_id === id ? { ...e, route_id: null } : e));
+      if (this.inventoryMovements) {
+        this.inventoryMovements = this.inventoryMovements.map((im) => (im.route_id === id ? { ...im, route_id: null } : im));
+      }
+    }
 
     this.saveToStorage();
+  }
+
+  getRouteDeletePreview(id: string): RouteDeletePreview {
+    const route = this.routes.find(
+      (r) =>
+        r.id === id ||
+        (r.code && r.code.toLowerCase() === id.toLowerCase()) ||
+        (r.name && r.name.toLowerCase() === id.toLowerCase())
+    );
+    if (!route) {
+      throw new Error(`Route with ID ${id} not found`);
+    }
+    const routeCode = route.code;
+    const routeName = route.name;
+
+    const routePicklists = this.picklists.filter(
+      (pl) =>
+        pl.route_id === id ||
+        (routeCode && pl.route?.code?.toLowerCase() === routeCode.toLowerCase()) ||
+        (routeName && pl.route?.name?.toLowerCase() === routeName.toLowerCase()) ||
+        (routeCode && (pl as any).route_code?.toLowerCase() === routeCode.toLowerCase())
+    );
+    const plIds = new Set(routePicklists.map((pl) => pl.id));
+
+    const routeDeliveries = this.deliveries.filter(
+      (d: any) =>
+        d.route_id === id ||
+        (d.picklist_id && plIds.has(d.picklist_id)) ||
+        (routeCode && d.route_code?.toLowerCase() === routeCode.toLowerCase())
+    );
+    const delIds = new Set(routeDeliveries.map((d) => d.id));
+
+    const delItemCount = this.deliveryItems.filter((di) => delIds.has(di.delivery_id)).length;
+
+    const payments = this.payments.filter(
+      (p: any) =>
+        p.route_id === id ||
+        (p.picklist_id && plIds.has(p.picklist_id)) ||
+        (p.delivery_id && delIds.has(p.delivery_id))
+    );
+
+    const expenses = this.expenses.filter(
+      (e: any) => e.route_id === id || (e.picklist_id && plIds.has(e.picklist_id))
+    );
+
+    const exceptions = this.routeStockExceptions.filter(
+      (rse: any) => rse.route_id === id || (rse.picklist_id && plIds.has(rse.picklist_id))
+    );
+
+    const routeMovements = (this.inventoryMovements || []).filter((im) => {
+      const isThisRoute =
+        im.route_id === id ||
+        (im.picklist_id && plIds.has(im.picklist_id)) ||
+        (im.delivery_id && delIds.has(im.delivery_id));
+      const isSharedMaster = ['purchase_inward', 'sap_sales_baseline', 'opening_balance'].includes(
+        im.movement_type
+      );
+      return isThisRoute && !isSharedMaster;
+    });
+
+    const unlinkedParties = this.parties.filter((p) => p.route_id === id).length;
+    const worker = this.workers.find((w) => w.id === route.assigned_worker_id);
+
+    return {
+      route_id: route.id,
+      route_code: route.code,
+      route_name: route.name,
+      assigned_worker_id: route.assigned_worker_id,
+      assigned_worker_name: worker?.name || null,
+      assignments_count: route.assigned_worker_id ? 1 : 0,
+      picklists_count: routePicklists.length,
+      deliveries_count: routeDeliveries.length,
+      delivery_items_count: delItemCount,
+      payments_count: payments.length,
+      expenses_count: expenses.length,
+      returns_count: 0,
+      inventory_movements_count: routeMovements.length,
+      financial_records_count: payments.length,
+      exceptions_count: exceptions.length,
+      parties_unlinked_count: unlinkedParties,
+      has_pending_offline_mutations: false,
+      can_delete: true,
+      block_reason: null,
+    };
+  }
+
+  archiveRoute(id: string): Route | undefined {
+    const route = this.routes.find((r) => r.id === id);
+    if (!route) return undefined;
+    route.status = 'archived';
+    route.updated_at = new Date().toISOString();
+    this.saveToStorage();
+    return route;
+  }
+
+  unarchiveRoute(id: string): Route | undefined {
+    const route = this.routes.find((r) => r.id === id);
+    if (!route) return undefined;
+    route.status = 'active';
+    route.updated_at = new Date().toISOString();
+    this.saveToStorage();
+    return route;
   }
 
   // ── Parties ────────────────────────────────────────────────────────
@@ -474,12 +674,13 @@ class MockStore {
 
   // ── Products ───────────────────────────────────────────────────────
   getProducts(): Product[] {
-    return this.products.filter(p => p && p.name && !p.name.includes('ZTIN:') && !p.name.includes('TAX Invoice'));
+    return this.products.filter(p => p && p.name && !isLegacyManualProduct(p.sku, p.name));
   }
   saveProduct(prodData: Partial<Product>): Product {
     const existingIdx = this.products.findIndex(
       (p) => p.id === prodData.id || (prodData.sku && p.sku.toUpperCase() === prodData.sku.toUpperCase())
     );
+    let result: Product;
     if (existingIdx >= 0) {
       if (prodData.mrp !== undefined) {
         this.products[existingIdx].mrp = Number(prodData.mrp);
@@ -487,7 +688,7 @@ class MockStore {
       if (prodData.rate !== undefined) {
         this.products[existingIdx].rate = Number(prodData.rate);
       }
-      return this.products[existingIdx];
+      result = this.products[existingIdx];
     } else {
       const created: Product = {
         id: prodData.id || `prod-${Date.now()}`,
@@ -514,9 +715,29 @@ class MockStore {
         updated_at: new Date().toISOString(),
       };
       this.products.unshift(created);
-      this.saveToStorage();
-      return created;
+      result = created;
     }
+
+    registerProductMasterEntry({
+      sku: result.sku,
+      name: result.name,
+      mrp: result.mrp,
+      category: result.category || 'General',
+      unit: result.unit,
+      brand: result.brand || undefined,
+      uom: result.uom || undefined,
+      active: result.active || undefined,
+      subCategory: result.sub_category || undefined,
+      subBrand: result.sub_brand || undefined,
+      variant: result.variant || undefined,
+      ppg: result.ppg || undefined,
+      ppgDescription: result.ppg_description || undefined,
+      materialGroup: result.material_group || undefined,
+      prodHierarchy: result.prod_hierarchy || undefined,
+    });
+
+    this.saveToStorage();
+    return result;
   }
   deleteProduct(id: string) {
     this.products = this.products.filter((p) => p.id !== id);
@@ -606,7 +827,27 @@ class MockStore {
 
   // ── Deliveries ─────────────────────────────────────────────────────
   getDeliveries(): Delivery[] {
-    return this.deliveries.map((d) => {
+    // Deduplicate by canonical identity before returning
+    const seen = new Map<string, Delivery>();
+    for (const d of this.deliveries) {
+      const key = d.invoice_id
+        ? `inv:${d.invoice_id}`
+        : (d.picklist_id && d.party_id)
+        ? `pl:${d.picklist_id}_${d.party_id}`
+        : `id:${d.id}`;
+      const existing = seen.get(key);
+      if (!existing) {
+        seen.set(key, d);
+      } else {
+        // Keep record with authoritative non-zero amount
+        if (existing.total_amount === 0 && d.total_amount > 0) {
+          seen.set(key, { ...existing, ...d });
+        }
+      }
+    }
+    const uniqueDeliveries = Array.from(seen.values());
+
+    return uniqueDeliveries.map((d) => {
       let party = this.parties.find((p) => p.id === d.party_id) || null;
       if (party && (!party.name || /^[CS]?0*\d+$/i.test(party.name.trim()))) {
         const codeDigits = (party.code || party.name || '').replace(/[^0-9]/g, '');
@@ -633,7 +874,7 @@ class MockStore {
         return d.invoice_id === dData.invoice_id;
       }
       // 3. Fallback for picklist-only deliveries (no invoice): identity is (picklist_id + party_id) with no invoice
-      if (dData.picklist_id && dData.party_id) {
+      if (!dData.id && dData.picklist_id && dData.party_id) {
         return d.picklist_id === dData.picklist_id && d.party_id === dData.party_id && !d.invoice_id;
       }
       return false;
@@ -1041,11 +1282,12 @@ class MockStore {
 
   // ── Inventory Movements & SAP Purchase Imports ───────────────────
   getInventoryMovements(sku?: string): InventoryMovement[] {
+    const valid = this.inventoryMovements.filter((m) => m && m.sku && !isLegacyManualProduct(m.sku));
     if (sku) {
       const norm = sku.toUpperCase();
-      return this.inventoryMovements.filter((m) => m.sku.toUpperCase() === norm);
+      return valid.filter((m) => m.sku.toUpperCase() === norm);
     }
-    return [...this.inventoryMovements];
+    return [...valid];
   }
 
   addInventoryMovement(
@@ -1107,6 +1349,332 @@ class MockStore {
     }
     this.saveToStorage();
     return { importRecord, items: createdItems };
+  }
+
+  // ── SAP Sales Imports ───────────────────────────────────────────
+  getSapSalesImports(): SapSalesImport[] {
+    return [...this.sapSalesImports];
+  }
+
+  getSapSalesImportItems(importId?: string): SapSalesImportItem[] {
+    const valid = this.sapSalesImportItems.filter((i) => i.status !== 'duplicate');
+    if (importId) {
+      return valid.filter((i) => i.import_id === importId);
+    }
+    return [...valid];
+  }
+
+  saveSapSalesImport(
+    imp: Omit<SapSalesImport, 'id' | 'created_at' | 'imported_at'> & { id?: string; imported_at?: string },
+    items: Array<Omit<SapSalesImportItem, 'id' | 'import_id' | 'created_at'> & { id?: string }>
+  ): { importRecord: SapSalesImport; items: SapSalesImportItem[] } {
+    const importId = imp.id || `sales-imp-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+    const importRecord: SapSalesImport = {
+      ...imp,
+      id: importId,
+      imported_at: imp.imported_at || new Date().toISOString(),
+      created_at: new Date().toISOString(),
+    };
+    this.sapSalesImports.unshift(importRecord);
+
+    const createdItems: SapSalesImportItem[] = [];
+    for (const it of items) {
+      const itemRecord: SapSalesImportItem = {
+        ...it,
+        id: it.id || `sales-item-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+        import_id: importId,
+        created_at: new Date().toISOString(),
+      };
+      this.sapSalesImportItems.push(itemRecord);
+      createdItems.push(itemRecord);
+    }
+    this.saveToStorage();
+    return { importRecord, items: createdItems };
+  }
+
+  importSapSalesBaseline(params: {
+    items: Array<{
+      invoice_no: string;
+      invoice_date?: string | null;
+      item_seq?: number;
+      sku: string;
+      product_name?: string;
+      cust_code?: string | null;
+      cust_name?: string | null;
+      quantity: number;
+      uom?: string;
+      rate?: number | null;
+      gross_val?: number | null;
+      net_val?: number | null;
+      is_cancellation?: boolean;
+      reference_doc?: string | null;
+    }>;
+    batch_ref: string;
+    cutoff_date: string;
+    file_name?: string;
+    notes?: string;
+  }): {
+    import_id: string;
+    batch_ref: string;
+    total_rows: number;
+    movements_created: number;
+    skipped_duplicate: number;
+    skipped_unmapped: number;
+    total_quantity: number;
+    total_net_amount: number;
+  } {
+    const importId = `sales-imp-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+    let total_rows = 0;
+    let movements_created = 0;
+    let skipped_duplicate = 0;
+    let skipped_unmapped = 0;
+    let total_quantity = 0;
+    let total_net_amount = 0;
+
+    const createdItems: SapSalesImportItem[] = [];
+
+    for (let idx = 0; idx < params.items.length; idx++) {
+      const it = params.items[idx];
+      total_rows++;
+      const normSku = (it.sku || '').trim().toUpperCase();
+      const unpadded = normSku.replace(/^0+/, '');
+      const invoiceNo = (it.invoice_no || '').trim();
+      const itemSeq = it.item_seq ?? ((idx + 1) * 10);
+      const idempotencyKey = `sales_import:${invoiceNo}:${itemSeq}:${normSku}`;
+
+      const qty = Number(it.quantity) || 0;
+      const netVal = Number(it.net_val) || 0;
+      const isCancel = Boolean(it.is_cancellation);
+      const invDate = it.invoice_date || params.cutoff_date;
+
+      total_quantity += qty;
+      total_net_amount += netVal;
+
+      const existingMov = this.inventoryMovements.find((m) => m.idempotency_key === idempotencyKey);
+      const existingItem = this.sapSalesImportItems.find((i) => i.idempotency_key === idempotencyKey);
+
+      if (existingMov || existingItem) {
+        skipped_duplicate++;
+        continue;
+      }
+
+      let prod = this.products.find(
+        (p) => p.sku.toUpperCase() === normSku || (unpadded && p.sku.toUpperCase() === unpadded)
+      );
+
+      if (!prod && normSku) {
+        const refEntry = findSapReferenceCatalog(normSku);
+        const prodName = it.product_name || refEntry?.name || `SKU ${normSku}`;
+        const newProd: Product = {
+          id: `prod-sap-${normSku}`,
+          sku: normSku,
+          name: prodName,
+          category: refEntry?.category || 'Oral Care',
+          mrp: refEntry?.mrp || Number(it.rate || 100),
+          rate: Number(it.rate || 100),
+          unit: it.uom || refEntry?.unit || 'pcs',
+          status: 'active',
+          is_sap_master: true,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+        this.saveProduct(newProd);
+        registerProductMasterEntry({
+          sku: normSku,
+          name: prodName,
+          mrp: newProd.mrp,
+          category: newProd.category || 'General',
+          unit: newProd.unit,
+        });
+        prod = newProd;
+      }
+
+      if (!prod) {
+        skipped_unmapped++;
+        createdItems.push({
+          id: `sales-item-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+          import_id: importId,
+          invoice_no: invoiceNo,
+          invoice_date: invDate,
+          item_seq: itemSeq,
+          sku: normSku,
+          product_id: null,
+          product_name: it.product_name || normSku,
+          cust_code: it.cust_code || null,
+          cust_name: it.cust_name || null,
+          quantity: qty,
+          uom: it.uom || 'EA',
+          rate: it.rate ?? null,
+          gross_val: it.gross_val ?? null,
+          net_val: netVal,
+          is_cancellation: isCancel,
+          reference_doc: it.reference_doc || null,
+          idempotency_key: idempotencyKey,
+          movement_id: null,
+          status: 'unmapped',
+          notes: 'Unmapped product in Product Master.',
+          created_at: new Date().toISOString(),
+        });
+        continue;
+      }
+
+      let movementId: string | null = null;
+      if (qty > 0 && invDate <= params.cutoff_date) {
+        const movId = `mov-sales-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+        movementId = movId;
+
+        if (isCancel) {
+          this.inventoryMovements.push({
+            id: movId,
+            product_id: prod.id,
+            sku: normSku,
+            movement_type: 'route_return',
+            quantity: Math.abs(qty),
+            direction: 'in',
+            from_location: 'customer',
+            to_location: 'warehouse',
+            reference_number: invoiceNo,
+            reference_type: 'sap_sales_cancellation',
+            notes: `SAP Sales Cancellation: ${it.cust_name || 'Credit Note'}`,
+            idempotency_key: idempotencyKey,
+            occurred_at: invDate ? new Date(invDate).toISOString() : new Date().toISOString(),
+            created_at: new Date().toISOString(),
+          });
+        } else {
+          this.inventoryMovements.push({
+            id: movId,
+            product_id: prod.id,
+            sku: normSku,
+            movement_type: 'sap_sales_baseline',
+            quantity: Math.abs(qty),
+            direction: 'out',
+            from_location: 'warehouse',
+            to_location: 'customer',
+            reference_number: invoiceNo,
+            reference_type: 'sap_sales_baseline',
+            notes: `SAP Baseline Sale: ${it.cust_name || 'Pre-Go-Live Sales'}`,
+            idempotency_key: idempotencyKey,
+            occurred_at: invDate ? new Date(invDate).toISOString() : new Date().toISOString(),
+            created_at: new Date().toISOString(),
+          });
+        }
+        movements_created++;
+      }
+
+      createdItems.push({
+        id: `sales-item-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+        import_id: importId,
+        invoice_no: invoiceNo,
+        invoice_date: invDate,
+        item_seq: itemSeq,
+        sku: normSku,
+        product_id: prod.id,
+        product_name: prod.name || it.product_name || normSku,
+        cust_code: it.cust_code || null,
+        cust_name: it.cust_name || null,
+        quantity: qty,
+        uom: it.uom || 'EA',
+        rate: it.rate ?? null,
+        gross_val: it.gross_val ?? null,
+        net_val: netVal,
+        is_cancellation: isCancel,
+        reference_doc: it.reference_doc || null,
+        idempotency_key: idempotencyKey,
+        movement_id: movementId,
+        status: 'created',
+        notes: isCancel ? 'Cancellation recorded as return.' : 'Baseline stock-out movement created.',
+        created_at: new Date().toISOString(),
+      });
+    }
+
+    const importRecord: SapSalesImport = {
+      id: importId,
+      batch_ref: params.batch_ref,
+      file_name: params.file_name || 'sale.xlsx',
+      cutoff_date: params.cutoff_date,
+      imported_at: new Date().toISOString(),
+      imported_by: null,
+      total_rows,
+      movements_created,
+      skipped_duplicate,
+      skipped_unmapped,
+      total_quantity,
+      total_net_amount,
+      notes: params.notes || null,
+      created_at: new Date().toISOString(),
+    };
+
+    if (movements_created > 0 || createdItems.length > 0) {
+      this.sapSalesImports.unshift(importRecord);
+      this.sapSalesImportItems.push(...createdItems);
+    }
+    this.saveToStorage();
+
+    return {
+      import_id: importId,
+      batch_ref: params.batch_ref,
+      total_rows,
+      movements_created,
+      skipped_duplicate,
+      skipped_unmapped,
+      total_quantity,
+      total_net_amount,
+    };
+  }
+
+  recoverMissingPurchaseMovements(items: Array<{
+    sku: string;
+    productName: string;
+    uom: string;
+    quantity: number;
+    grDocNo: string;
+    invoiceNo: string;
+    itemNo: string;
+    batch: string;
+    grDate: string;
+    grStatus: string;
+    idempotencyKey: string;
+  }>): { recoveredCount: number; totalRecoveredQty: number } {
+    let recoveredCount = 0;
+    let totalRecoveredQty = 0;
+
+    for (const it of items) {
+      const existing = this.inventoryMovements.find((m) => m.idempotency_key === it.idempotencyKey);
+      if (existing) continue;
+
+      const norm = it.sku.trim().toUpperCase();
+      const unpadded = norm.replace(/^0+/, '');
+      const prod = this.products.find(
+        (p) => p.sku.toUpperCase() === norm || (unpadded && p.sku.toUpperCase() === unpadded)
+      );
+
+      this.inventoryMovements.push({
+        id: `mov-rec-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        product_id: prod?.id || `prod-sap-${norm}`,
+        sku: norm,
+        movement_type: 'purchase_inward',
+        quantity: it.quantity,
+        direction: 'in',
+        from_location: 'supplier',
+        to_location: 'warehouse',
+        reference_number: it.grDocNo || it.invoiceNo,
+        reference_type: 'sap_purchase_recovery',
+        idempotency_key: it.idempotencyKey,
+        notes: `Recovered SAP Inbound: GR ${it.grDocNo} Item ${it.itemNo} Inv ${it.invoiceNo}`,
+        source_location: 'warehouse',
+        occurred_at: it.grDate ? new Date(it.grDate).toISOString() : new Date().toISOString(),
+        created_at: new Date().toISOString(),
+      });
+
+      recoveredCount++;
+      totalRecoveredQty += it.quantity;
+    }
+
+    if (recoveredCount > 0) {
+      this.saveToStorage();
+    }
+
+    return { recoveredCount, totalRecoveredQty };
   }
 
   // ── Product MRP History & Updates ───────────────────────────────
@@ -1196,6 +1764,361 @@ class MockStore {
       oldMrp,
       newMrp: Number(newMrp),
       message: `Updated SKU ${norm} MRP from ₹${oldMrp} to ₹${newMrp}`,
+    };
+  }
+
+  // ── Historical Sales Products (Product Discovery) ─────────────────────
+  getHistoricalSalesProducts(): HistoricalSalesProduct[] {
+    if (!this.historicalSalesProducts || this.historicalSalesProducts.length === 0) {
+      this.historicalSalesProducts = [...HISTORICAL_SALES_CATALOG];
+    }
+    return [...this.historicalSalesProducts];
+  }
+
+  findHistoricalSalesProductBySku(sku: string): HistoricalSalesProduct | undefined {
+    if (!sku) return undefined;
+    const norm = sku.trim().toUpperCase();
+    const unpadded = norm.replace(/^0+/, '');
+    const list = this.getHistoricalSalesProducts();
+    return list.find(
+      (p) => p.sku.toUpperCase() === norm || (unpadded && p.sku.toUpperCase() === unpadded)
+    );
+  }
+
+  saveHistoricalSalesProduct(p: Partial<HistoricalSalesProduct>): HistoricalSalesProduct {
+    const list = this.getHistoricalSalesProducts();
+    const norm = (p.sku || '').trim().toUpperCase();
+    const existingIdx = list.findIndex((item) => item.sku.toUpperCase() === norm);
+    const now = new Date().toISOString();
+
+    const entry: HistoricalSalesProduct = {
+      id: p.id || (existingIdx >= 0 ? list[existingIdx].id : `hist-${norm}`),
+      sku: norm,
+      product_name: p.product_name || (existingIdx >= 0 ? list[existingIdx].product_name : norm),
+      category: p.category ?? (existingIdx >= 0 ? list[existingIdx].category : null),
+      subcategory: p.subcategory ?? (existingIdx >= 0 ? list[existingIdx].subcategory : null),
+      hsn_code: p.hsn_code ?? (existingIdx >= 0 ? list[existingIdx].hsn_code : null),
+      uom: p.uom ?? (existingIdx >= 0 ? list[existingIdx].uom : 'EA'),
+      first_sale_date: p.first_sale_date ?? (existingIdx >= 0 ? list[existingIdx].first_sale_date : null),
+      latest_sale_date: p.latest_sale_date ?? (existingIdx >= 0 ? list[existingIdx].latest_sale_date : null),
+      total_historical_qty: Number(p.total_historical_qty ?? (existingIdx >= 0 ? list[existingIdx].total_historical_qty : 0)),
+      historical_invoice_count: Number(p.historical_invoice_count ?? (existingIdx >= 0 ? list[existingIdx].historical_invoice_count : 0)),
+      historical_row_count: Number(p.historical_row_count ?? (existingIdx >= 0 ? list[existingIdx].historical_row_count : 0)),
+      average_rate: p.average_rate !== undefined ? p.average_rate : (existingIdx >= 0 ? list[existingIdx].average_rate : null),
+      latest_rate: p.latest_rate !== undefined ? p.latest_rate : (existingIdx >= 0 ? list[existingIdx].latest_rate : null),
+      source_file: p.source_file || (existingIdx >= 0 ? list[existingIdx].source_file : 'sale.xlsx'),
+      import_hash: p.import_hash || (existingIdx >= 0 ? list[existingIdx].import_hash : null),
+      created_at: existingIdx >= 0 ? list[existingIdx].created_at : now,
+      updated_at: now,
+    };
+
+    if (existingIdx >= 0) {
+      list[existingIdx] = entry;
+    } else {
+      list.push(entry);
+    }
+    this.historicalSalesProducts = list;
+    return entry;
+  }
+
+  saveBulkHistoricalSalesProducts(products: Partial<HistoricalSalesProduct>[]): number {
+    const list = [...this.getHistoricalSalesProducts()];
+    const map = new Map<string, number>();
+    list.forEach((item, idx) => {
+      map.set(item.sku.toUpperCase(), idx);
+    });
+
+    const now = new Date().toISOString();
+    let count = 0;
+
+    for (const p of products) {
+      if (!p || !p.sku) continue;
+      const norm = p.sku.trim().toUpperCase();
+      const existingIdx = map.get(norm);
+
+      const entry: HistoricalSalesProduct = {
+        id: p.id || (existingIdx !== undefined ? list[existingIdx].id : `hist-${norm}`),
+        sku: norm,
+        product_name: p.product_name || (existingIdx !== undefined ? list[existingIdx].product_name : norm),
+        category: p.category ?? (existingIdx !== undefined ? list[existingIdx].category : 'General'),
+        subcategory: p.subcategory ?? (existingIdx !== undefined ? list[existingIdx].subcategory : null),
+        hsn_code: p.hsn_code ?? (existingIdx !== undefined ? list[existingIdx].hsn_code : null),
+        uom: p.uom ?? (existingIdx !== undefined ? list[existingIdx].uom : 'EA'),
+        first_sale_date: p.first_sale_date ?? (existingIdx !== undefined ? list[existingIdx].first_sale_date : null),
+        latest_sale_date: p.latest_sale_date ?? (existingIdx !== undefined ? list[existingIdx].latest_sale_date : null),
+        total_historical_qty: Number(p.total_historical_qty ?? (existingIdx !== undefined ? list[existingIdx].total_historical_qty : 0)),
+        historical_invoice_count: Number(p.historical_invoice_count ?? (existingIdx !== undefined ? list[existingIdx].historical_invoice_count : 0)),
+        historical_row_count: Number(p.historical_row_count ?? (existingIdx !== undefined ? list[existingIdx].historical_row_count : 0)),
+        average_rate: p.average_rate !== undefined ? p.average_rate : (existingIdx !== undefined ? list[existingIdx].average_rate : null),
+        latest_rate: p.latest_rate !== undefined ? p.latest_rate : (existingIdx !== undefined ? list[existingIdx].latest_rate : null),
+        source_file: p.source_file || (existingIdx !== undefined ? list[existingIdx].source_file : 'sale.xlsx'),
+        import_hash: p.import_hash || (existingIdx !== undefined ? list[existingIdx].import_hash : null),
+        created_at: existingIdx !== undefined ? list[existingIdx].created_at : now,
+        updated_at: now,
+      };
+
+      if (existingIdx !== undefined) {
+        list[existingIdx] = entry;
+      } else {
+        map.set(norm, list.length);
+        list.push(entry);
+      }
+      count++;
+    }
+
+    this.historicalSalesProducts = list;
+    return count;
+  }
+
+  clearHistoricalSalesProducts(): void {
+    this.historicalSalesProducts = [];
+  }
+
+  // ── Admin Reset Controls (Reset Test Inventory + Delete SAP Sales) ──
+  getLiveOperationalTransactionsCount(): {
+    total: number;
+    breakdown: {
+      deliveries: number;
+      payments: number;
+      expenses: number;
+      closedRoutes: number;
+      closedPicklists: number;
+      operationalMovements: number;
+    };
+  } {
+    const liveDeliveries = this.deliveries.filter(
+      (d) => d.status === 'delivered' || d.status === 'partial' || !!d.delivered_at
+    ).length;
+
+    const livePayments = this.payments.filter(
+      (p) => p.status === 'collected' || p.status === 'cleared'
+    ).length;
+
+    const liveExpenses = this.expenses.filter(
+      (e) => e.status === 'approved' || (e.status as string) === 'active'
+    ).length;
+
+    const closedRoutes = this.routes.filter((r) => r.status === 'completed').length;
+    const closedPicklists = this.picklists.filter((pl) => pl.status === 'completed').length;
+
+    const operationalMovements = this.inventoryMovements.filter(
+      (m) =>
+        ['delivery_fulfilled', 'damaged_transit', 'damaged_warehouse'].includes(m.movement_type) ||
+        (m.movement_type === 'route_return' && !!(m as any).delivery_id)
+    ).length;
+
+    const total =
+      liveDeliveries +
+      livePayments +
+      liveExpenses +
+      closedRoutes +
+      closedPicklists +
+      operationalMovements;
+
+    return {
+      total,
+      breakdown: {
+        deliveries: liveDeliveries,
+        payments: livePayments,
+        expenses: liveExpenses,
+        closedRoutes,
+        closedPicklists,
+        operationalMovements,
+      },
+    };
+  }
+
+  getInventoryResetPreview(): {
+    inventoryMovementsCount: number;
+    stockExceptionsCount: number;
+    vehicleStockRecordsCount: number;
+    reconciliationsCount: number;
+    liveOperationalTransactionsCount: number;
+    canReset: boolean;
+    blockReason: string | null;
+    liveBreakdown: {
+      deliveries: number;
+      payments: number;
+      expenses: number;
+      closedRoutes: number;
+      closedPicklists: number;
+      operationalMovements: number;
+    };
+  } {
+    const live = this.getLiveOperationalTransactionsCount();
+    const inventoryMovementsCount = this.inventoryMovements.length;
+    const stockExceptionsCount = this.routeStockExceptions.length + this.unmappedSkuExceptions.length;
+    const vehicleStockRecordsCount = this.inventoryMovements.filter(
+      (m) => m.to_location === 'vehicle' || m.from_location === 'vehicle' || m.movement_type === 'route_load'
+    ).length;
+    const reconciliationsCount = this.sapStockReconciliations.length;
+
+    return {
+      inventoryMovementsCount,
+      stockExceptionsCount,
+      vehicleStockRecordsCount,
+      reconciliationsCount,
+      liveOperationalTransactionsCount: live.total,
+      canReset: live.total === 0,
+      blockReason:
+        live.total > 0
+          ? 'Inventory reset is unavailable because live operational history exists.'
+          : null,
+      liveBreakdown: live.breakdown,
+    };
+  }
+
+  getSapSalesDeletePreview(importId?: string): {
+    batchesCount: number;
+    itemsCount: number;
+    baselineMovementsCount: number;
+    totalQuantity: number;
+    totalNetAmount: number;
+  } {
+    let batches = this.sapSalesImports;
+    let items = this.sapSalesImportItems;
+    if (importId) {
+      batches = batches.filter((b) => b.id === importId);
+      items = items.filter((i) => i.import_id === importId);
+    }
+
+    const itemMovementIds = new Set(items.map((i) => i.movement_id).filter(Boolean));
+    const itemKeySet = new Set(items.map((i) => i.idempotency_key).filter(Boolean));
+
+    const baselineMovements = this.inventoryMovements.filter(
+      (m) =>
+        (m.id && itemMovementIds.has(m.id)) ||
+        (m.idempotency_key && itemKeySet.has(m.idempotency_key)) ||
+        (!importId && (m.movement_type === 'sap_sales_baseline' || m.idempotency_key?.startsWith('sales_import:')))
+    );
+
+    const totalQuantity = items.reduce((sum, it) => sum + (Number(it.quantity) || 0), 0);
+    const totalNetAmount = items.reduce((sum, it) => sum + (Number(it.net_val) || 0), 0);
+
+    return {
+      batchesCount: batches.length,
+      itemsCount: items.length,
+      baselineMovementsCount: baselineMovements.length,
+      totalQuantity,
+      totalNetAmount,
+    };
+  }
+
+  resetTestInventory(actorInfo?: { userId?: string; userName?: string; role?: string }): {
+    success: boolean;
+    movements_deleted: number;
+    exceptions_deleted: number;
+    reconciliations_deleted: number;
+    timestamp: string;
+  } {
+    // 1. Authorization guard
+    if (actorInfo?.role && !['owner', 'master', 'admin'].includes(actorInfo.role.toLowerCase().trim())) {
+      throw new Error('Unauthorized: Only Owner, Admin, or Master can reset test inventory.');
+    }
+
+    // 2. Pre-go-live / Live-transaction guard
+    const live = this.getLiveOperationalTransactionsCount();
+    if (live.total > 0) {
+      throw new Error('Inventory reset is unavailable because live operational history exists.');
+    }
+
+    const movements_deleted = this.inventoryMovements.length;
+    const exceptions_deleted = this.routeStockExceptions.length + this.unmappedSkuExceptions.length;
+    const reconciliations_deleted = this.sapStockReconciliations.length;
+
+    // Clear test inventory movements, exceptions, reconciliations
+    this.inventoryMovements = [];
+    this.routeStockExceptions = [];
+    this.unmappedSkuExceptions = [];
+    this.sapStockReconciliations = [];
+    this.sapStockReconciliationItems = [];
+
+    // Decouple movement_id from audit logs
+    this.sapPurchaseImportItems = this.sapPurchaseImportItems.map((it) => ({
+      ...it,
+      movement_id: null,
+    }));
+    this.sapSalesImportItems = this.sapSalesImportItems.map((it) => ({
+      ...it,
+      movement_id: null,
+    }));
+
+    this.saveToStorage();
+
+    return {
+      success: true,
+      movements_deleted,
+      exceptions_deleted,
+      reconciliations_deleted,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  clearInventory(actorInfo?: { userId?: string; userName?: string; role?: string }): {
+    success: boolean;
+    movements_deleted: number;
+    exceptions_deleted: number;
+    reconciliations_deleted: number;
+    timestamp: string;
+  } {
+    return this.resetTestInventory(actorInfo);
+  }
+
+  deleteSapSalesHistory(
+    importId?: string,
+    _actorInfo?: { userId?: string; userName?: string; role?: string }
+  ): {
+    success: boolean;
+    batches_deleted: number;
+    items_deleted: number;
+    movements_deleted: number;
+    total_quantity: number;
+    total_net_amount: number;
+    timestamp: string;
+  } {
+    let targetBatches = this.sapSalesImports;
+    let targetItems = this.sapSalesImportItems;
+    if (importId) {
+      targetBatches = targetBatches.filter((b) => b.id === importId);
+      targetItems = targetItems.filter((i) => i.import_id === importId);
+    }
+
+    const targetBatchIds = new Set(targetBatches.map((b) => b.id));
+    const targetItemIds = new Set(targetItems.map((i) => i.id));
+    const targetMovementIds = new Set(targetItems.map((i) => i.movement_id).filter(Boolean));
+    const targetIdempotencyKeys = new Set(targetItems.map((i) => i.idempotency_key).filter(Boolean));
+
+    const total_quantity = targetItems.reduce((sum, it) => sum + (Number(it.quantity) || 0), 0);
+    const total_net_amount = targetItems.reduce((sum, it) => sum + (Number(it.net_val) || 0), 0);
+
+    // Filter out baseline inventory movements
+    const initialMovCount = this.inventoryMovements.length;
+    this.inventoryMovements = this.inventoryMovements.filter((m) => {
+      if (m.id && targetMovementIds.has(m.id)) return false;
+      if (m.idempotency_key && targetIdempotencyKeys.has(m.idempotency_key)) return false;
+      if (!importId && (m.movement_type === 'sap_sales_baseline' || m.idempotency_key?.startsWith('sales_import:'))) {
+        return false;
+      }
+      return true;
+    });
+    const movements_deleted = initialMovCount - this.inventoryMovements.length;
+
+    const items_deleted = targetItems.length;
+    const batches_deleted = targetBatches.length;
+
+    this.sapSalesImportItems = this.sapSalesImportItems.filter((i) => !targetItemIds.has(i.id) && !targetBatchIds.has(i.import_id));
+    this.sapSalesImports = this.sapSalesImports.filter((b) => !targetBatchIds.has(b.id));
+
+    this.saveToStorage();
+
+    return {
+      success: true,
+      batches_deleted,
+      items_deleted,
+      movements_deleted,
+      total_quantity,
+      total_net_amount,
+      timestamp: new Date().toISOString(),
     };
   }
 

@@ -3,6 +3,7 @@ import { mockStore } from '@/lib/mockStore';
 import type { Picklist, Delivery, PaymentMode, PicklistItem, RouteStockCheck, RouteReturnItemInput } from '@/lib/database.types';
 import { addNotification } from '@/features/notifications/services/notificationService';
 import { getLocalDateString } from '@/shared/utils/format';
+import { isCanonicalSkuFormat } from '@/features/products/services/skuResolutionService';
 
 // ── Query Functions ──────────────────────────────────────────────
 
@@ -46,10 +47,11 @@ export async function getWorkerTodayRoute(workerId: string, workerName?: string)
       .in('worker_id', idList)
       .in('status', ['assigned', 'in_progress', 'confirmed', 'draft'])
       .order('created_at', { ascending: false })
-      .limit(1);
+      .limit(5);
 
     if (directData && directData.length > 0) {
-      return directData[0] as Picklist;
+      const inProgress = directData.find((p) => p.status === 'in_progress');
+      return (inProgress || directData[0]) as Picklist;
     }
 
     // 2. Check picklists where the route is assigned to worker
@@ -59,37 +61,48 @@ export async function getWorkerTodayRoute(workerId: string, workerName?: string)
       .in('assigned_worker_id', idList);
 
     if (routeData && routeData.length > 0) {
-      const routeIds = routeData.map(r => r.id);
+      const routeIds = routeData.map((r) => r.id);
       const { data: picklistData } = await supabase
         .from('picklists')
         .select('*, route:routes(*), worker:workers!picklists_worker_id_fkey(*)')
         .in('route_id', routeIds)
         .in('status', ['assigned', 'in_progress', 'confirmed', 'draft'])
         .order('created_at', { ascending: false })
-        .limit(1);
+        .limit(5);
 
       if (picklistData && picklistData.length > 0) {
-        return picklistData[0] as Picklist;
+        const inProgress = picklistData.find((p) => p.status === 'in_progress');
+        return (inProgress || picklistData[0]) as Picklist;
       }
     }
 
     // 3. Fallback to mockStore picklists if Supabase returned nothing
     const mockPicklists = mockStore.getPicklists();
-    const activeMock = mockPicklists.find(
-      (p) =>
-        idList.includes(p.worker_id || '') &&
-        ['assigned', 'in_progress', 'confirmed', 'draft'].includes(p.status)
-    );
+    const activeMock =
+      mockPicklists.find(
+        (p) => idList.includes(p.worker_id || '') && p.status === 'in_progress'
+      ) ||
+      mockPicklists.find(
+        (p) =>
+          idList.includes(p.worker_id || '') &&
+          ['assigned', 'in_progress', 'confirmed', 'draft'].includes(p.status)
+      );
     if (activeMock) return activeMock;
 
     return null;
   } catch {
     const mockPicklists = mockStore.getPicklists();
-    const activeMock = mockPicklists.find(
-      (p) =>
-        (p.worker_id === workerId || (workerName && p.notes?.includes(workerName))) &&
-        ['assigned', 'in_progress', 'confirmed', 'draft'].includes(p.status)
-    );
+    const activeMock =
+      mockPicklists.find(
+        (p) =>
+          (p.worker_id === workerId || (workerName && p.notes?.includes(workerName))) &&
+          p.status === 'in_progress'
+      ) ||
+      mockPicklists.find(
+        (p) =>
+          (p.worker_id === workerId || (workerName && p.notes?.includes(workerName))) &&
+          ['assigned', 'in_progress', 'confirmed', 'draft'].includes(p.status)
+      );
     return activeMock || null;
   }
 }
@@ -171,7 +184,7 @@ export async function getDeliveryDetail(deliveryId: string): Promise<Delivery | 
     }
   }
 
-  // Stage B: Try loading from Supabase invoice_items if invoice_id is present
+  // Stage B: Try loading / auto-healing from Supabase invoice_items if invoice_id is present
   if (items.length === 0 && delivery.invoice_id) {
     try {
       const { data: invItems } = await supabase
@@ -180,24 +193,40 @@ export async function getDeliveryDetail(deliveryId: string): Promise<Delivery | 
         .eq('invoice_id', delivery.invoice_id);
 
       if (invItems && invItems.length > 0) {
-        items = invItems.map((ii) => ({
-          id: ii.id,
+        // Auto-heal: Persist canonical delivery_items into Supabase so RPC validation and IDs match
+        const toInsert = invItems.map((ii) => ({
           delivery_id: delivery!.id,
           product_id: ii.product_id,
           sku: ii.sku,
           product_name: ii.product_name,
           ordered_qty: ii.quantity,
-          delivered_qty: ii.quantity,
-          free_quantity: ii.free_quantity || 0,
+          delivered_qty: 0,
           delivered_free_qty: 0,
           returned_qty: 0,
           returned_free_qty: 0,
           damaged_qty: 0,
           damaged_free_qty: 0,
+          free_quantity: ii.free_quantity || 0,
           rate: ii.rate,
           amount: ii.amount,
-          notes: null,
         }));
+
+        const { data: createdDelItems } = await supabase
+          .from('delivery_items')
+          .insert(toInsert)
+          .select('*');
+
+        if (createdDelItems && createdDelItems.length > 0) {
+          items = createdDelItems as any;
+        } else {
+          const { data: refetched } = await supabase
+            .from('delivery_items')
+            .select('*')
+            .eq('delivery_id', delivery.id);
+          if (refetched && refetched.length > 0) {
+            items = refetched as any;
+          }
+        }
       }
     } catch {
       // ignore
@@ -302,7 +331,7 @@ export async function getDeliveryDetail(deliveryId: string): Promise<Delivery | 
             const pliDigits = (pli.party_id || '').replace(/[^0-9]/g, '');
             return pliDigits === partyDigits || pli.party_id === partyId;
           });
-          const targetItems = partyItems.length > 0 ? partyItems : allPlItems;
+          const targetItems = partyItems.length > 0 ? partyItems : [];
           items = targetItems.map((pli: PicklistItem) => ({
             id: pli.id,
             delivery_id: delivery!.id,
@@ -382,84 +411,60 @@ export async function getDeliveryDetail(deliveryId: string): Promise<Delivery | 
 
 /** Start a route — atomically moves physical stock from warehouse to vehicle via start_route_with_load */
 export async function startRoute(picklistId: string, workerId?: string, _workerName?: string): Promise<void> {
-  let stockShortageExceptionCaught = false;
-
   try {
-    const { error } = await supabase.rpc('start_route_with_load', {
+    const { data, error } = await supabase.rpc('start_route_with_load', {
       p_picklist_id: picklistId,
       p_worker_id: workerId || null,
     });
 
     if (error) {
       const errMsg = (error.message || '').toLowerCase();
-      if (errMsg.includes('insufficient warehouse stock')) {
-        console.warn(`[ROUTE START] Warehouse stock shortage reported by RPC (${error.message}). Non-blocking exception policy applied.`);
-        stockShortageExceptionCaught = true;
-
-        // Try to log exception to route_stock_exceptions table directly
-        try {
-          const skuMatch = error.message.match(/SKU\s+([A-Z0-9_-]+)/i);
-          const shortageSku = skuMatch ? skuMatch[1] : 'UNKNOWN';
-          const pl = mockStore.getPicklists().find((p) => p.id === picklistId);
-          await supabase.from('route_stock_exceptions').insert({
-            route_id: pl?.route_id || null,
-            picklist_id: picklistId,
-            worker_id: workerId || pl?.worker_id || null,
-            sku: shortageSku,
-            notes: `Route started despite server stock shortage: ${error.message}`,
-            status: 'open',
-          });
-        } catch {
-          // ignore
-        }
-      } else if (
+      const isNetworkOrOffline =
         errMsg.includes('fetch failed') ||
         errMsg.includes('failed to fetch') ||
         errMsg.includes('network') ||
         errMsg.includes('could not connect') ||
-        errMsg.includes('schema cache')
-      ) {
+        errMsg.includes('credentials not configured');
+
+      if (isNetworkOrOffline) {
         console.warn('[ROUTE START] Supabase unreachable or offline, falling back to local route start workflow:', error.message);
       } else {
-        // Legitimate authorization/validation error (wrong worker, not assigned, invalid state)
+        // Legitimate database or authorization error (wrong worker, not assigned, invalid state, etc.)
         throw new Error(`Failed to start route: ${error.message}`);
+      }
+    } else if (data && typeof data === 'object') {
+      const res = data as any;
+      if (res.had_shortage) {
+        console.warn(`[ROUTE START] Route started with ${res.shortage_count} shortage exception(s) logged by server.`);
       }
     }
   } catch (err: any) {
     if (err.message && err.message.toLowerCase().includes('failed to start route')) {
       throw err;
     }
-    console.warn('[ROUTE START] Network or RPC issue calling start_route_with_load, continuing locally:', err);
+    const errMsg = (err.message || '').toLowerCase();
+    const isNetworkOrOffline =
+      errMsg.includes('fetch failed') ||
+      errMsg.includes('failed to fetch') ||
+      errMsg.includes('network') ||
+      errMsg.includes('could not connect');
+
+    if (isNetworkOrOffline) {
+      console.warn('[ROUTE START] Network or RPC issue calling start_route_with_load, continuing locally:', err);
+    } else {
+      throw new Error(`Failed to start route: ${err.message || String(err)}`);
+    }
   }
 
-  // Sync mockStore and evaluate local stock shortages
+  // Sync mockStore and evaluate local stock shortages for offline fallback/consistency
   const pl = mockStore.getPicklists().find((p) => p.id === picklistId);
   if (pl) {
     const assignedWorker = workerId || pl.worker_id;
 
-    // Check mock picklist items for warehouse stock discrepancies
-    const items = mockStore.getPicklistItems(picklistId);
-    for (const it of items) {
-      // Check if exception already exists or if shortage occurred
-      if (stockShortageExceptionCaught) {
-        mockStore.saveRouteStockException({
-          route_id: pl.route_id || 'unknown',
-          picklist_id: picklistId,
-          worker_id: assignedWorker || 'unknown',
-          product_id: it.product_id,
-          sku: it.sku,
-          required_quantity: it.quantity,
-          recorded_warehouse_stock: 0,
-          shortage_quantity: it.quantity,
-          notes: `Route started despite warehouse stock shortage for SKU ${it.sku}`,
-        });
-      }
-    }
-
     mockStore.savePicklist({
       ...pl,
       status: 'in_progress',
-      started_at: new Date().toISOString(),
+      started_at: pl.started_at || new Date().toISOString(),
       worker_id: assignedWorker || pl.worker_id,
     });
   }
@@ -632,6 +637,17 @@ export interface CompleteDeliveryInput {
 
 /** Complete a party delivery atomically using RPC complete_delivery_with_ledger */
 export async function completePartyDelivery(input: CompleteDeliveryInput): Promise<any> {
+  // Pre-validate canonical SKU identity before invoking server RPC
+  const mockDeliveries = mockStore.getDeliveries();
+  const targetDel = mockDeliveries.find((d) => d.id === input.deliveryId);
+  if (targetDel && targetDel.items) {
+    for (const item of targetDel.items) {
+      if (!item.sku || !isCanonicalSkuFormat(item.sku)) {
+        throw new Error(`Product identity unresolved for item '${item.product_name || item.sku}' — Admin review required.`);
+      }
+    }
+  }
+
   const { data, error } = await supabase.rpc('complete_delivery_with_ledger', {
     p_delivery_id: input.deliveryId,
     p_worker_id: input.workerId,
@@ -789,6 +805,50 @@ export async function closeRouteReconciliation(
   return data;
 }
 
+export interface SubmitRouteCheckinInput {
+  picklistId: string;
+  workerId: string;
+  returnItems: RouteReturnItemInput[];
+  actualCash: number;
+  expenses?: Array<{
+    category: string;
+    amount: number;
+    description?: string;
+    payment_method?: string;
+  }>;
+  stockReason?: string;
+  cashReason?: string;
+}
+
+/** Field worker submits route check-in and reconciliation report (NO ADMIN PIN REQUIRED) */
+export async function submitRouteCheckin(input: SubmitRouteCheckinInput): Promise<any> {
+  const { data, error } = await supabase.rpc('submit_route_checkin_and_reconciliation', {
+    p_picklist_id: input.picklistId,
+    p_worker_id: input.workerId,
+    p_return_items: input.returnItems,
+    p_actual_cash: input.actualCash,
+    p_expenses: input.expenses && input.expenses.length > 0 ? input.expenses : [],
+    p_stock_reason: input.stockReason || null,
+    p_cash_reason: input.cashReason || null,
+  });
+
+  if (error) {
+    throw new Error(`Route check-in failed: ${error.message}`);
+  }
+
+  // Sync mockStore
+  const pl = mockStore.getPicklists().find((p) => p.id === input.picklistId);
+  if (pl) {
+    mockStore.savePicklist({
+      ...pl,
+      status: (data?.status as any) || 'completed',
+      completed_at: data?.status === 'completed' ? new Date().toISOString() : pl.completed_at,
+    });
+  }
+
+  return data;
+}
+
 export interface RouteFinancialReconciliationInput {
   picklistId: string;
   workerId: string;
@@ -844,11 +904,13 @@ export async function reconcileRouteFinances(
 // ── Salesman Performance & Metrics ────────────────────────────────
 
 export interface WorkerPerformanceMetrics {
-  totalSales: number;
+  totalSales: number;         // Sum of delivered_amount (actual commercial sales value)
+  totalCollected: number;     // Sum of collected_amount (cash/upi/cheque actually received)
+  totalPendingCredit: number; // totalSales - totalCollected (credit outstanding)
   totalRoutes: number;
   monthlyTarget: number;
-  achievedSales: number;
-  remainingTarget: number;
+  achievedSales: number;      // = totalSales (sales drive target, not collections)
+  remainingTarget: number;    // monthlyTarget - achievedSales
   progressPercent: number;
   topProduct: {
     name: string;
@@ -866,7 +928,9 @@ export interface WorkerPerformanceMetrics {
     name: string;
     date: string;
     partiesCount: number;
-    amount: number;
+    amount: number;       // Sales value (delivered_amount)
+    collected: number;    // Actually collected amount
+    pending: number;      // Pending credit for this route
     status: string;
   }[];
 }
@@ -912,7 +976,8 @@ export async function getWorkerPerformanceMetrics(workerId: string, workerName?:
   // ── 2. Fetch this worker's real picklists ────────────────────────
   let routesList: WorkerPerformanceMetrics['routesList'] = [];
   let totalRoutes = 0;
-  let totalSales = 0;
+  let totalSales = 0;        // Authoritative: delivered_amount (commercial sales value)
+  let totalCollected = 0;    // Authoritative: collected_amount (cash/upi/cheque received)
 
   try {
     const { data: picklists } = await supabase
@@ -922,18 +987,78 @@ export async function getWorkerPerformanceMetrics(workerId: string, workerName?:
       .order('created_at', { ascending: false });
 
     if (picklists && picklists.length > 0) {
+      const picklistIds = picklists.map(p => p.id);
       const completed = picklists.filter(p => p.status === 'completed' || p.status === 'confirmed');
       totalRoutes = completed.length;
-      totalSales = completed.reduce((sum, p) => sum + Number(p.total_collected ?? p.total_amount ?? 0), 0);
 
-      routesList = picklists.map(p => ({
-        id: p.id,
-        name: (p.route as any)?.name || `Route ${p.picklist_number}`,
-        date: p.date || '',
-        partiesCount: p.total_parties || 0,
-        amount: Number(p.total_collected ?? p.total_amount ?? 0),
-        status: p.status,
-      }));
+      // ── AUTHORITATIVE SALES: Query delivery rows for delivered_amount ──
+      // IMPORTANT: Sales = delivered_amount, NOT total_collected.
+      // Credit sales have delivered_amount > 0 but collected_amount < delivered_amount.
+      // total_collected on picklist only reflects cash/upi/cheque received.
+      try {
+        const { data: deliveries } = await supabase
+          .from('deliveries')
+          .select('id, picklist_id, delivered_amount, collected_amount, status')
+          .in('picklist_id', picklistIds)
+          .in('status', ['delivered', 'partial']);
+
+        if (deliveries && deliveries.length > 0) {
+          totalSales = deliveries.reduce((s, d) => s + Number(d.delivered_amount ?? 0), 0);
+          totalCollected = deliveries.reduce((s, d) => s + Number(d.collected_amount ?? 0), 0);
+
+          // Build per-picklist sales/collected map for routesList
+          const picklistSalesMap: Record<string, { sales: number; collected: number }> = {};
+          for (const d of deliveries) {
+            if (!picklistSalesMap[d.picklist_id]) picklistSalesMap[d.picklist_id] = { sales: 0, collected: 0 };
+            picklistSalesMap[d.picklist_id].sales += Number(d.delivered_amount ?? 0);
+            picklistSalesMap[d.picklist_id].collected += Number(d.collected_amount ?? 0);
+          }
+
+          routesList = picklists.map(p => {
+            const pm = picklistSalesMap[p.id] ?? { sales: 0, collected: 0 };
+            // For in-progress/pending routes, fall back to total_amount (scheduled value)
+            const routeSales = pm.sales > 0 ? pm.sales : Number(p.total_amount ?? 0);
+            const routeCollected = pm.collected > 0 ? pm.collected : Number(p.total_collected ?? 0);
+            return {
+              id: p.id,
+              name: (p.route as any)?.name || `Route ${p.picklist_number}`,
+              date: p.date || '',
+              partiesCount: p.total_parties || 0,
+              amount: routeSales,
+              collected: routeCollected,
+              pending: Math.max(0, routeSales - routeCollected),
+              status: p.status,
+            };
+          });
+        } else {
+          // No deliveries yet (route not started) — show scheduled amounts
+          routesList = picklists.map(p => ({
+            id: p.id,
+            name: (p.route as any)?.name || `Route ${p.picklist_number}`,
+            date: p.date || '',
+            partiesCount: p.total_parties || 0,
+            amount: Number(p.total_amount ?? 0),
+            collected: Number(p.total_collected ?? 0),
+            pending: 0,
+            status: p.status,
+          }));
+        }
+      } catch {
+        // Delivery query failed — fall back to picklist totals (better than using total_collected as sales)
+        routesList = picklists.map(p => ({
+          id: p.id,
+          name: (p.route as any)?.name || `Route ${p.picklist_number}`,
+          date: p.date || '',
+          partiesCount: p.total_parties || 0,
+          amount: Number(p.total_amount ?? 0),
+          collected: Number(p.total_collected ?? 0),
+          pending: Math.max(0, Number(p.total_amount ?? 0) - Number(p.total_collected ?? 0)),
+          status: p.status,
+        }));
+        // For fallback: use total_amount as sales approximation (better than total_collected)
+        totalSales = completed.reduce((sum, p) => sum + Number(p.total_amount ?? 0), 0);
+        totalCollected = completed.reduce((sum, p) => sum + Number(p.total_collected ?? 0), 0);
+      }
     }
   } catch {
     // Supabase error — stay at zero
@@ -990,6 +1115,9 @@ export async function getWorkerPerformanceMetrics(workerId: string, workerName?:
     ? { name: allProductsList[0].name, unitsSold: allProductsList[0].unitsSold, revenue: allProductsList[0].revenue }
     : null;
 
+  const totalPendingCredit = Math.max(0, totalSales - totalCollected);
+  // achievedSales = totalSales (sales drive target progress, not collections)
+  // A credit sale is a VALID SALE and must count toward target achievement.
   const achievedSales = totalSales;
   const remainingTarget = Math.max(0, monthlyTarget - achievedSales);
   const progressPercent = monthlyTarget > 0
@@ -998,6 +1126,8 @@ export async function getWorkerPerformanceMetrics(workerId: string, workerName?:
 
   return {
     totalSales,
+    totalCollected,
+    totalPendingCredit,
     totalRoutes,
     monthlyTarget,
     achievedSales,

@@ -29,7 +29,7 @@ export interface ProductMasterEntry {
 }
 
 /** Default estimated MRP lookup map for standard pack sizes if not present on document */
-const KNOWN_MRP_MAP: Record<string, number> = {
+export const KNOWN_MRP_MAP: Record<string, number> = {
   '1600908': 150,
   '1600958': 75,
   '1601319': 145,
@@ -74,18 +74,29 @@ const KNOWN_MRP_MAP: Record<string, number> = {
   'IN00992A': 160,
   'IN01003A': 164,
 };
+export const SAP_MRP_CATALOG = KNOWN_MRP_MAP;
 
 /**
- * All canonical SAP Colgate-Palmolive products.
+ * Active Product Master catalog entries.
+ * Starts empty and is populated organically by real SAP Purchase / Goods Receipt imports.
  */
-export const SAP_PRODUCT_MASTER: ProductMasterEntry[] = RAW_SAP_PRODUCTS.map((entry) => {
+export const SAP_PRODUCT_MASTER: ProductMasterEntry[] = [];
+
+/**
+ * Optional static SAP reference catalog dictionary.
+ * Used ONLY as a reference dictionary for metadata enrichment (e.g. category, brand)
+ * when an unmapped SKU is imported from SAP, strictly without pre-populating the active Product Master.
+ */
+const SAP_REFERENCE_CATALOG = new Map<string, ProductMasterEntry>();
+
+for (const entry of RAW_SAP_PRODUCTS) {
   const cleanSku = String(entry.sku || '').trim();
+  if (!cleanSku) continue;
   const cleanName = String(entry.name || '').trim();
   const rawCat = String(entry.category || '').trim();
   const brand = String(entry.brand || '').trim() || 'Colgate';
   const uom = String(entry.uom || '').trim() || 'EA';
 
-  // Format category to readable string
   let category = 'Oral Care';
   if (rawCat.includes('Personal Care') || rawCat.startsWith('20')) {
     category = 'Personal Care';
@@ -101,7 +112,7 @@ export const SAP_PRODUCT_MASTER: ProductMasterEntry[] = RAW_SAP_PRODUCTS.map((en
 
   const mrp = KNOWN_MRP_MAP[cleanSku] || 50;
 
-  return {
+  const refItem: ProductMasterEntry = {
     sku: cleanSku,
     name: cleanName,
     mrp,
@@ -118,22 +129,49 @@ export const SAP_PRODUCT_MASTER: ProductMasterEntry[] = RAW_SAP_PRODUCTS.map((en
     materialGroup: entry.materialGroup || '',
     prodHierarchy: entry.prodHierarchy || '',
   };
-});
 
-// Fast lookup index structures
+  SAP_REFERENCE_CATALOG.set(cleanSku.toUpperCase(), refItem);
+  const unpadded = cleanSku.toUpperCase().replace(/^0+/, '');
+  if (unpadded && !SAP_REFERENCE_CATALOG.has(unpadded)) {
+    SAP_REFERENCE_CATALOG.set(unpadded, refItem);
+  }
+}
+
+/**
+ * Pure reference dictionary lookup from official SAP reference catalog.
+ * Does NOT indicate that the product exists in active Product Master.
+ */
+export function findSapReferenceCatalog(sku: string): ProductMasterEntry | undefined {
+  if (!sku) return undefined;
+  const norm = sku.trim().toUpperCase();
+  if (SAP_REFERENCE_CATALOG.has(norm)) return SAP_REFERENCE_CATALOG.get(norm);
+  const unpadded = norm.replace(/^0+/, '');
+  if (unpadded && SAP_REFERENCE_CATALOG.has(unpadded)) {
+    return SAP_REFERENCE_CATALOG.get(unpadded);
+  }
+  return undefined;
+}
+
+/**
+ * Returns total count of canonical products in official SAP reference catalog.
+ */
+export function getCanonicalSapCatalogCount(): number {
+  return RAW_SAP_PRODUCTS.length;
+}
+
+// Fast lookup index structures for ACTIVE OPERATIONAL PRODUCT MASTER ONLY
 const SKU_MAP = new Map<string, ProductMasterEntry>();
 const UNPADDED_SKU_MAP = new Map<string, ProductMasterEntry>();
 const MASTER_SKU_SET = new Set<string>();
 
-for (const p of SAP_PRODUCT_MASTER) {
-  const norm = p.sku.toUpperCase();
-  SKU_MAP.set(norm, p);
-  MASTER_SKU_SET.add(norm);
-
-  const unpadded = norm.replace(/^0+/, '');
-  if (unpadded && !UNPADDED_SKU_MAP.has(unpadded)) {
-    UNPADDED_SKU_MAP.set(unpadded, p);
-  }
+/**
+ * Resets the in-memory Product Master lookup maps and catalog array to empty.
+ */
+export function resetProductMasterMemory(): void {
+  SKU_MAP.clear();
+  UNPADDED_SKU_MAP.clear();
+  MASTER_SKU_SET.clear();
+  SAP_PRODUCT_MASTER.length = 0;
 }
 
 /**
@@ -171,13 +209,22 @@ export function findProductMasterByDescription(desc: string): ProductMasterEntry
   const normDesc = desc.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
   if (!normDesc) return undefined;
 
-  // 1. Exact normalized name match
+  // 1. Exact normalized name match in active Product Master
   for (const p of SAP_PRODUCT_MASTER) {
     const pNorm = p.name.toLowerCase().replace(/[^a-z0-9]/g, '');
     if (pNorm === normDesc) return p;
   }
 
-  // 2. Prefix / startsWith match
+  // 2. Exact normalized name match in SAP Reference Catalog
+  for (const entry of RAW_SAP_PRODUCTS) {
+    const pNorm = (entry.name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (pNorm === normDesc && entry.sku) {
+      const ref = findSapReferenceCatalog(entry.sku);
+      if (ref) return ref;
+    }
+  }
+
+  // 3. Prefix / startsWith match in active Product Master
   for (const p of SAP_PRODUCT_MASTER) {
     const pNorm = p.name.toLowerCase().replace(/[^a-z0-9]/g, '');
     if (pNorm.startsWith(normDesc) || (normDesc.length > 8 && normDesc.startsWith(pNorm))) {
@@ -185,12 +232,22 @@ export function findProductMasterByDescription(desc: string): ProductMasterEntry
     }
   }
 
-  // 3. Known keyword match
+  // 4. Prefix / startsWith match in SAP Reference Catalog
+  for (const entry of RAW_SAP_PRODUCTS) {
+    const pNorm = (entry.name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    if ((pNorm.startsWith(normDesc) || (normDesc.length > 8 && normDesc.startsWith(pNorm))) && entry.sku) {
+      const ref = findSapReferenceCatalog(entry.sku);
+      if (ref) return ref;
+    }
+  }
+
+  // 5. Specific keyword matches (strictly discriminating pack variants)
   const dNorm = desc.toLowerCase();
   for (const p of SAP_PRODUCT_MASTER) {
     const pNorm = p.name.toLowerCase();
     if (dNorm.includes('actsalt') && pNorm.includes('actsalt')) return p;
-    if (dNorm.includes('cibaca 175') && pNorm.includes('cibaca 175')) return p;
+    if (dNorm.includes('cibaca 175g+175g') && pNorm.includes('175g+175g')) return p;
+    if (dNorm.includes('cibaca 175') && !dNorm.includes('+') && pNorm.includes('cibaca 175') && !pNorm.includes('+')) return p;
     if (dNorm.includes('cdc 100') && pNorm.includes('cdc 100')) return p;
     if (dNorm.includes('cdc 150') && pNorm.includes('cdc 150')) return p;
     if (dNorm.includes('cdc 200') && pNorm.includes('cdc 200') && !pNorm.includes('100')) return p;
@@ -220,6 +277,13 @@ export function registerProductMasterEntry(entry: ProductMasterEntry): void {
   const unpadded = norm.replace(/^0+/, '');
   if (unpadded) {
     UNPADDED_SKU_MAP.set(unpadded, entry);
+  }
+
+  const existingIdx = SAP_PRODUCT_MASTER.findIndex((p) => p.sku.toUpperCase() === norm);
+  if (existingIdx >= 0) {
+    SAP_PRODUCT_MASTER[existingIdx] = entry;
+  } else {
+    SAP_PRODUCT_MASTER.push(entry);
   }
 }
 

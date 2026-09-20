@@ -1,16 +1,20 @@
 import { useState } from 'react';
 import { useAuth } from '@/app/AuthProvider';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
+import { toast } from 'sonner';
 import {
   MapPin, ChevronRight, CheckCircle2, Package, Loader2,
   TrendingUp, Target, Award, Route, X, Calendar, DollarSign,
-  Zap, ArrowRight, Sparkles,
+  Zap, ArrowRight, Sparkles, Clock, Check, Bell,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
-import type { Picklist } from '@/lib/database.types';
+import type { Picklist, Payment, PaymentMode } from '@/lib/database.types';
 import { formatCurrency } from '@/shared/utils/format';
 import { getWorkerTodayRoute, getWorkerPerformanceMetrics } from '../services/workerRouteService';
+import { fetchPendingCreditPayments, recordPartyPayment } from '@/features/payments/services/paymentService';
+import { addNotification } from '@/features/notifications/services/notificationService';
+import { QK } from '@/lib/queryKeys';
 
 async function getWorkerRecentPicklists(workerId: string): Promise<Picklist[]> {
   try {
@@ -31,10 +35,19 @@ async function getWorkerRecentPicklists(workerId: string): Promise<Picklist[]> {
 export function WorkerDashboard() {
   const { profile } = useAuth();
   const navigate = useNavigate();
+  const qc = useQueryClient();
   const workerId = profile?.worker_id || profile?.id || '';
   const workerName = profile?.full_name || '';
 
   const [activeModal, setActiveModal] = useState<'products' | 'routes' | 'target' | null>(null);
+
+  // Collection modal states
+  const [collectingItem, setCollectingItem] = useState<Payment | null>(null);
+  const [showCollectModal, setShowCollectModal] = useState(false);
+  const [collectionMode, setCollectionMode] = useState<PaymentMode>('cash');
+  const [collectionAmount, setCollectionAmount] = useState<number>(0);
+  const [collectionNotes, setCollectionNotes] = useState<string>('');
+  const [isSubmittingCollection, setIsSubmittingCollection] = useState(false);
 
   const { data: todayRoute, isLoading: isLoadingRoute } = useQuery({
     queryKey: ['worker-today-route', workerId, workerName],
@@ -56,6 +69,85 @@ export function WorkerDashboard() {
     // Only fetch after profile is fully resolved; workerId derived from profile.id
     enabled: !!workerId && !!profile,
   });
+
+  // Query pending credit collections for worker's route/assignment
+  const { data: pendingCollections = [] } = useQuery({
+    queryKey: ['worker-pending-credit', workerId, todayRoute?.route?.id],
+    queryFn: async () => {
+      const byWorker = await fetchPendingCreditPayments({ workerId });
+      if (byWorker.length > 0) return byWorker;
+      if (todayRoute?.route?.id) {
+        return fetchPendingCreditPayments({ routeId: todayRoute.route.id });
+      }
+      return fetchPendingCreditPayments();
+    },
+    enabled: !!workerId,
+    refetchInterval: 30_000,
+  });
+
+  const totalPendingAmount = pendingCollections.reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+  const handleOpenCollectModal = (item: Payment) => {
+    setCollectingItem(item);
+    setCollectionAmount(Number(item.amount || 0));
+    setCollectionMode('cash');
+    setCollectionNotes('');
+    setShowCollectModal(true);
+  };
+
+  const handleInformAdmin = (item: Payment) => {
+    try {
+      addNotification({
+        recipient_role: 'admin',
+        title: 'Payment Reminder from Salesman',
+        message: `${workerName || 'Salesman'} sent a reminder: Pending credit payment of ${formatCurrency(item.amount)} for ${item.party?.name || 'Party'} (Invoice: ${item.invoice?.invoice_number || (item as any).invoice_number || 'N/A'}). Ready for admin verification/completion.`,
+        type: 'payment',
+        link: '/admin/payments',
+      });
+      toast.success(`Admin notified for ${item.party?.name || 'Party'} payment!`);
+    } catch {
+      toast.error('Failed to notify admin');
+    }
+  };
+
+  const handleRecordCollection = async () => {
+    if (!collectingItem || collectionAmount <= 0) {
+      toast.error('Please enter a valid collected amount');
+      return;
+    }
+    setIsSubmittingCollection(true);
+    try {
+      await recordPartyPayment({
+        party_id: collectingItem.party_id,
+        amount: collectionAmount,
+        payment_mode: collectionMode,
+        delivery_id: collectingItem.delivery_id || undefined,
+        worker_id: workerId || undefined,
+        reference_number: collectionNotes || undefined,
+        notes: `Collected by ${workerName || 'Salesman'}${collectionNotes ? ` - ${collectionNotes}` : ''}`,
+      });
+
+      addNotification({
+        recipient_role: 'admin',
+        title: 'Credit Payment Collected by Salesman',
+        message: `${workerName || 'Salesman'} collected ${formatCurrency(collectionAmount)} (${collectionMode.toUpperCase()}) from ${collectingItem.party?.name || 'Party'}. Ready for admin review/settlement.`,
+        type: 'payment',
+        link: '/admin/payments',
+      });
+
+      toast.success(`Collected ${formatCurrency(collectionAmount)} successfully!`);
+      setShowCollectModal(false);
+      setCollectingItem(null);
+      qc.invalidateQueries({ queryKey: ['worker-pending-credit'] });
+      qc.invalidateQueries({ queryKey: QK.payments });
+      qc.invalidateQueries({ queryKey: ['worker-performance-metrics'] });
+      qc.invalidateQueries({ queryKey: ['worker-today-route'] });
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to record payment collection');
+    } finally {
+      setIsSubmittingCollection(false);
+    }
+  };
 
   const greeting = () => {
     const hour = new Date().getHours();
@@ -152,6 +244,13 @@ export function WorkerDashboard() {
                 Remaining: <span className="text-amber-300 font-bold">{formatCurrency(metrics.remainingTarget)}</span>
               </span>
             </div>
+            {/* Pending Credit sub-line */}
+            {metrics.totalPendingCredit > 0 && (
+              <div className="flex justify-between text-[10px] text-slate-400 mt-1">
+                <span>Collected: <span className="text-emerald-400 font-semibold">{formatCurrency(metrics.totalCollected)}</span></span>
+                <span>Pending Credit: <span className="text-amber-300 font-semibold">{formatCurrency(metrics.totalPendingCredit)}</span></span>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -239,6 +338,101 @@ export function WorkerDashboard() {
         </div>
       )}
 
+      {/* ── Credit Payment Reminders Section ───────────────────────────── */}
+      {pendingCollections.length > 0 && (
+        <div className="bg-gradient-to-br from-amber-500/10 via-amber-500/5 to-surface-50 dark:to-surface-800/50 border border-amber-300 dark:border-amber-700/60 rounded-2xl p-4 shadow-xs">
+          <div className="flex items-center justify-between mb-2.5">
+            <div className="flex items-center gap-2">
+              <div className="h-8 w-8 rounded-lg bg-amber-500/20 text-amber-600 dark:text-amber-400 flex items-center justify-center">
+                <Clock className="h-4 w-4" />
+              </div>
+              <div>
+                <h3 className="text-xs font-bold text-surface-900 dark:text-white flex items-center gap-1.5">
+                  Credit Collection Reminders
+                  <span className="bg-amber-500 text-white text-[10px] px-1.5 py-0.2 rounded-full font-extrabold">
+                    {pendingCollections.length}
+                  </span>
+                </h3>
+                <p className="text-[10px] text-surface-500 dark:text-surface-400">
+                  Remind customers of credit payments on your route
+                </p>
+              </div>
+            </div>
+            <div className="text-right">
+              <div className="text-sm font-black text-amber-600 dark:text-amber-400">
+                {formatCurrency(totalPendingAmount)}
+              </div>
+              <div className="text-[9px] text-surface-400 font-medium">pending udhari</div>
+            </div>
+          </div>
+
+          <div className="space-y-2 mt-3">
+            {pendingCollections.slice(0, 4).map((item) => (
+              <div
+                key={item.id}
+                className="bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700/80 rounded-xl p-3 flex items-center justify-between gap-2 hover:border-amber-400 transition-colors shadow-2xs"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs font-bold text-surface-900 dark:text-white truncate">
+                      {item.party?.name || 'Customer'}
+                    </span>
+                    {(item.days_outstanding ?? 0) > 0 && (
+                      <span className="text-[9px] font-semibold text-amber-700 dark:text-amber-300 bg-amber-100 dark:bg-amber-900/50 px-1.5 py-0.2 rounded-md flex-shrink-0">
+                        {item.days_outstanding}d ago
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[10px] text-surface-500 dark:text-surface-400 mt-0.5 truncate">
+                    {item.route?.name || 'Route'}
+                    {item.invoice?.invoice_number ? ` • Inv #${item.invoice.invoice_number}` : ''}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-1.5 flex-shrink-0">
+                  <div className="text-right mr-1">
+                    <div className="text-xs font-extrabold text-amber-600 dark:text-amber-400">
+                      {formatCurrency(item.amount)}
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => handleInformAdmin(item)}
+                    className="p-1.5 rounded-lg border border-surface-200 dark:border-surface-700 bg-surface-50 dark:bg-surface-700 text-surface-600 dark:text-surface-300 hover:text-blue-600 hover:border-blue-400 transition-colors cursor-pointer"
+                    title="Inform Admin about this pending credit"
+                  >
+                    <Bell className="h-3.5 w-3.5" />
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleOpenCollectModal(item)}
+                    className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold flex items-center gap-1 cursor-pointer transition-colors shadow-xs"
+                    title="Record Collection"
+                  >
+                    <Check className="h-3 w-3" /> Collect
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-2.5 pt-2 border-t border-amber-200/60 dark:border-amber-800/40 flex items-center justify-between text-xs">
+            <span className="text-[11px] text-surface-500 dark:text-surface-400">
+              {pendingCollections.length > 4 ? `+${pendingCollections.length - 4} more credit accounts` : 'Keep accounts updated daily'}
+            </span>
+            <button
+              type="button"
+              onClick={() => navigate('/w/payments')}
+              className="text-[11px] font-bold text-amber-700 dark:text-amber-400 hover:underline flex items-center gap-1 cursor-pointer"
+            >
+              View All Credit Records <ArrowRight className="h-3 w-3" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* ── Today's Route Card ──────────────────────────────────────── */}
       <div>
         <div className="flex items-center justify-between mb-2.5">
@@ -295,6 +489,17 @@ export function WorkerDashboard() {
                 <div className="text-[10px] text-blue-600 dark:text-blue-400 uppercase font-semibold mt-0.5">Value</div>
               </div>
             </div>
+
+            {/* Vehicle Route Stock Access */}
+            <div className="mt-3 pt-2.5 border-t border-surface-100 dark:border-surface-700/60 flex items-center justify-between text-xs">
+              <span className="text-surface-600 dark:text-surface-300 flex items-center gap-1.5 font-medium">
+                <Package className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
+                Vehicle Route Stock
+              </span>
+              <span className="font-semibold text-blue-600 dark:text-blue-400 flex items-center gap-1">
+                {todayRoute.status === 'in_progress' ? 'Manage Truck Stock' : 'Load Truck Stock'} →
+              </span>
+            </div>
           </div>
         ) : (
           <div className="bg-white dark:bg-surface-800 border border-dashed border-surface-300 dark:border-surface-600 rounded-2xl p-8 text-center">
@@ -342,8 +547,8 @@ export function WorkerDashboard() {
                   </div>
                 </div>
                 <div className="text-right flex-shrink-0">
-                  <div className="text-xs font-bold text-surface-900 dark:text-white">{formatCurrency(r.total_collected)}</div>
-                  <div className="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium">collected</div>
+                  <div className="text-xs font-bold text-surface-900 dark:text-white">{formatCurrency(r.total_amount || r.total_collected)}</div>
+                  <div className="text-[10px] text-blue-600 dark:text-blue-400 font-medium">sales</div>
                 </div>
               </div>
             ))}
@@ -439,24 +644,37 @@ export function WorkerDashboard() {
               {metrics.routesList.map((r) => (
                 <div
                   key={r.id}
-                  className="p-3.5 rounded-xl bg-surface-50 dark:bg-surface-900/60 border border-surface-200/70 dark:border-surface-700/60 flex items-center justify-between"
+                  className="p-3.5 rounded-xl bg-surface-50 dark:bg-surface-900/60 border border-surface-200/70 dark:border-surface-700/60"
                 >
-                  <div className="flex items-center gap-3">
-                    <div className="h-8 w-8 rounded-xl bg-blue-100 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 flex items-center justify-center flex-shrink-0">
-                      <Calendar className="h-4 w-4" />
-                    </div>
-                    <div>
-                      <div className="text-xs font-bold text-surface-900 dark:text-white">{r.name}</div>
-                      <div className="text-[10px] text-surface-500 dark:text-surface-400">
-                        {r.date} • {r.partiesCount} parties
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-3">
+                      <div className="h-8 w-8 rounded-xl bg-blue-100 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 flex items-center justify-center flex-shrink-0">
+                        <Calendar className="h-4 w-4" />
+                      </div>
+                      <div>
+                        <div className="text-xs font-bold text-surface-900 dark:text-white">{r.name}</div>
+                        <div className="text-[10px] text-surface-500 dark:text-surface-400">
+                          {r.date} • {r.partiesCount} parties
+                        </div>
                       </div>
                     </div>
-                  </div>
-                  <div className="text-right">
-                    <div className="text-xs font-extrabold text-surface-900 dark:text-white">{formatCurrency(r.amount)}</div>
                     <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300">
                       {r.status}
                     </span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-1.5 text-center">
+                    <div className="p-1.5 rounded-lg bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700">
+                      <div className="text-[9px] text-surface-500 uppercase font-semibold">Sales</div>
+                      <div className="text-xs font-bold text-surface-900 dark:text-white">{formatCurrency(r.amount)}</div>
+                    </div>
+                    <div className="p-1.5 rounded-lg bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-100 dark:border-emerald-800/40">
+                      <div className="text-[9px] text-emerald-600 uppercase font-semibold">Collected</div>
+                      <div className="text-xs font-bold text-emerald-700 dark:text-emerald-300">{formatCurrency(r.collected)}</div>
+                    </div>
+                    <div className="p-1.5 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-100 dark:border-amber-800/40">
+                      <div className="text-[9px] text-amber-600 uppercase font-semibold">Credit</div>
+                      <div className="text-xs font-bold text-amber-700 dark:text-amber-300">{formatCurrency(r.pending)}</div>
+                    </div>
                   </div>
                 </div>
               ))}
@@ -511,22 +729,23 @@ export function WorkerDashboard() {
               {/* Stats Grid */}
               <div className="grid grid-cols-2 gap-3">
                 <div className="p-4 rounded-xl bg-surface-50 dark:bg-surface-900/60 border border-surface-200/70 dark:border-surface-700/60 text-center">
-                  <div className="text-[10px] text-surface-500 dark:text-surface-400 font-semibold uppercase mb-1">Total Sales</div>
+                  <div className="text-[10px] text-surface-500 dark:text-surface-400 font-semibold uppercase mb-1">Sales (Achieved)</div>
                   <div className="text-lg font-extrabold text-emerald-600 dark:text-emerald-400">{formatCurrency(metrics.totalSales)}</div>
+                  <div className="text-[9px] text-surface-400 mt-0.5">incl. credit sales</div>
                 </div>
                 <div className="p-4 rounded-xl bg-surface-50 dark:bg-surface-900/60 border border-surface-200/70 dark:border-surface-700/60 text-center">
-                  <div className="text-[10px] text-surface-500 dark:text-surface-400 font-semibold uppercase mb-1">Remaining</div>
+                  <div className="text-[10px] text-surface-500 dark:text-surface-400 font-semibold uppercase mb-1">Remaining to Target</div>
                   <div className="text-lg font-extrabold text-amber-600 dark:text-amber-400">{formatCurrency(metrics.remainingTarget)}</div>
                 </div>
-                <div className="p-4 rounded-xl bg-surface-50 dark:bg-surface-900/60 border border-surface-200/70 dark:border-surface-700/60 text-center">
-                  <div className="text-[10px] text-surface-500 dark:text-surface-400 font-semibold uppercase mb-1">Routes Done</div>
-                  <div className="text-lg font-extrabold text-blue-600 dark:text-blue-400">{metrics.totalRoutes}</div>
+                <div className="p-4 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200/60 dark:border-emerald-800/40 text-center">
+                  <div className="text-[10px] text-emerald-700 dark:text-emerald-400 font-semibold uppercase mb-1">Collected</div>
+                  <div className="text-lg font-extrabold text-emerald-700 dark:text-emerald-300">{formatCurrency(metrics.totalCollected)}</div>
+                  <div className="text-[9px] text-emerald-600/70 mt-0.5">cash / UPI / cheque</div>
                 </div>
-                <div className="p-4 rounded-xl bg-surface-50 dark:bg-surface-900/60 border border-surface-200/70 dark:border-surface-700/60 text-center">
-                  <div className="text-[10px] text-surface-500 dark:text-surface-400 font-semibold uppercase mb-1">Completion</div>
-                  <div className={`text-lg font-extrabold ${progressPercent >= 80 ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}`}>
-                    {metrics.progressPercent}%
-                  </div>
+                <div className="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200/60 dark:border-amber-800/40 text-center">
+                  <div className="text-[10px] text-amber-700 dark:text-amber-400 font-semibold uppercase mb-1">Pending Credit</div>
+                  <div className="text-lg font-extrabold text-amber-700 dark:text-amber-300">{formatCurrency(metrics.totalPendingCredit)}</div>
+                  <div className="text-[9px] text-amber-600/70 mt-0.5">udhari / receivable</div>
                 </div>
               </div>
 
@@ -535,12 +754,126 @@ export function WorkerDashboard() {
                 <div className="bg-amber-50 dark:bg-amber-950/20 border border-amber-200/70 dark:border-amber-800/40 rounded-xl p-4 flex items-center gap-3">
                   <Sparkles className="h-5 w-5 text-amber-500 flex-shrink-0" />
                   <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">
-                    You need{' '}
-                    <strong>{formatCurrency(metrics.remainingTarget)}</strong> more to hit your target.{' '}
+                    Sales target: <strong>{formatCurrency(metrics.remainingTarget)}</strong> more needed.{' '}
                     {metrics.progressPercent >= 70 ? "You're almost there! 🎯" : 'Keep pushing! 💪'}
                   </p>
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── WORKER COLLECTION MODAL ───────────────────────────────────── */}
+      {showCollectModal && collectingItem && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-2xl w-full max-w-sm p-5 shadow-2xl space-y-4 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between border-b border-surface-100 dark:border-surface-700 pb-3">
+              <div>
+                <h3 className="text-sm font-bold text-surface-900 dark:text-white flex items-center gap-1.5">
+                  <Check className="h-4 w-4 text-emerald-600" />
+                  Record Payment Collection
+                </h3>
+                <p className="text-[11px] text-surface-500 dark:text-surface-400 mt-0.5">
+                  {collectingItem.party?.name || 'Customer'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowCollectModal(false);
+                  setCollectingItem(null);
+                }}
+                className="text-surface-400 hover:text-surface-600 p-1 text-sm font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/40 text-xs flex items-center justify-between">
+              <span className="text-amber-800 dark:text-amber-300 font-medium">Pending Credit:</span>
+              <span className="font-extrabold text-amber-700 dark:text-amber-400 text-sm">
+                {formatCurrency(collectingItem.amount)}
+              </span>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-[11px] font-bold text-surface-700 dark:text-surface-300 mb-1">
+                  Payment Mode
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  {(['cash', 'upi', 'cheque'] as PaymentMode[]).map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => setCollectionMode(mode)}
+                      className={`py-2 text-xs font-bold rounded-xl border transition-all cursor-pointer ${
+                        collectionMode === mode
+                          ? 'bg-blue-600 text-white border-blue-600 shadow-xs'
+                          : 'bg-surface-50 dark:bg-surface-700 border-surface-200 dark:border-surface-600 text-surface-700 dark:text-surface-300 hover:border-surface-400'
+                      }`}
+                    >
+                      {mode === 'cash' ? '💵 Cash' : mode === 'upi' ? '📲 UPI' : '🧾 Cheque'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-surface-700 dark:text-surface-300 mb-1">
+                  Collected Amount (₹)
+                </label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={collectionAmount}
+                  onChange={(e) => setCollectionAmount(parseFloat(e.target.value) || 0)}
+                  className="w-full h-10 px-3 rounded-xl border border-surface-300 dark:border-surface-600 bg-white dark:bg-surface-700 text-sm font-bold text-surface-900 dark:text-white outline-none focus:border-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-surface-700 dark:text-surface-300 mb-1">
+                  Reference / Note (Optional)
+                </label>
+                <input
+                  type="text"
+                  placeholder={collectionMode === 'cheque' ? 'Cheque No. & Bank' : 'UPI Ref or note'}
+                  value={collectionNotes}
+                  onChange={(e) => setCollectionNotes(e.target.value)}
+                  className="w-full h-9 px-3 rounded-xl border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-700 text-xs text-surface-900 dark:text-white outline-none focus:border-blue-500"
+                />
+              </div>
+            </div>
+
+            <div className="pt-2 flex gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowCollectModal(false);
+                  setCollectingItem(null);
+                }}
+                className="flex-1 py-2.5 rounded-xl border border-surface-200 dark:border-surface-700 text-xs font-semibold text-surface-600 dark:text-surface-400 hover:bg-surface-100 dark:hover:bg-surface-700 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleRecordCollection}
+                disabled={isSubmittingCollection || collectionAmount <= 0}
+                className="flex-1 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 disabled:opacity-50 text-xs font-bold text-white flex items-center justify-center gap-1.5 cursor-pointer shadow-md transition-colors"
+              >
+                {isSubmittingCollection ? (
+                  <>
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" /> Recording...
+                  </>
+                ) : (
+                  <>
+                    <Check className="h-3.5 w-3.5" /> Save Collection
+                  </>
+                )}
+              </button>
             </div>
           </div>
         </div>

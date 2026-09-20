@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '@/app/AuthProvider';
+import { QK } from '@/lib/queryKeys';
 import { toast } from 'sonner';
 import {
   ArrowLeft,
@@ -21,6 +22,7 @@ import {
 } from 'lucide-react';
 import { getDeliveryDetail, completePartyDelivery } from '../services/workerRouteService';
 import { getOfficialProductName } from '@/features/products/data/productMaster';
+import { isCanonicalSkuFormat } from '@/features/products/services/skuResolutionService';
 import { formatCurrency } from '@/shared/utils/format';
 import { UPIQRPayment } from '@/shared/ui/UPIQRPayment';
 import type { PaymentMode } from '@/lib/database.types';
@@ -127,10 +129,16 @@ export function WorkerPartyDeliveryPage() {
   );
 
   const currentDeliveredPreTax = items.reduce((sum, item) => {
-    const disp = itemDispositions[item.id];
-    // Default to ordered_qty if worker hasn't touched (or current saved delivered_qty)
-    const delQty = disp !== undefined ? disp.delivered_qty : Number(item.delivered_qty || 0);
-    return sum + delQty * Number(item.rate || 0);
+    const defaultDelivered =
+      item.delivered_qty !== undefined && item.delivered_qty !== null && delivery?.status === 'partial'
+        ? Number(item.delivered_qty)
+        : Number(item.ordered_qty || 0);
+    const defaultFree =
+      item.delivered_free_qty !== undefined && item.delivered_free_qty !== null && delivery?.status === 'partial'
+        ? Number(item.delivered_free_qty)
+        : Number(item.free_quantity || 0);
+    const disp = getDisp(item.id, defaultDelivered, defaultFree);
+    return sum + disp.delivered_qty * Number(item.rate || 0);
   }, 0);
 
   let deliveredTotal = officialBillTotal;
@@ -143,9 +151,25 @@ export function WorkerPartyDeliveryPage() {
 
   // Pre-fill payment amount when transitioning
   const handleProceedToPayment = () => {
+    // Validate canonical SKU and product identity (Rule A & Rule D)
+    for (const item of items) {
+      if (!item.sku || !isCanonicalSkuFormat(item.sku)) {
+        toast.error(`Product identity unresolved for item '${item.product_name || item.sku || 'Unknown'}' — Admin review required.`);
+        return;
+      }
+    }
+
     // Validate quantities
     for (const item of items) {
-      const disp = getDisp(item.id, Number(item.delivered_qty || 0), Number(item.delivered_free_qty || 0));
+      const defaultDelivered =
+        item.delivered_qty !== undefined && item.delivered_qty !== null && delivery?.status === 'partial'
+          ? Number(item.delivered_qty)
+          : Number(item.ordered_qty || 0);
+      const defaultFree =
+        item.delivered_free_qty !== undefined && item.delivered_free_qty !== null && delivery?.status === 'partial'
+          ? Number(item.delivered_free_qty)
+          : Number(item.free_quantity || 0);
+      const disp = getDisp(item.id, defaultDelivered, defaultFree);
       if (disp.delivered_qty > item.ordered_qty) {
         toast.error(`Delivered qty for ${item.sku} cannot exceed ordered (${item.ordered_qty})`);
         return;
@@ -174,14 +198,23 @@ export function WorkerPartyDeliveryPage() {
     mutationFn: async () => {
       if (!delivery || !profile) throw new Error('Missing delivery or profile data');
 
+      // Defensive pre-submission identity check
+      for (const item of items) {
+        if (!item.sku || !isCanonicalSkuFormat(item.sku)) {
+          throw new Error(`Product identity unresolved for item '${item.product_name || item.sku || 'Unknown'}' — Admin review required.`);
+        }
+      }
+
       const deliveredItemsPayload = items.map((item) => {
-        // If not explicitly set yet, default to full ordered if delivered_qty was not zero
-        const disp = itemDispositions[item.id] || {
-          delivered_qty: Number(item.delivered_qty || 0),
-          delivered_free_qty: Number(item.delivered_free_qty || 0),
-          damaged_qty: Number(item.damaged_qty || 0),
-          damaged_free_qty: Number(item.damaged_free_qty || 0),
-        };
+        const defaultDelivered =
+          item.delivered_qty !== undefined && item.delivered_qty !== null && delivery?.status === 'partial'
+            ? Number(item.delivered_qty)
+            : Number(item.ordered_qty || 0);
+        const defaultFree =
+          item.delivered_free_qty !== undefined && item.delivered_free_qty !== null && delivery?.status === 'partial'
+            ? Number(item.delivered_free_qty)
+            : Number(item.free_quantity || 0);
+        const disp = getDisp(item.id, defaultDelivered, defaultFree);
 
         const retQty = Math.max(0, item.ordered_qty - disp.delivered_qty - disp.damaged_qty);
         const retFree = Math.max(
@@ -287,6 +320,9 @@ export function WorkerPartyDeliveryPage() {
       qc.invalidateQueries({ queryKey: ['worker-route-deliveries'] });
       qc.invalidateQueries({ queryKey: ['worker-today-route'] });
       qc.invalidateQueries({ queryKey: ['delivery-detail'] });
+      // Propagate delivery completion to Admin and Master
+      qc.invalidateQueries({ queryKey: QK.masterOperations });
+      qc.invalidateQueries({ queryKey: QK.deliveries });
       toast.success('Delivery recorded in inventory ledger!');
       navigate('/w/route');
     },
@@ -405,11 +441,15 @@ export function WorkerPartyDeliveryPage() {
                   Number(item.ordered_qty) === 0 ||
                   Number(item.rate) === 0 ||
                   Number(item.free_quantity) > 0;
-                const disp = getDisp(
-                  item.id,
-                  Number(item.ordered_qty || 0),
-                  Number(item.free_quantity || 0)
-                );
+                const defaultDelivered =
+                  item.delivered_qty !== undefined && item.delivered_qty !== null && delivery?.status === 'partial'
+                    ? Number(item.delivered_qty)
+                    : Number(item.ordered_qty || 0);
+                const defaultFree =
+                  item.delivered_free_qty !== undefined && item.delivered_free_qty !== null && delivery?.status === 'partial'
+                    ? Number(item.delivered_free_qty)
+                    : Number(item.free_quantity || 0);
+                const disp = getDisp(item.id, defaultDelivered, defaultFree);
 
                 const remQty = Math.max(0, item.ordered_qty - disp.delivered_qty - disp.damaged_qty);
                 const remFree = Math.max(
@@ -428,6 +468,10 @@ export function WorkerPartyDeliveryPage() {
                   disp.delivered_free_qty === 0 &&
                   disp.damaged_qty === 0;
 
+                const isSkuValid = isCanonicalSkuFormat(item.sku);
+                const cleanFallbackName = (item.product_name || '').replace(/^UNMAPPED SKU\s*-\s*/i, '');
+                const displayName = getOfficialProductName(item.sku, cleanFallbackName || item.product_name);
+
                 return (
                   <div
                     key={item.id}
@@ -436,10 +480,15 @@ export function WorkerPartyDeliveryPage() {
                     {/* Item header */}
                     <div className="flex items-start justify-between">
                       <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 flex-wrap">
                           <span className="text-sm font-semibold text-surface-900 dark:text-white truncate">
-                            {getOfficialProductName(item.sku, item.product_name)}
+                            {displayName}
                           </span>
+                          {!isSkuValid && (
+                            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 border border-amber-300">
+                              UNRESOLVED SKU
+                            </span>
+                          )}
                           {isFreeItem && (
                             <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
                               FREE SCHEME

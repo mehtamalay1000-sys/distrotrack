@@ -2,9 +2,15 @@ import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { ArrowLeft, Truck, CheckCircle2, Boxes, AlertTriangle, ShieldCheck, Loader2 } from 'lucide-react';
+import { ArrowLeft, Truck, CheckCircle2, Boxes, AlertTriangle, ShieldCheck, ShieldAlert, Loader2 } from 'lucide-react';
 import { PageHeader, Button, StatusBadge, Card, LoadingState, ErrorState } from '@/shared/ui';
-import { getPicklist, updatePicklistStatus, assignPicklistWorker } from '../services/picklistService';
+import {
+  getPicklist,
+  updatePicklistStatus,
+  assignPicklistWorker,
+  adminAuthorizeRouteReconciliation,
+  getRouteStockExceptions,
+} from '../services/picklistService';
 import { getWorkers } from '@/features/workers/services/workerService';
 import { getRouteStockCheck } from '@/features/worker/services/workerRouteService';
 import { getOfficialProductName } from '@/features/products/data/productMaster';
@@ -29,11 +35,39 @@ export function PicklistDetailPage() {
 
   const { data: workers = [] } = useQuery({ queryKey: ['workers'], queryFn: getWorkers });
 
-  // Query route stock ledger check if picklist is in progress or completed
+  // Query route stock ledger check if picklist is in progress, pending reconciliation, or completed
   const { data: stockCheck, refetch: refetchStock } = useQuery({
     queryKey: ['picklist-stock-check', id],
     queryFn: () => getRouteStockCheck(id!),
-    enabled: !!id && (picklist?.status === 'in_progress' || picklist?.status === 'completed'),
+    enabled: !!id && (picklist?.status === 'in_progress' || picklist?.status === 'completed' || picklist?.status === 'pending_reconciliation'),
+  });
+
+  // Query route stock exceptions (discrepancies reported by workers)
+  const { data: exceptions = [], refetch: refetchExceptions } = useQuery({
+    queryKey: ['picklist-exceptions', id],
+    queryFn: () => getRouteStockExceptions(id!),
+    enabled: !!id,
+  });
+
+  // Admin/Master authorization mutation (NO PIN REQUIRED — uses authenticated session)
+  const authorizeMut = useMutation({
+    mutationFn: async ({ action, notes }: { action: 'approve' | 'reject'; notes?: string }) => {
+      return await adminAuthorizeRouteReconciliation(id!, action, notes);
+    },
+    onSuccess: (_, variables) => {
+      qc.invalidateQueries({ queryKey: ['picklist', id] });
+      qc.invalidateQueries({ queryKey: ['picklists'] });
+      qc.invalidateQueries({ queryKey: ['picklist-stock-check', id] });
+      qc.invalidateQueries({ queryKey: ['picklist-exceptions', id] });
+      refetchStock();
+      refetchExceptions();
+      toast.success(
+        variables.action === 'approve'
+          ? 'Route reconciliation authorized & closed successfully'
+          : 'Reconciliation rejected and held for review'
+      );
+    },
+    onError: (e: Error) => toast.error(e.message),
   });
 
   const statusMut = useMutation({
@@ -162,6 +196,74 @@ export function PicklistDetailPage() {
           <div className="text-base font-bold text-primary-700 dark:text-primary-400 mt-1">{formatCurrency(picklist.total_amount)}</div>
         </Card>
       </div>
+
+      {/* ── Route Reconciliation Review Panel (Admin/Master Session) ── */}
+      {(picklist.status === 'pending_reconciliation' || (exceptions && exceptions.length > 0)) && (
+        <div className="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 space-y-3 shadow-sm">
+          <div className="flex items-center justify-between flex-wrap gap-3">
+            <div className="flex items-center gap-2">
+              <ShieldAlert className="h-5 w-5 text-amber-600" />
+              <div>
+                <h3 className="font-bold text-sm text-amber-900 dark:text-amber-200">
+                  Route Stock & Cash Reconciliation Review Required
+                </h3>
+                <p className="text-xs text-amber-700 dark:text-amber-300">
+                  Worker completed field deliveries and submitted check-in report. Discrepancies require supervisor authorization.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              {picklist.status === 'pending_reconciliation' && (
+                <>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => authorizeMut.mutate({ action: 'reject' })}
+                    disabled={authorizeMut.isPending}
+                  >
+                    Reject Recount
+                  </Button>
+                  <Button
+                    size="sm"
+                    icon={<CheckCircle2 className="h-4 w-4" />}
+                    onClick={() => authorizeMut.mutate({ action: 'approve' })}
+                    disabled={authorizeMut.isPending}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white"
+                  >
+                    {authorizeMut.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Authorize & Close Route'}
+                  </Button>
+                </>
+              )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs bg-white dark:bg-surface-800 p-3 rounded-lg border border-amber-200 dark:border-amber-800/60">
+            <div>
+              <span className="text-surface-500">Worker Notes / Reason:</span>
+              <div className="font-semibold text-surface-900 dark:text-white mt-0.5">
+                {picklist.notes || 'No note provided'}
+              </div>
+            </div>
+            <div>
+              <span className="text-surface-500">Declared Cash:</span>
+              <div className="font-semibold text-surface-900 dark:text-white mt-0.5">
+                ₹{Number(picklist.actual_cash_returned ?? 0).toLocaleString('en-IN')}{' '}
+                {picklist.cash_discrepancy ? (
+                  <span className={picklist.cash_discrepancy < 0 ? 'text-rose-600 font-bold' : 'text-emerald-600 font-bold'}>
+                    (Diff: ₹{Number(picklist.cash_discrepancy).toFixed(2)})
+                  </span>
+                ) : null}
+              </div>
+            </div>
+            <div>
+              <span className="text-surface-500">Recorded Discrepancies:</span>
+              <div className="font-semibold text-surface-900 dark:text-white mt-0.5">
+                {exceptions.length} exception(s) logged
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── STAGE 4B INVENTORY & VEHICLE STOCK LEDGER VIEW ─────────── */}
       {stockCheck && (

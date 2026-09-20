@@ -1,11 +1,4 @@
-import * as pdfjsLib from 'pdfjs-dist';
 import { getProductMasterSKUs } from '@/features/products/data/productMaster';
-
-// Configure pdf.js worker URL
-pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-  'pdfjs-dist/build/pdf.worker.min.mjs',
-  import.meta.url
-).toString();
 
 export interface PDFPageText {
   pageNumber: number;
@@ -17,6 +10,32 @@ export interface PDFPageText {
  * Extracts text from all pages of a PDF file using pdfjs-dist.
  */
 export async function extractPDFText(file: File): Promise<{ pages: PDFPageText[]; fullText: string; pageCount: number }> {
+  const fileNameLower = (file.name || '').toLowerCase();
+  if (fileNameLower.endsWith('.xlsx') || fileNameLower.endsWith('.xls') || fileNameLower.endsWith('.csv')) {
+    throw new Error(
+      `Cannot parse spreadsheet "${file.name}" as PDF. Historical sales files (sale.xlsx) must be imported via the Historical Sales / Product Discovery workflow.`
+    );
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let pdfjsLib: any;
+  if (typeof window === 'undefined') {
+    // Node.js runtime requires legacy build
+    pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  } else {
+    pdfjsLib = await import('pdfjs-dist');
+    if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
+      try {
+        pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+          'pdfjs-dist/build/pdf.worker.min.mjs',
+          import.meta.url
+        ).toString();
+      } catch {
+        // Fallback in non-browser environment
+      }
+    }
+  }
+
   const arrayBuffer = await file.arrayBuffer();
   const pdfDoc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
   const pageCount = pdfDoc.numPages;
@@ -231,17 +250,30 @@ export function isValidSKU(sku: string): boolean {
   const trimmed = sku.trim();
   if (!trimmed || trimmed.length < 3 || trimmed.length > 30) return false;
 
+  const upper = trimmed.toUpperCase();
+
+  // Explicitly reject known product brand/description words that must NEVER be SKUs
+  const forbiddenWords = [
+    'CIBACA', 'COLGATE', 'TOTAL', 'VISIBLE', 'SUPER', 'COLACTSALT',
+    'SUPFLEX', 'ACTIVE', 'MAXFRESH', 'TOOTHPASTE', 'CHARCOAL',
+    'SENSITIVE', 'SWARNA', 'HERBAL', 'VEDSHAKTI', 'ZIGZAG', 'SLIMSOFT',
+    'KIDS', 'CDC', 'CMF', 'SF', 'ZZ',
+  ];
+  if (forbiddenWords.includes(upper)) return false;
+
+  // Reject pure alphabetical words (no digits) unless explicitly in active Product Master
+  if (/^[A-Z]+$/i.test(trimmed) && !getProductMasterSKUs().has(upper)) {
+    return false;
+  }
+
   // Fast path: if SKU is in the Product Master, it's always valid
-  if (getProductMasterSKUs().has(trimmed.toUpperCase())) return true;
+  if (getProductMasterSKUs().has(upper)) return true;
 
-  // Accept derived SKUs: COL-XXXXX-X or ITEM-X
-  if (/^COL-/i.test(trimmed) || /^ITEM-/i.test(trimmed)) return true;
-
-  // Must be alphanumeric (allow hyphens for some SAP formats)
-  if (!/^[A-Z0-9][A-Z0-9-]{1,29}$/i.test(trimmed)) return false;
+  // Accept derived / test / unmapped SKUs
+  if (/^COL-/i.test(trimmed) || /^ITEM-/i.test(trimmed) || /^SAP-UNMAPPED-/i.test(trimmed)) return true;
 
   // Explicitly accept known SAP material code patterns:
-  // - Pure numeric: 1600908, 61002494
+  // - Pure numeric: 1600908, 61002494, 1608101, 1608102
   // - INxxxxxA format: IN00991A, IN00749A
   if (/^\d{6,10}$/.test(trimmed)) return true;
   if (/^IN\d{4,6}[A-Z]$/i.test(trimmed)) return true;
@@ -258,7 +290,8 @@ export function isValidSKU(sku: string): boolean {
   if (/^ZOR[A-Z]$/i.test(trimmed)) return false;
   if (/^GSTIN$/i.test(trimmed)) return false;
 
-  return true;
+  // Fallback: If not matching canonical SAP material number patterns or Product Master, reject
+  return false;
 }
 
 /**

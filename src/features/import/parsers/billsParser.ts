@@ -3,7 +3,8 @@ import {
   isProductTableHeader, isTableEndMarker, validateProductRow,
   isNonProductLabel, isValidSKU,
 } from './helpers';
-import { findProductMasterByDescription, getOfficialProductName } from '@/features/products/data/productMaster';
+import { getOfficialProductName } from '@/features/products/data/productMaster';
+import { resolveCanonicalProductIdentity } from '@/features/products/services/skuResolutionService';
 import { getLocalDateString } from '@/shared/utils/format';
 import type { ParsedBillsResult, ParsedInvoice, ParsedInvoiceItem } from './types';
 
@@ -81,15 +82,15 @@ export async function parseBills(file: File): Promise<ParsedBillsResult> {
         const invNo = invNoMatch[1].trim();
 
         // Check if this is the continuation page of the existing invoice
-        if (currentInvoice && currentInvoice.invoiceNumber === invNo) {
+        if (currentInvoice && currentInvoice.invoiceNumber.toUpperCase() === invNo.toUpperCase()) {
           currentInvoice.pageCount++;
           if (!currentInvoice.partyName && pageBillTo) currentInvoice.partyName = pageBillTo;
           if (!currentInvoice.partyCode && pageRetCode) currentInvoice.partyCode = pageRetCode;
-          console.log(`[BILLS PARSER] Continuation page for invoice ${invNo}`);
+          if (!currentInvoice.routeCode && pageRoute) currentInvoice.routeCode = pageRoute;
+          if (!currentInvoice.salesRep && pageSalesRep) currentInvoice.salesRep = pageSalesRep;
+          console.log(`[BILLS PARSER] Continuation page ${currentInvoice.pageCount} for invoice ${invNo}`);
           inItemTable = false;
-          // Don't 'continue' — fall through so the rest of this page's lines are processed
-          // and the item table header can re-activate inItemTable = true
-
+          continue;
         }
 
         // Save previous invoice if exists
@@ -164,8 +165,8 @@ export async function parseBills(file: File): Promise<ParsedBillsResult> {
             continue;
           }
 
-          // Alternative: detect first numbered item row
-          const firstRowMatch = line.match(/^1\s+(.+?)\s+\d+(?:\.\d{2})\s+/);
+          // Alternative: detect numbered item row (supports continuation pages where row index > 1)
+          const firstRowMatch = line.match(/^(\d{1,3})\s+(.+?)\s+\d+(?:\.\d{2})\s+/);
           if (firstRowMatch) {
             const hasMultipleNumbers = (line.match(/\d+(?:\.\d{2})/g) || []).length >= 2;
             if (hasMultipleNumbers && !isNonProductLabel(line)) {
@@ -173,8 +174,6 @@ export async function parseBills(file: File): Promise<ParsedBillsResult> {
               console.log(`[BILLS PARSER] Inferred item table start at page ${page.pageNumber}, line ${lineIdx + 1}: "${line}"`);
             }
           }
-
-          if (!inItemTable) continue;
         }
 
         // Detect table end
@@ -246,11 +245,15 @@ export async function parseBills(file: File): Promise<ParsedBillsResult> {
                 const { paidQty, freeQty } = extractQuantityTokens(remainder);
                 const netAmt = parseNumber(numbers[numbers.length - 2]);
 
-                // Resolve canonical SAP SKU, Name, and MRP from Product Master
-                const masterMatch = findProductMasterByDescription(description);
-                const finalSku = masterMatch?.sku || 'UNMAPPED SKU';
-                const finalName = masterMatch?.name || (finalSku === 'UNMAPPED SKU' ? 'UNMAPPED SKU' : description);
-                const finalMrp = masterMatch?.mrp || parsedMrp;
+                // Resolve canonical SAP SKU, Name, and MRP via centralized resolution engine
+                const resolvedIdentity = resolveCanonicalProductIdentity(null, description, parsedMrp);
+                const finalSku = resolvedIdentity.isCanonical && resolvedIdentity.canonicalSku
+                  ? resolvedIdentity.canonicalSku
+                  : (srNo > 0 ? `SAP-UNMAPPED-${srNo}` : 'UNMAPPED-SKU');
+                const finalName = resolvedIdentity.isCanonical && resolvedIdentity.officialName
+                  ? resolvedIdentity.officialName
+                  : description;
+                const finalMrp = resolvedIdentity.mrp > 0 ? resolvedIdentity.mrp : parsedMrp;
 
                 const item: ParsedInvoiceItem = {
                   sku: finalSku,
@@ -313,9 +316,13 @@ export async function parseBills(file: File): Promise<ParsedBillsResult> {
                 const { paidQty, freeQty } = extractQuantityTokens(remainder);
 
                 if (freeQty > 0 || paidQty > 0) {
-                  const masterMatch = findProductMasterByDescription(description);
-                  const finalSku = masterMatch?.sku || 'UNMAPPED SKU';
-                  const finalName = masterMatch?.name || (finalSku === 'UNMAPPED SKU' ? 'UNMAPPED SKU' : description);
+                  const resolvedIdentity = resolveCanonicalProductIdentity(null, description, 0);
+                  const finalSku = resolvedIdentity.isCanonical && resolvedIdentity.canonicalSku
+                    ? resolvedIdentity.canonicalSku
+                    : (srNo > 0 ? `SAP-UNMAPPED-${srNo}` : 'UNMAPPED-SKU');
+                  const finalName = resolvedIdentity.isCanonical && resolvedIdentity.officialName
+                    ? resolvedIdentity.officialName
+                    : description;
 
                   const item: ParsedInvoiceItem = {
                     sku: finalSku,
@@ -389,12 +396,65 @@ export async function parseBills(file: File): Promise<ParsedBillsResult> {
     console.log(`[BILLS PARSER] Finalized final invoice ${currentInvoice.invoiceNumber} with ${currentInvoice.items.length} items`);
   }
 
-  const totalAmount = invoices.reduce((sum, inv) => sum + inv.netAmount, 0);
+  // Centralized canonical invoice deduplication
+  const dedupedInvoicesMap = new Map<string, ParsedInvoice>();
+
+  for (const inv of invoices) {
+    const canonicalKey = normalizeCode(inv.invoiceNumber) || inv.invoiceNumber.trim().toUpperCase();
+    const existing = dedupedInvoicesMap.get(canonicalKey);
+
+    if (!existing) {
+      dedupedInvoicesMap.set(canonicalKey, { ...inv });
+    } else {
+      console.log(`[BILLS PARSER] Merging duplicate representation for invoice ${inv.invoiceNumber}`);
+      existing.pageCount = Math.max(existing.pageCount, inv.pageCount) + (inv.rawText !== existing.rawText ? 1 : 0);
+
+      // Prefer authoritative non-zero amounts
+      if (existing.netAmount === 0 && inv.netAmount > 0) {
+        existing.netAmount = inv.netAmount;
+        existing.totalAmount = inv.totalAmount;
+      }
+      if (existing.totalAmount === 0 && inv.totalAmount > 0) {
+        existing.totalAmount = inv.totalAmount;
+      }
+      if (existing.taxAmount === 0 && inv.taxAmount > 0) {
+        existing.taxAmount = inv.taxAmount;
+      }
+
+      // Merge metadata if missing
+      if ((!existing.partyName || existing.partyName === 'Unknown Customer') && inv.partyName && inv.partyName !== 'Unknown Customer') {
+        existing.partyName = inv.partyName;
+      }
+      if ((!existing.partyCode || existing.partyCode === 'UNKNOWN') && inv.partyCode && inv.partyCode !== 'UNKNOWN') {
+        existing.partyCode = inv.partyCode;
+      }
+      if (!existing.routeCode && inv.routeCode) existing.routeCode = inv.routeCode;
+      if (!existing.salesRep && inv.salesRep) existing.salesRep = inv.salesRep;
+
+      // Merge items without duplicating
+      for (const item of inv.items) {
+        const itemExists = existing.items.some(
+          ei => (ei.sku === item.sku || ei.productName === item.productName) &&
+                ei.quantity === item.quantity &&
+                ei.amount === item.amount &&
+                (ei.freeQuantity || 0) === (item.freeQuantity || 0)
+        );
+        if (!itemExists) {
+          existing.items.push(item);
+        }
+      }
+
+      existing.rawText += '\n' + inv.rawText;
+    }
+  }
+
+  const finalInvoices = Array.from(dedupedInvoicesMap.values()).map(finalizeInvoice);
+  const totalAmount = finalInvoices.reduce((sum, inv) => sum + inv.netAmount, 0);
 
   console.log(`[BILLS PARSER] === PARSING COMPLETE ===`);
-  console.log(`[BILLS PARSER] Total invoices: ${invoices.length}`);
-  console.log(`[BILLS PARSER] Total items across all invoices: ${invoices.reduce((sum, inv) => sum + inv.items.length, 0)}`);
-  invoices.forEach(inv => {
+  console.log(`[BILLS PARSER] Total unique invoices: ${finalInvoices.length}`);
+  console.log(`[BILLS PARSER] Total items across all invoices: ${finalInvoices.reduce((sum, inv) => sum + inv.items.length, 0)}`);
+  finalInvoices.forEach(inv => {
     console.log(`[BILLS PARSER] Invoice ${inv.invoiceNumber}: ${inv.items.length} items, net=${inv.netAmount}`);
     inv.items.forEach(item => {
       console.log(`[BILLS PARSER]   ${item.sku} | ${item.productName} | MRP=${item.mrp} | Rate=${item.rate} | Qty=${item.quantity} | FreeQty=${item.freeQuantity || 0} | Amt=${item.amount}`);
@@ -402,9 +462,9 @@ export async function parseBills(file: File): Promise<ParsedBillsResult> {
   });
 
   return {
-    invoices,
+    invoices: finalInvoices,
     pageCount,
-    totalInvoices: invoices.length,
+    totalInvoices: finalInvoices.length,
     totalAmount,
     warnings,
   };
@@ -457,19 +517,23 @@ function parseItemFields(
   if (!mrpSplit) return null;
 
   const rawProductName = mrpSplit[1].trim();
-  const productName = getOfficialProductName(sku, rawProductName);
-  const mrp = parseNumber(mrpSplit[2]);
+  const parsedMrp = parseNumber(mrpSplit[2]);
   const rateDoz = parseNumber(mrpSplit[3]);
   const remainder = mrpSplit[4].trim();
 
   const numbers = remainder.match(/-?[\d]+(?:\.[\d]+)?/g) || [];
   if (numbers.length < 2) return null;
 
+  const resolved = resolveCanonicalProductIdentity(sku, rawProductName, parsedMrp);
+  const finalSku = resolved.isCanonical && resolved.canonicalSku ? resolved.canonicalSku : sku;
+  const productName = resolved.isCanonical && resolved.officialName ? resolved.officialName : getOfficialProductName(finalSku, rawProductName);
+  const mrp = resolved.mrp > 0 ? resolved.mrp : parsedMrp;
+
   const { paidQty, freeQty } = extractQuantityTokens(remainder);
   const netAmt = parseNumber(numbers[numbers.length - 2]);
 
   const item: ParsedInvoiceItem = {
-    sku,
+    sku: finalSku,
     productName,
     quantity: paidQty > 0 ? paidQty : parseInt(numbers[numbers.length - 1], 10),
     freeQuantity: freeQty,

@@ -10,6 +10,7 @@ import {
 import { getWorkerExpenses, createExpense } from '@/features/expenses/services/expenseService';
 import { formatCurrency, formatDate, getLocalDateString } from '@/shared/utils/format';
 import type { ExpensePaymentMethod } from '@/lib/database.types';
+import { QK } from '@/lib/queryKeys';
 
 const WORKER_CATEGORIES = [
   { value: 'fuel', label: 'Fuel & Diesel' },
@@ -51,6 +52,8 @@ export function WorkerExpensesPage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['worker-expenses'] });
       qc.invalidateQueries({ queryKey: ['expenses'] });
+      qc.invalidateQueries({ queryKey: QK.masterOperations });
+      qc.invalidateQueries({ queryKey: QK.expenses });
       toast.success('Expense submitted for admin review');
       setModalOpen(false);
       setForm({

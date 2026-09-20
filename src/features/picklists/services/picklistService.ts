@@ -109,3 +109,44 @@ export async function deletePicklist(id: string): Promise<void> {
 
   mockStore.deletePicklist(id);
 }
+
+export async function adminAuthorizeRouteReconciliation(
+  picklistId: string,
+  action: 'approve' | 'reject',
+  notes?: string
+): Promise<any> {
+  const { data, error } = await supabase.rpc('admin_authorize_route_reconciliation', {
+    p_picklist_id: picklistId,
+    p_action: action,
+    p_notes: notes || null,
+  });
+
+  if (error) {
+    throw new Error(`Reconciliation authorization failed: ${error.message}`);
+  }
+
+  // Update mockStore
+  if (action === 'approve') {
+    const pl = mockStore.getPicklists().find((p) => p.id === picklistId);
+    if (pl) {
+      mockStore.savePicklist({
+        ...pl,
+        status: 'completed',
+        completed_at: new Date().toISOString(),
+      });
+    }
+  }
+
+  return data;
+}
+
+export async function getRouteStockExceptions(picklistId: string) {
+  const { data, error } = await supabase
+    .from('route_stock_exceptions')
+    .select('*')
+    .eq('picklist_id', picklistId)
+    .order('created_at', { ascending: false });
+
+  if (error) return [];
+  return data || [];
+}

@@ -1,5 +1,6 @@
 import { useState, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { QK } from '@/lib/queryKeys';
 import { toast } from 'sonner';
 import { Link } from 'react-router-dom';
 import {
@@ -15,6 +16,7 @@ import {
   confirmPurchaseImport,
   getRecentPurchaseImports,
   extractSapProductDetails,
+  recoverMissingPurchaseTransactions,
   type PurchaseImportPreview,
   type PurchaseImportResult,
   type ParsedPurchaseRow,
@@ -86,6 +88,40 @@ export function ImportNewStockPage() {
   // Bulk MRP Review Modal state
   const [bulkMrpModalOpen, setBulkMrpModalOpen] = useState(false);
   const [bulkUpdatingMrp, setBulkUpdatingMrp] = useState(false);
+
+  // Recovery state
+  const [recovering, setRecovering] = useState(false);
+
+  const handleRecoverMissingTransactions = async () => {
+    if (!isAuthorized) {
+      toast.error('Only authenticated Owner/Admin users may recover transactions.');
+      return;
+    }
+    setRecovering(true);
+    try {
+      const res = await recoverMissingPurchaseTransactions();
+      if (res.success) {
+        if (res.recoveredCount > 0) {
+          toast.success(res.message);
+        } else {
+          toast.info('All 6 transaction line items are already present in the ledger. 0 duplicates added.');
+        }
+        qc.invalidateQueries({ queryKey: ['inventory_stock'] });
+        qc.invalidateQueries({ queryKey: ['recent_purchase_imports'] });
+        qc.invalidateQueries({ queryKey: QK.masterInventory });
+        qc.invalidateQueries({ queryKey: QK.inventory });
+        if (parsedRows.length > 0) {
+          await reRunMatching(parsedRows, batchRef);
+        }
+      } else {
+        toast.error('Recovery failed: ' + res.message);
+      }
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to recover missing purchase lines');
+    } finally {
+      setRecovering(false);
+    }
+  };
 
   const handleConfirmSingleMrp = async () => {
     if (!selectedMrpRow || selectedMrpRow.incomingMrp === undefined) return;
@@ -340,6 +376,7 @@ export function ImportNewStockPage() {
 
       setSingleAddModalOpen(false);
       qc.invalidateQueries({ queryKey: ['products'] });
+      qc.invalidateQueries({ queryKey: ['inventory_stock'] });
 
       // Immediately re-run matching without requiring re-upload!
       await reRunMatching(parsedRows, batchRef);
@@ -414,6 +451,7 @@ export function ImportNewStockPage() {
       );
       setBulkAddModalOpen(false);
       qc.invalidateQueries({ queryKey: ['products'] });
+      qc.invalidateQueries({ queryKey: ['inventory_stock'] });
 
       // Immediately re-run matching without requiring re-upload!
       await reRunMatching(parsedRows, batchRef);
@@ -435,7 +473,13 @@ export function ImportNewStockPage() {
       setConfirmModalOpen(false);
       qc.invalidateQueries({ queryKey: ['recent_purchase_imports'] });
       qc.invalidateQueries({ queryKey: ['inventory_movements'] });
+      qc.invalidateQueries({ queryKey: ['inventory_stock'] });
+      qc.invalidateQueries({ queryKey: ['products'] });
       qc.invalidateQueries({ queryKey: ['sap_reconciliation_history'] });
+      // Propagate to Master Command Center
+      qc.invalidateQueries({ queryKey: QK.masterInventory });
+      qc.invalidateQueries({ queryKey: QK.masterSapImports });
+      qc.invalidateQueries({ queryKey: QK.inventory });
 
       if (res.success) {
         toast.success(
@@ -659,18 +703,25 @@ export function ImportNewStockPage() {
           {preview && (
             <div className="space-y-6">
               {/* Metric Strips */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
                 <div className="bg-white dark:bg-gray-900 p-4 rounded-xl border border-gray-200 dark:border-gray-800">
-                  <div className="text-xs text-gray-500">Total Rows</div>
+                  <div className="text-xs text-gray-500">Purchase Rows</div>
                   <div className="text-2xl font-bold text-gray-900 dark:text-gray-100 mt-1">
                     {preview.totalRows}
                   </div>
                 </div>
 
+                <div className="bg-white dark:bg-gray-900 p-4 rounded-xl border border-blue-200 dark:border-blue-900/40 bg-blue-50/20">
+                  <div className="text-xs text-blue-700 dark:text-blue-400 font-medium">Unique SKUs</div>
+                  <div className="text-2xl font-bold text-blue-600 dark:text-blue-400 mt-1">
+                    {preview.uniqueSkusCount ?? preview.rows.length}
+                  </div>
+                </div>
+
                 <div className="bg-white dark:bg-gray-900 p-4 rounded-xl border border-emerald-200 dark:border-emerald-900/40 bg-emerald-50/20">
-                  <div className="text-xs text-emerald-700 dark:text-emerald-400 font-medium">Matched SKUs</div>
+                  <div className="text-xs text-emerald-700 dark:text-emerald-400 font-medium">Product Matching</div>
                   <div className="text-2xl font-bold text-emerald-600 dark:text-emerald-400 mt-1">
-                    {preview.matched}
+                    {preview.matchedSkusCount ?? preview.matched} <span className="text-xs text-emerald-600 font-normal">/ {preview.uniqueSkusCount ?? preview.totalRows}</span>
                   </div>
                 </div>
 
@@ -692,7 +743,7 @@ export function ImportNewStockPage() {
                   <div className="bg-white dark:bg-gray-900 p-4 rounded-xl border border-amber-200 dark:border-amber-900/40 bg-amber-50/20">
                     <div className="text-xs text-amber-700 dark:text-amber-400 font-medium">Unmapped SKUs</div>
                     <div className="text-2xl font-bold text-amber-600 dark:text-amber-400 mt-1">
-                      {preview.unmapped}
+                      {preview.unmappedSkusCount ?? preview.unmapped}
                     </div>
                   </div>
                 )}
@@ -717,6 +768,32 @@ export function ImportNewStockPage() {
                     {preview.totalReceivedQty.toLocaleString()}
                   </div>
                 </div>
+              </div>
+
+              {/* Missing Purchase Lines Non-Destructive Recovery Banner */}
+              <div className="bg-indigo-50 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-800 rounded-xl p-4 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-sm">
+                <div className="flex items-center gap-3">
+                  <RefreshCw className={`w-5 h-5 text-indigo-600 flex-shrink-0 ${recovering ? 'animate-spin' : ''}`} />
+                  <div>
+                    <p className="font-semibold text-indigo-900 dark:text-indigo-200 text-sm">
+                      SAP Inbound Line-Item Recovery Tool
+                    </p>
+                    <p className="text-xs text-indigo-700 dark:text-indigo-300 mt-0.5">
+                      Safely and non-destructively recovers legitimate purchase line items on GR 3025221175 (+1,510 DOZ) without altering existing movements or re-importing the file.
+                    </p>
+                  </div>
+                </div>
+                {isAuthorized && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    loading={recovering}
+                    onClick={handleRecoverMissingTransactions}
+                    className="border-indigo-300 text-indigo-800 bg-indigo-100/60 hover:bg-indigo-100 dark:border-indigo-700 dark:text-indigo-200 dark:bg-indigo-950 text-xs shrink-0 font-medium"
+                  >
+                    Recover 6 Missing Transactions (+1,510 DOZ)
+                  </Button>
+                )}
               </div>
 
               {/* MRP Updates Notification Banner */}
@@ -978,7 +1055,109 @@ export function ImportNewStockPage() {
                         })
                       )}
                     </tbody>
+                    <tfoot className="bg-blue-50/75 dark:bg-blue-950/40 border-t-2 border-blue-300 dark:border-blue-700 font-medium">
+                      <tr>
+                        <td colSpan={3} className="py-3.5 px-4 text-gray-900 dark:text-gray-100">
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-xs sm:text-sm uppercase tracking-wider text-blue-950 dark:text-blue-200">
+                              TOTAL RECEIVED QUANTITY
+                            </span>
+                            <span className="text-[11px] text-blue-700 dark:text-blue-300 font-normal">
+                              ({preview.uniqueSkusCount ?? 0} Unique SKUs • {preview.eligibleRowsCount ?? preview.matched} Eligible Rows)
+                            </span>
+                          </div>
+                          <div className="text-[10px] text-gray-500 dark:text-gray-400 mt-0.5">
+                            *Sum of Confirmed Qty from ALL eligible rows in file (independent of table filter/search)
+                          </div>
+                        </td>
+                        <td className="py-3.5 px-4 font-mono font-extrabold text-right text-base text-blue-700 dark:text-blue-300 whitespace-nowrap">
+                          {preview.totalReceivedQty.toLocaleString()}
+                        </td>
+                        <td className="py-3.5 px-4 font-mono font-bold text-xs text-blue-800 dark:text-blue-300">
+                          DOZ
+                        </td>
+                        <td colSpan={3} className="py-3.5 px-4 text-xs text-gray-600 dark:text-gray-400">
+                          {preview.alreadyImportedQty > 0 ? (
+                            <div className="flex flex-col gap-0.5">
+                              <span className="text-purple-700 dark:text-purple-300 font-medium">
+                                Already Inwarded: {preview.alreadyImportedQty.toLocaleString()} DOZ ({preview.duplicateCount} rows)
+                              </span>
+                              <span className="text-emerald-700 dark:text-emerald-300 font-semibold">
+                                Net New Inbound: {preview.newInboundQty.toLocaleString()} DOZ ({readyToImportCount} rows)
+                              </span>
+                            </div>
+                          ) : (
+                            <span className="text-emerald-700 dark:text-emerald-300 font-medium">
+                              All {preview.totalReceivedQty.toLocaleString()} DOZ ready to create inbound movements
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-3.5 px-4 text-right">
+                          <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-blue-100 text-blue-800 dark:bg-blue-900/60 dark:text-blue-200 border border-blue-200 dark:border-blue-800">
+                            {preview.totalReceivedQty.toLocaleString()} DOZ Total
+                          </span>
+                        </td>
+                      </tr>
+                    </tfoot>
                   </table>
+                </div>
+              </div>
+
+              {/* Grand Total Summary Card */}
+              <div className="bg-gradient-to-r from-blue-50 via-indigo-50 to-blue-50 dark:from-blue-950/40 dark:via-indigo-950/30 dark:to-blue-950/40 border-2 border-blue-300 dark:border-blue-700/70 rounded-xl p-5 shadow-sm">
+                <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold uppercase tracking-wider text-blue-700 dark:text-blue-400">
+                        SAP Purchase Import Summary
+                      </span>
+                      <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-blue-200 text-blue-800 dark:bg-blue-900 dark:text-blue-200 border border-blue-300 dark:border-blue-700">
+                        Authoritative
+                      </span>
+                    </div>
+                    <div className="mt-1 flex items-baseline gap-3">
+                      <h3 className="text-2xl sm:text-3xl font-extrabold text-blue-950 dark:text-blue-100 font-mono tracking-tight">
+                        TOTAL RECEIVED QUANTITY: {preview.totalReceivedQty.toLocaleString()} DOZ
+                      </h3>
+                    </div>
+                    <p className="text-xs text-blue-800/80 dark:text-blue-300/80 mt-1">
+                      Calculated from all {preview.eligibleRowsCount ?? preview.matched} eligible purchase rows across the entire import preview. Compare this value directly against SAP Confirmed Qty.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2.5 w-full lg:w-auto">
+                    <div className="flex items-center gap-1.5 bg-white dark:bg-gray-900 px-3 py-2 rounded-lg border border-blue-200 dark:border-blue-800/80 text-xs shadow-xs">
+                      <span className="text-gray-500 dark:text-gray-400">Purchase Rows:</span>
+                      <strong className="text-gray-900 dark:text-gray-100 font-mono font-bold">{preview.totalRows}</strong>
+                    </div>
+                    <div className="flex items-center gap-1.5 bg-white dark:bg-gray-900 px-3 py-2 rounded-lg border border-blue-200 dark:border-blue-800/80 text-xs shadow-xs">
+                      <span className="text-gray-500 dark:text-gray-400">Unique SKUs:</span>
+                      <strong className="text-blue-600 dark:text-blue-400 font-mono font-bold">{preview.uniqueSkusCount ?? 0}</strong>
+                    </div>
+                    <div className="flex items-center gap-1.5 bg-white dark:bg-gray-900 px-3 py-2 rounded-lg border border-blue-200 dark:border-blue-800/80 text-xs shadow-xs">
+                      <span className="text-gray-500 dark:text-gray-400">Ready to Inward:</span>
+                      <strong className="text-emerald-600 dark:text-emerald-400 font-mono font-bold">
+                        {readyToImportCount} {readyToImportCount === 1 ? 'Row' : 'Rows'} ({preview.newInboundQty.toLocaleString()} DOZ)
+                      </strong>
+                    </div>
+                    {preview.alreadyImportedQty > 0 && (
+                      <div className="flex items-center gap-1.5 bg-white dark:bg-gray-900 px-3 py-2 rounded-lg border border-purple-200 dark:border-purple-800/80 text-xs shadow-xs">
+                        <span className="text-purple-600 dark:text-purple-400 font-medium">Already Inwarded:</span>
+                        <strong className="text-purple-700 dark:text-purple-300 font-mono font-bold">{preview.alreadyImportedQty.toLocaleString()} DOZ</strong>
+                      </div>
+                    )}
+                    {isAuthorized && (
+                      <Button
+                        variant="primary"
+                        disabled={readyToImportCount === 0 || importMutation.isPending}
+                        onClick={() => setConfirmModalOpen(true)}
+                        className="text-xs px-4 py-2 ml-auto sm:ml-0 shadow-sm"
+                      >
+                        <PackagePlus className="w-4 h-4 mr-1.5" />
+                        Confirm & Record ({preview.newInboundQty.toLocaleString()} DOZ)
+                      </Button>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
@@ -1070,15 +1249,27 @@ export function ImportNewStockPage() {
               Authoritative Inventory Modification
             </p>
             <p className="mt-1 text-amber-800 dark:text-amber-300 text-[11px]">
-              You are about to record <strong className="font-semibold">{readyToImportCount}</strong> verified inbound inventory movements.
+              You are about to record <strong className="font-semibold">{readyToImportCount}</strong> verified inbound inventory movements totaling <strong className="font-semibold">{preview?.newInboundQty.toLocaleString()} DOZ</strong>.
               These will directly increase the DistroTrack operational stock ledger.
             </p>
           </div>
 
           <div className="grid grid-cols-2 gap-3 bg-gray-50 dark:bg-gray-800/60 p-3 rounded-lg border border-gray-200 dark:border-gray-700">
             <div>
+              <span className="text-gray-400">Total Received Qty:</span>
+              <div className="font-mono font-bold text-blue-600 dark:text-blue-400 text-sm">
+                {preview?.totalReceivedQty.toLocaleString()} DOZ
+              </div>
+            </div>
+            <div>
+              <span className="text-gray-400">Net Inbound Stock:</span>
+              <div className="font-mono font-bold text-emerald-600 text-sm">
+                {preview?.newInboundQty.toLocaleString()} DOZ ({readyToImportCount} rows)
+              </div>
+            </div>
+            <div>
               <span className="text-gray-400">Batch Reference:</span>
-              <div className="font-mono font-medium text-gray-900 dark:text-gray-100">{batchRef}</div>
+              <div className="font-mono font-medium text-gray-900 dark:text-gray-100 truncate">{batchRef}</div>
             </div>
             <div>
               <span className="text-gray-400">Movement Type:</span>

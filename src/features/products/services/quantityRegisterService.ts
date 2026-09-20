@@ -11,6 +11,7 @@ export interface QuantityRegisterFilter {
   endDate?: string;
   routeCode?: string;
   searchQuery?: string;
+  source?: 'all' | 'sap' | 'distrotrack';
   aggregation?: AggregationMode;
 }
 
@@ -51,34 +52,51 @@ export async function getProductQuantityRegister(filter?: QuantityRegisterFilter
   let deliveryItems: any[] = [];
   let routes: any[] = [];
   let products: Product[] = [];
+  let sapSalesItems: any[] = [];
+
+  let isSupabaseSuccess = false;
 
   try {
-    const [plRes, delRes, itemsRes, rRes, prodRes] = await Promise.all([
+    const [plRes, delRes, itemsRes, rRes, prodRes, sapRes] = await Promise.all([
       supabase.from('picklists').select('*'),
       supabase.from('deliveries').select('*'),
       supabase.from('delivery_items').select('*'),
       supabase.from('routes').select('*'),
       supabase.from('products').select('*'),
+      supabase.from('sap_sales_import_items').select('*'),
     ]);
 
-    if (plRes.data && plRes.data.length > 0) {
-      picklists = plRes.data;
+    if (!plRes.error && !delRes.error && !sapRes.error) {
+      isSupabaseSuccess = true;
+      picklists = plRes.data || [];
       deliveries = delRes.data || [];
       deliveryItems = itemsRes.data || [];
       routes = rRes.data || [];
       products = (prodRes.data as Product[]) || [];
+      sapSalesItems = sapRes.data || [];
     }
   } catch (err) {
     console.warn('[QUANTITY REGISTER] Supabase query error, using mockStore:', err);
   }
 
-  // Fallback to mockStore
-  if (picklists.length === 0) {
+  // Fallback to mockStore ONLY if Supabase query failed
+  if (!isSupabaseSuccess) {
     picklists = mockStore.getPicklists();
     deliveries = mockStore.getDeliveries();
     deliveryItems = mockStore.getDeliveryItems();
     routes = mockStore.getRoutes();
     products = mockStore.getProducts();
+    sapSalesItems = mockStore.getSapSalesImportItems();
+  } else if (picklists.length === 0 && deliveryItems.length === 0) {
+    // If Supabase has no operational picklists/deliveries yet, fallback operational records for demo,
+    // but DO NOT resurrect deleted SAP sales items when Supabase returned 0 items.
+    const mockPicklists = mockStore.getPicklists();
+    if (mockPicklists.length > 0) {
+      picklists = mockPicklists;
+      deliveries = mockStore.getDeliveries();
+      deliveryItems = mockStore.getDeliveryItems();
+      routes = mockStore.getRoutes();
+    }
   }
 
   const routeMap = new Map<string, any>(routes.map((r) => [r.id, r]));
@@ -149,6 +167,54 @@ export async function getProductQuantityRegister(filter?: QuantityRegisterFilter
       rate,
       mrp,
       salesAmount,
+      source: 'DistroTrack',
+      transactionType: 'DistroTrack Delivery',
+      invoiceNumber: del?.invoice_id || undefined,
+      customerName: del?.party_id ? undefined : undefined,
+    });
+  }
+
+  // 1b. Process from authoritative sap_sales_import_items (SAP Baseline Sales)
+  for (const sItem of sapSalesItems) {
+    const sku = String(sItem.sku || '').trim();
+    if (!sku) continue;
+
+    const master = findProductMasterEntry(sku);
+    const officialName = master?.name || sItem.product_name || `SKU ${sku}`;
+    const brand = master?.brand || 'Colgate';
+    const category = master?.category || 'Oral Care';
+    const uom = sItem.uom || master?.uom || 'EA';
+
+    const qty = Number(sItem.quantity || 0);
+    const rate = Number(sItem.rate || (qty !== 0 ? Math.abs(Number(sItem.net_val || 0)) / qty : 0));
+    const isCancel = Boolean(sItem.is_cancellation);
+    const netSold = isCancel ? -qty : qty;
+    const salesAmount = Number(sItem.net_val !== null && sItem.net_val !== undefined ? sItem.net_val : netSold * rate);
+    const mrp = Number(master?.mrp || rate);
+
+    rawRows.push({
+      date: sItem.invoice_date || (sItem.created_at ? sItem.created_at.split('T')[0] : new Date().toISOString().split('T')[0]),
+      picklistNumber: sItem.invoice_no,
+      picklistId: sItem.import_id,
+      routeCode: sItem.cust_code || 'SAP',
+      routeName: sItem.cust_name || 'SAP Customer',
+      sku,
+      productName: officialName,
+      brand,
+      category,
+      uom,
+      picklistQty: qty,
+      deliveredQty: isCancel ? 0 : qty,
+      returnedQty: isCancel ? qty : 0,
+      netSoldQty: netSold,
+      rate,
+      mrp,
+      salesAmount,
+      source: 'SAP',
+      transactionType: isCancel ? 'SAP Sales Cancellation' : 'SAP Baseline Sale',
+      invoiceNumber: sItem.invoice_no,
+      customerCode: sItem.cust_code || undefined,
+      customerName: sItem.cust_name || undefined,
     });
   }
 
@@ -197,6 +263,14 @@ export async function getProductQuantityRegister(filter?: QuantityRegisterFilter
 
   // 3. Filter rows
   let filtered = rawRows;
+
+  if (filter?.source && filter.source !== 'all') {
+    if (filter.source === 'sap') {
+      filtered = filtered.filter((r) => r.source === 'SAP');
+    } else if (filter.source === 'distrotrack') {
+      filtered = filtered.filter((r) => r.source === 'DistroTrack' || !r.source);
+    }
+  }
 
   if (filter?.startDate) {
     filtered = filtered.filter((r) => r.date >= filter.startDate!);
@@ -335,8 +409,9 @@ export function aggregateQuantityRegister(
  */
 export function exportQuantityRegisterToCSV(rows: ProductQuantityRegisterRow[], filename = 'Product_Quantity_Register.csv'): string {
   const headers = [
-    'Date', 'Picklist', 'Route Code', 'Route Name', 'SKU', 'Product Name',
-    'Brand', 'Category', 'UOM', 'Picklist Qty', 'Delivered Qty', 'Returned Qty',
+    'Date', 'Source', 'Transaction Type', 'Invoice / Picklist', 'Customer Code', 'Customer Name',
+    'Route Code', 'Route Name', 'SKU', 'Product Name',
+    'Brand', 'Category', 'UOM', 'Ordered / Invoiced Qty', 'Delivered Qty', 'Returned Qty',
     'Net Sold Qty', 'Rate (INR)', 'MRP (INR)', 'Sales Amount (INR)'
   ];
 
@@ -352,7 +427,11 @@ export function exportQuantityRegisterToCSV(rows: ProductQuantityRegisterRow[], 
     headers.join(','),
     ...rows.map((r) => [
       escapeCSV(r.date),
-      escapeCSV(r.picklistNumber),
+      escapeCSV(r.source || 'DistroTrack'),
+      escapeCSV(r.transactionType || 'Delivery'),
+      escapeCSV(r.invoiceNumber || r.picklistNumber),
+      escapeCSV(r.customerCode || ''),
+      escapeCSV(r.customerName || r.routeName),
       escapeCSV(r.routeCode),
       escapeCSV(r.routeName),
       escapeCSV(r.sku),
@@ -391,7 +470,11 @@ export function exportQuantityRegisterToCSV(rows: ProductQuantityRegisterRow[], 
 export function exportQuantityRegisterToXLSX(rows: ProductQuantityRegisterRow[], filename = 'Product_Quantity_Register.xlsx'): void {
   const data = rows.map((r) => ({
     'Date': r.date,
-    'Picklist': r.picklistNumber,
+    'Source': r.source || 'DistroTrack',
+    'Transaction Type': r.transactionType || 'Delivery',
+    'Invoice / Picklist': r.invoiceNumber || r.picklistNumber,
+    'Customer Code': r.customerCode || '',
+    'Customer Name': r.customerName || r.routeName,
     'Route Code': r.routeCode,
     'Route Name': r.routeName,
     'SKU': r.sku,
@@ -399,7 +482,7 @@ export function exportQuantityRegisterToXLSX(rows: ProductQuantityRegisterRow[],
     'Brand': r.brand || 'Colgate',
     'Category': r.category || 'Oral Care',
     'UOM': r.uom,
-    'Picklist Qty': r.picklistQty,
+    'Ordered / Invoiced Qty': r.picklistQty,
     'Delivered Qty': r.deliveredQty,
     'Returned Qty': r.returnedQty,
     'Net Sold Qty': r.netSoldQty,

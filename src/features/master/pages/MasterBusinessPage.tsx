@@ -585,7 +585,9 @@ function StockOversightView({
                 <th className="text-left px-3 py-2">SKU</th>
                 <th className="text-left px-3 py-2">Product Name</th>
                 <th className="text-left px-3 py-2">Category</th>
-                <th className="text-right px-3 py-2">Current Stock</th>
+                <th className="text-right px-3 py-2 text-amber-700">Warehouse</th>
+                <th className="text-right px-3 py-2 text-blue-700">Vehicle</th>
+                <th className="text-right px-3 py-2 text-emerald-700 font-bold">Total Stock</th>
                 <th className="text-center px-3 py-2">Unit</th>
                 <th className="text-right px-3 py-2">Rate</th>
                 <th className="text-center px-3 py-2">Stock Alert</th>
@@ -597,6 +599,8 @@ function StockOversightView({
                   <td className="px-3 py-2 font-mono font-semibold text-indigo-700">{p.sku}</td>
                   <td className="px-3 py-2 font-medium text-slate-900">{p.name}</td>
                   <td className="px-3 py-2 text-slate-500">{p.category ?? '—'}</td>
+                  <td className="px-3 py-2 text-right font-mono text-slate-800">{p.warehouseStock}</td>
+                  <td className="px-3 py-2 text-right font-mono text-blue-600">{p.vehicleStock}</td>
                   <td className="px-3 py-2 text-right font-bold tabular-nums text-slate-900">{p.currentStock}</td>
                   <td className="px-3 py-2 text-center text-slate-500">{p.unit}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-slate-700">{fmtCurrency(p.rate)}</td>

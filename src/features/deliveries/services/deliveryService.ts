@@ -11,7 +11,26 @@ export async function getDeliveries(): Promise<Delivery[]> {
     if (error || !data) {
       return mockStore.getDeliveries();
     }
-    return data as Delivery[];
+
+    // Defense-in-depth: Deduplicate by canonical identity (invoice_id, or picklist_id + party_id)
+    const seen = new Map<string, Delivery>();
+    for (const d of (data as Delivery[])) {
+      const key = d.invoice_id
+        ? `inv:${d.invoice_id}`
+        : (d.picklist_id && d.party_id)
+        ? `pl:${d.picklist_id}_${d.party_id}`
+        : `id:${d.id}`;
+      const existing = seen.get(key);
+      if (!existing) {
+        seen.set(key, d);
+      } else {
+        // Keep the one with authoritative non-zero or higher amount
+        if (Number(existing.total_amount || 0) === 0 && Number(d.total_amount || 0) > 0) {
+          seen.set(key, d);
+        }
+      }
+    }
+    return Array.from(seen.values());
   } catch {
     return mockStore.getDeliveries();
   }

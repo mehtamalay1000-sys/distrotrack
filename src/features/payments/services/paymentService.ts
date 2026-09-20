@@ -20,7 +20,164 @@ export interface RecordPaymentInput {
   idempotency_key?: string;
 }
 
+export interface PendingCreditFilter {
+  routeId?: string;
+  workerId?: string;
+}
+
+/**
+ * Fetch pending credit receivables (deliveries where delivered_amount > collected_amount).
+ * Formats them as virtual Payment items with payment_mode: 'credit' and status: 'pending'
+ * so they appear seamlessly in Payments lists, summaries, and worker collection reminders.
+ */
+export async function fetchPendingCreditPayments(filter?: PendingCreditFilter): Promise<Payment[]> {
+  try {
+    const { data: pendingRpc, error } = await supabase.rpc('get_pending_credit_deliveries', {
+      p_route_id: filter?.routeId || null,
+      p_worker_id: filter?.workerId || null,
+    });
+
+    if (!error && Array.isArray(pendingRpc) && pendingRpc.length > 0) {
+      return pendingRpc.map((item: any) => ({
+        id: `credit-${item.delivery_id}`,
+        delivery_id: item.delivery_id,
+        party_id: item.party_id,
+        invoice_id: item.invoice_id || null,
+        picklist_id: item.picklist_id || null,
+        route_id: item.route_id || null,
+        worker_id: item.worker_id || null,
+        received_by_worker_id: item.worker_id || null,
+        amount: Number(item.pending_amount || 0),
+        payment_mode: 'credit' as PaymentMode,
+        status: 'pending' as const,
+        payment_date: item.delivery_date || new Date().toISOString().split('T')[0],
+        created_at: item.delivery_date || new Date().toISOString(),
+        updated_at: item.delivery_date || new Date().toISOString(),
+        notes: item.invoice_number ? `Invoice #${item.invoice_number}` : 'Pending credit collection',
+        idempotency_key: `credit:${item.delivery_id}`,
+        party: {
+          id: item.party_id,
+          name: item.party_name,
+          code: item.party_code,
+          phone: item.party_phone,
+          address: item.party_address,
+          route: item.route_id ? {
+            id: item.route_id,
+            name: item.route_name,
+            code: item.route_code,
+          } : undefined,
+        },
+        delivery: {
+          id: item.delivery_id,
+          delivered_amount: Number(item.sale_amount || 0),
+          collected_amount: Number(item.collected_amount || 0),
+          status: item.delivery_status,
+          picklist: item.picklist_id ? {
+            id: item.picklist_id,
+            picklist_number: item.picklist_number,
+            route: item.route_id ? {
+              id: item.route_id,
+              name: item.route_name,
+              code: item.route_code,
+            } : undefined,
+          } : undefined,
+        },
+        worker: item.worker_id ? {
+          id: item.worker_id,
+          name: item.worker_name,
+        } : undefined,
+        route: item.route_id ? {
+          id: item.route_id,
+          name: item.route_name,
+          code: item.route_code,
+        } : undefined,
+        invoice: item.invoice_number ? {
+          id: item.invoice_id || '',
+          invoice_number: item.invoice_number,
+          net_amount: Number(item.invoice_amount || 0),
+        } : undefined,
+        is_pending_credit: true,
+        days_outstanding: Number(item.days_outstanding ?? 1),
+      })) as Payment[];
+    }
+  } catch (err) {
+    console.warn('[paymentService] get_pending_credit_deliveries RPC failed, using mockStore:', err);
+  }
+
+  // Fallback to mockStore
+  const mockDeliveries = mockStore.getDeliveries();
+  const mockParties = mockStore.getParties();
+  const mockRoutes = mockStore.getRoutes();
+  const mockPicklists = mockStore.getPicklists();
+  const mockWorkers = mockStore.getWorkers();
+
+  const partyMap = new Map(mockParties.map((p) => [p.id, p]));
+  const routeMap = new Map(mockRoutes.map((r) => [r.id, r]));
+  const plMap = new Map(mockPicklists.map((pl) => [pl.id, pl]));
+  const workerMap = new Map(mockWorkers.map((w) => [w.id, w]));
+
+  const pendingMockDels = mockDeliveries.filter((d) => {
+    const sale = Number(d.delivered_amount || d.total_amount || 0);
+    const coll = Number(d.collected_amount || 0);
+    const pending = sale - coll;
+    if (pending <= 0.01) return false;
+    if (d.status !== 'delivered' && d.status !== 'partial') return false;
+
+    if (filter?.workerId && d.worker_id !== filter.workerId) return false;
+    if (filter?.routeId) {
+      const pl = d.picklist_id ? plMap.get(d.picklist_id) : null;
+      if (pl?.route_id !== filter.routeId) return false;
+    }
+    return true;
+  });
+
+  return pendingMockDels.map((d) => {
+    const pt = partyMap.get(d.party_id);
+    const pl = d.picklist_id ? plMap.get(d.picklist_id) : null;
+    const rt = pl?.route_id ? routeMap.get(pl.route_id) : null;
+    const wk = d.worker_id ? workerMap.get(d.worker_id) : null;
+    const sale = Number(d.delivered_amount || d.total_amount || 0);
+    const coll = Number(d.collected_amount || 0);
+    const pending = Math.max(0, sale - coll);
+
+    return {
+      id: `credit-${d.id}`,
+      delivery_id: d.id,
+      party_id: d.party_id,
+      invoice_id: d.invoice_id || null,
+      picklist_id: d.picklist_id || null,
+      route_id: rt?.id || null,
+      worker_id: d.worker_id || null,
+      received_by_worker_id: d.worker_id || null,
+      amount: pending,
+      payment_mode: 'credit' as PaymentMode,
+      status: 'pending' as const,
+      payment_date: d.delivery_date || (d.delivered_at ? d.delivered_at.split('T')[0] : new Date().toISOString().split('T')[0]),
+      created_at: d.delivered_at || new Date().toISOString(),
+      updated_at: d.delivered_at || new Date().toISOString(),
+      notes: 'Pending credit collection',
+      idempotency_key: `credit:${d.id}`,
+      party: pt ? {
+        ...pt,
+        route: rt,
+      } : undefined,
+      delivery: {
+        ...d,
+        picklist: pl ? {
+          ...pl,
+          route: rt,
+        } : undefined,
+      },
+      worker: wk,
+      route: rt,
+      is_pending_credit: true,
+      days_outstanding: 1,
+    } as Payment;
+  });
+}
+
 export async function getPayments(): Promise<Payment[]> {
+  let recordedPayments: Payment[] = [];
   try {
     const { data, error } = await supabase
       .from('payments')
@@ -36,29 +193,38 @@ export async function getPayments(): Promise<Payment[]> {
       .order('created_at', { ascending: false });
 
     if (!error && data) {
-      return data as Payment[];
+      recordedPayments = data as Payment[];
     }
   } catch (err) {
     console.warn('[paymentService] Failed to load payments from Supabase, falling back to mockStore:', err);
   }
 
   // Offline fallback only:
-  const mockPayments = mockStore.getPayments();
-  const allParties = mockStore.getParties();
-  const allRoutes = mockStore.getRoutes();
-  const allDeliveries = mockStore.getDeliveries();
-  const allPicklists = mockStore.getPicklists();
+  if (recordedPayments.length === 0) {
+    const mockPayments = mockStore.getPayments();
+    const allParties = mockStore.getParties();
+    const allRoutes = mockStore.getRoutes();
+    const allDeliveries = mockStore.getDeliveries();
+    const allPicklists = mockStore.getPicklists();
 
-  if (allDeliveries.length === 0 && allPicklists.length === 0) {
-    return mockPayments;
+    if (allDeliveries.length === 0 && allPicklists.length === 0) {
+      recordedPayments = mockPayments;
+    } else {
+      recordedPayments = mockPayments.filter((p) =>
+        isPaymentLinkedToActiveRoute(p, allParties, allDeliveries, allPicklists, allRoutes)
+      );
+    }
   }
 
-  return mockPayments.filter((p) =>
-    isPaymentLinkedToActiveRoute(p, allParties, allDeliveries, allPicklists, allRoutes)
-  );
+  // Fetch pending credit payments
+  const pendingCreditPayments = await fetchPendingCreditPayments();
+
+  // Combine active pending credit payments with recorded payments
+  return [...pendingCreditPayments, ...recordedPayments];
 }
 
 export async function getWorkerPayments(workerId: string, workerName?: string): Promise<Payment[]> {
+  let recordedPayments: Payment[] = [];
   try {
     const workerIds = new Set<string>([workerId]);
     if (workerName) {
@@ -87,16 +253,23 @@ export async function getWorkerPayments(workerId: string, workerName?: string): 
       .order('created_at', { ascending: false });
 
     if (!error && data) {
-      return data as Payment[];
+      recordedPayments = data as Payment[];
     }
   } catch (err) {
     console.warn('[paymentService] Failed to load worker payments from Supabase:', err);
   }
 
-  return mockStore.getPayments().filter(
-    (p) => p.worker_id === workerId || (p as any).received_by_worker_id === workerId ||
-           (p.worker && p.worker.id === workerId)
-  );
+  if (recordedPayments.length === 0) {
+    recordedPayments = mockStore.getPayments().filter(
+      (p) => p.worker_id === workerId || (p as any).received_by_worker_id === workerId ||
+             (p.worker && p.worker.id === workerId)
+    );
+  }
+
+  // Fetch worker's pending credit payments
+  const pendingCreditPayments = await fetchPendingCreditPayments({ workerId });
+
+  return [...pendingCreditPayments, ...recordedPayments];
 }
 
 /**
@@ -247,10 +420,23 @@ export async function updateChequeStatus(paymentId: string, status: 'cleared' | 
 }
 
 /**
- * Direct deletion is prohibited in Stage 5. Use reversePayment instead.
+ * Authoritatively delete a payment (Admin/Master only).
+ * Recalibrates party_financial_ledger, delivery collected_amount, and customer outstanding balance.
  */
-export async function deletePayment(_id: string): Promise<void> {
-  throw new Error('Direct deletion of payments is prohibited in production. Use authorized payment reversal instead.');
+export async function deletePayment(paymentId: string, reason: string = 'Deleted by admin'): Promise<any> {
+  const { data, error } = await supabase.rpc('admin_delete_payment', {
+    p_payment_id: paymentId,
+    p_reason: reason,
+  });
+
+  if (error) {
+    throw new Error(`Payment deletion failed: ${error.message}`);
+  }
+
+  // Remove from mockStore for offline fallback
+  mockStore.deletePayment(paymentId);
+
+  return data;
 }
 
 /**

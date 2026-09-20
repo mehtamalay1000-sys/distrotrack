@@ -5,15 +5,17 @@ import { toast } from 'sonner';
 import {
   Plus, CreditCard, DollarSign, Search, Filter,
   CheckCircle2, Clock, MapPin, ArrowUpRight, ArrowDownRight, Wifi,
-  Eye, RotateCcw, Check, X, ShieldAlert, AlertCircle,
+  Eye, RotateCcw, Check, X, ShieldAlert, AlertCircle, Trash2,
 } from 'lucide-react';
 import { PageHeader, Button, Input, Select, Modal, EmptyState, LoadingState, ErrorState, StatusBadge } from '@/shared/ui';
 import { UPIQRPayment } from '@/shared/ui/UPIQRPayment';
-import { getPayments, createPayment, reversePayment, updateChequeStatus } from '../services/paymentService';
+import { getPayments, createPayment, reversePayment, deletePayment, updateChequeStatus } from '../services/paymentService';
 import { getParties } from '@/features/parties/services/partyService';
 import { getWorkers } from '@/features/workers/services/workerService';
 import { getRoutes } from '@/features/routes/services/routeService';
+import { useAuth } from '@/app/AuthProvider';
 import { formatCurrency, formatDate } from '@/shared/utils/format';
+import { QK } from '@/lib/queryKeys';
 import type { Payment, PaymentMode } from '@/lib/database.types';
 
 export function PaymentsPage() {
@@ -27,10 +29,17 @@ export function PaymentsPage() {
   const [pendingUpiForm, setPendingUpiForm] = useState<typeof form | null>(null);
   const [upiPartyName, setUpiPartyName] = useState('');
 
-  // Payment inspection & reversal states
+  // Auth & role check for privileged actions
+  const { role, isMaster } = useAuth();
+  const canDelete = role === 'owner' || role === 'master' || isMaster;
+
+  // Payment inspection, reversal & deletion states
   const [viewingPayment, setViewingPayment] = useState<Payment | null>(null);
   const [reversingPayment, setReversingPayment] = useState<Payment | null>(null);
   const [reversalReason, setReversalReason] = useState('');
+  const [deletingPayment, setDeletingPayment] = useState<Payment | null>(null);
+  const [deleteReason, setDeleteReason] = useState('');
+  const [hideReversed, setHideReversed] = useState(false);
 
   const prePartyId = searchParams.get('party_id') || '';
   const preDeliveryId = searchParams.get('delivery_id') || '';
@@ -68,10 +77,13 @@ export function PaymentsPage() {
   const createMut = useMutation({
     mutationFn: createPayment,
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['payments'] });
-      qc.invalidateQueries({ queryKey: ['parties'] });
-      qc.invalidateQueries({ queryKey: ['deliveries'] });
-      qc.invalidateQueries({ queryKey: ['dashboard-stats'] });
+      qc.invalidateQueries({ queryKey: QK.payments });
+      qc.invalidateQueries({ queryKey: QK.parties });
+      qc.invalidateQueries({ queryKey: QK.deliveries });
+      qc.invalidateQueries({ queryKey: QK.dashboardStats });
+      qc.invalidateQueries({ queryKey: QK.masterOperations });
+      qc.invalidateQueries({ queryKey: QK.masterKpisAny });
+      qc.invalidateQueries({ queryKey: QK.masterExceptionsAny });
       toast.success('Payment recorded');
       closeModal();
     },
@@ -82,13 +94,35 @@ export function PaymentsPage() {
     mutationFn: (args: { paymentId: string; reason: string }) =>
       reversePayment(args.paymentId, args.reason),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['payments'] });
-      qc.invalidateQueries({ queryKey: ['parties'] });
-      qc.invalidateQueries({ queryKey: ['deliveries'] });
-      qc.invalidateQueries({ queryKey: ['dashboard-stats'] });
+      qc.invalidateQueries({ queryKey: QK.payments });
+      qc.invalidateQueries({ queryKey: QK.parties });
+      qc.invalidateQueries({ queryKey: QK.deliveries });
+      qc.invalidateQueries({ queryKey: QK.dashboardStats });
+      qc.invalidateQueries({ queryKey: QK.masterOperations });
+      qc.invalidateQueries({ queryKey: QK.masterKpisAny });
+      qc.invalidateQueries({ queryKey: QK.masterExceptionsAny });
       toast.success('Payment successfully reversed with ledger update.');
       setReversingPayment(null);
       setReversalReason('');
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const deleteMut = useMutation({
+    mutationFn: (args: { paymentId: string; reason: string }) =>
+      deletePayment(args.paymentId, args.reason),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['payments'] });
+      qc.invalidateQueries({ queryKey: QK.payments });
+      qc.invalidateQueries({ queryKey: QK.parties });
+      qc.invalidateQueries({ queryKey: QK.deliveries });
+      qc.invalidateQueries({ queryKey: QK.dashboardStats });
+      qc.invalidateQueries({ queryKey: QK.masterOperations });
+      qc.invalidateQueries({ queryKey: QK.masterKpisAny });
+      qc.invalidateQueries({ queryKey: QK.masterExceptionsAny });
+      toast.success('Payment permanently deleted and customer balance recalibrated.');
+      setDeletingPayment(null);
+      setDeleteReason('');
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -97,9 +131,12 @@ export function PaymentsPage() {
     mutationFn: (args: { paymentId: string; status: 'cleared' | 'bounced'; notes?: string }) =>
       updateChequeStatus(args.paymentId, args.status, args.notes),
     onSuccess: (_, variables) => {
-      qc.invalidateQueries({ queryKey: ['payments'] });
-      qc.invalidateQueries({ queryKey: ['parties'] });
-      qc.invalidateQueries({ queryKey: ['dashboard-stats'] });
+      qc.invalidateQueries({ queryKey: QK.payments });
+      qc.invalidateQueries({ queryKey: QK.parties });
+      qc.invalidateQueries({ queryKey: QK.dashboardStats });
+      qc.invalidateQueries({ queryKey: QK.masterOperations });
+      qc.invalidateQueries({ queryKey: QK.masterKpisAny });
+      qc.invalidateQueries({ queryKey: QK.masterExceptionsAny });
       toast.success(`Cheque marked as ${variables.status.toUpperCase()}`);
     },
     onError: (e: Error) => toast.error(e.message),
@@ -153,8 +190,9 @@ export function PaymentsPage() {
   }
 
   // ── Helper: Get route ID of a payment ─────────────────────────────────
-  // ── Helper: Get route ID of a payment ─────────────────────────────────
   function getPaymentRouteId(p: Payment): string | null {
+    if (p.route_id) return p.route_id;
+    if (p.route?.id) return p.route.id;
     const dPicklist = (p.delivery as any)?.picklist;
     if (dPicklist?.route_id) return dPicklist.route_id;
     if (dPicklist?.route?.id) return dPicklist.route.id;
@@ -194,6 +232,9 @@ export function PaymentsPage() {
 
   // ── 3. Apply Tab & Search Filters for Table ──────────────────────────
   const finalFiltered = routeFiltered.filter((p) => {
+    // Hide reversed payments if toggled
+    if (hideReversed && p.status === 'reversed') return false;
+
     // Status tab filter
     if (statusTab === 'paid' && p.payment_mode === 'credit') return false;
     if (statusTab === 'remaining' && p.payment_mode !== 'credit') return false;
@@ -203,6 +244,8 @@ export function PaymentsPage() {
     const matchesSearch =
       (pt?.name ?? '').toLowerCase().includes(search.toLowerCase()) ||
       (p.cheque_number ?? '').toLowerCase().includes(search.toLowerCase()) ||
+      ((p as any).invoice_number ?? '').toLowerCase().includes(search.toLowerCase()) ||
+      (p.invoice?.invoice_number ?? '').toLowerCase().includes(search.toLowerCase()) ||
       (pt?.code ?? '').toLowerCase().includes(search.toLowerCase());
 
     return matchesSearch;
@@ -373,16 +416,31 @@ export function PaymentsPage() {
           </button>
         </div>
 
-        {/* Search */}
-        <div className="relative max-w-xs w-full">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-surface-400" />
-          <input
-            type="text"
-            placeholder="Search party or cheque #…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="w-full h-10 pl-9 pr-3 text-sm border border-surface-300 dark:border-surface-600 rounded-xl bg-white dark:bg-surface-800 text-surface-900 dark:text-surface-100 placeholder:text-surface-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
-          />
+        {/* Filters & Search */}
+        <div className="flex items-center gap-3">
+          {payments.some((p) => p.status === 'reversed') && (
+            <label className="flex items-center gap-1.5 text-xs text-surface-600 dark:text-surface-400 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={hideReversed}
+                onChange={(e) => setHideReversed(e.target.checked)}
+                className="rounded border-surface-300 text-blue-600 focus:ring-blue-500"
+              />
+              <span>Hide Reversed</span>
+            </label>
+          )}
+
+          {/* Search */}
+          <div className="relative max-w-xs w-full">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-surface-400" />
+            <input
+              type="text"
+              placeholder="Search party or cheque #…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-full h-10 pl-9 pr-3 text-sm border border-surface-300 dark:border-surface-600 rounded-xl bg-white dark:bg-surface-800 text-surface-900 dark:text-surface-100 placeholder:text-surface-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
+            />
+          </div>
         </div>
       </div>
 
@@ -505,6 +563,30 @@ export function PaymentsPage() {
                     </td>
                     <td className="text-right">
                       <div className="flex items-center justify-end gap-1.5">
+                        {/* Pending Credit Collection Action */}
+                        {(p.payment_mode === 'credit' || p.is_pending_credit) && p.status === 'pending' && (
+                          <button
+                            onClick={() => {
+                              setForm({
+                                party_id: p.party_id,
+                                delivery_id: p.delivery_id || '',
+                                amount: p.amount,
+                                payment_mode: 'cash',
+                                cheque_number: '',
+                                cheque_date: '',
+                                cheque_bank: '',
+                                notes: `Credit collected for ${p.party?.name || 'Customer'}`,
+                                worker_id: p.worker_id || '',
+                              });
+                              setModalOpen(true);
+                            }}
+                            className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white text-[11px] font-bold flex items-center gap-1.5 cursor-pointer shadow-xs transition-colors"
+                            title="Collect Payment & Mark Complete"
+                          >
+                            <Check className="h-3.5 w-3.5" /> Mark Complete
+                          </button>
+                        )}
+
                         {/* View Payment Details */}
                         <button
                           onClick={() => setViewingPayment(p)}
@@ -540,8 +622,8 @@ export function PaymentsPage() {
                           </>
                         )}
 
-                        {/* Reverse / Void Action */}
-                        {!isReversed && (
+                        {/* Reverse / Void Action (Settled Payments Only) */}
+                        {!p.is_pending_credit && !isReversed && (
                           <button
                             onClick={() => {
                               setReversingPayment(p);
@@ -551,6 +633,20 @@ export function PaymentsPage() {
                             title="Reverse Payment (Append-only Ledger)"
                           >
                             <RotateCcw className="h-4 w-4" />
+                          </button>
+                        )}
+
+                        {/* Admin Permanent Delete Action (Settled Payments Only) */}
+                        {canDelete && !p.is_pending_credit && (
+                          <button
+                            onClick={() => {
+                              setDeletingPayment(p);
+                              setDeleteReason('');
+                            }}
+                            className="p-1.5 rounded-lg hover:bg-rose-50 dark:hover:bg-rose-950/40 text-surface-400 hover:text-rose-600 transition-colors cursor-pointer"
+                            title="Delete Payment (Admin Permanent Delete)"
+                          >
+                            <Trash2 className="h-4 w-4" />
                           </button>
                         )}
                       </div>
@@ -567,7 +663,7 @@ export function PaymentsPage() {
       <Modal
         open={modalOpen}
         onClose={closeModal}
-        title="Record Payment Collection"
+        title={form.delivery_id ? "Collect Pending Credit Payment" : "Record Payment Collection"}
         footer={
           <>
             <Button variant="secondary" onClick={closeModal}>Cancel</Button>
@@ -581,6 +677,14 @@ export function PaymentsPage() {
         }
       >
         <form id="pay-form" onSubmit={handleSubmit} className="space-y-3">
+          {form.delivery_id && (
+            <div className="flex items-center gap-2 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/40 rounded-xl px-3 py-2.5">
+              <Clock className="h-4 w-4 text-amber-600 dark:text-amber-400 flex-shrink-0" />
+              <p className="text-xs text-amber-800 dark:text-amber-300 font-medium">
+                Recording this collection will mark the credit payment as collected, reduce pending credit receivables, and update the party ledger.
+              </p>
+            </div>
+          )}
           <Select
             label="Party / Customer"
             value={form.party_id}
@@ -826,6 +930,83 @@ export function PaymentsPage() {
                 placeholder="e.g. Cheque dishonored, wrong party selected, cash handover dispute..."
                 value={reversalReason}
                 onChange={(e) => setReversalReason(e.target.value)}
+                className="w-full p-2.5 text-xs rounded-xl border border-surface-300 dark:border-surface-600 bg-white dark:bg-surface-800 text-surface-900 dark:text-white outline-none focus:ring-2 focus:ring-rose-500/30"
+              />
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* ── DELETE PAYMENT CONFIRMATION MODAL ────────────────────────────── */}
+      <Modal
+        open={!!deletingPayment}
+        onClose={() => setDeletingPayment(null)}
+        title="Delete Payment Record"
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setDeletingPayment(null)}>Cancel</Button>
+            <Button
+              variant="danger"
+              loading={deleteMut.isPending}
+              onClick={() => {
+                if (deletingPayment) {
+                  deleteMut.mutate({
+                    paymentId: deletingPayment.id,
+                    reason: deleteReason.trim() || 'Deleted by admin',
+                  });
+                }
+              }}
+            >
+              Confirm Delete
+            </Button>
+          </>
+        }
+      >
+        {deletingPayment && (
+          <div className="space-y-3 text-xs">
+            <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-300 dark:border-rose-800 flex items-start gap-2">
+              <AlertCircle className="h-5 w-5 text-rose-600 shrink-0 mt-0.5" />
+              <div className="text-rose-800 dark:text-rose-300 space-y-1">
+                <div className="font-bold">Permanent Payment Deletion</div>
+                <div>
+                  This action will permanently delete this payment from the system, remove its credit
+                  from the ledger, and restore the customer's outstanding debt balance.
+                </div>
+              </div>
+            </div>
+
+            <div className="p-3 rounded-xl bg-surface-50 dark:bg-surface-900 border border-surface-200 dark:border-surface-700 grid grid-cols-2 gap-2">
+              <div>
+                <span className="text-[10px] text-surface-400 uppercase font-semibold">Customer</span>
+                <div className="font-bold text-surface-900 dark:text-white">
+                  {deletingPayment.party?.name || parties.find((p) => p.id === deletingPayment.party_id)?.name}
+                </div>
+              </div>
+              <div>
+                <span className="text-[10px] text-surface-400 uppercase font-semibold">Payment Amount</span>
+                <div className="font-black text-rose-600 dark:text-rose-400">
+                  {formatCurrency(deletingPayment.amount)}
+                </div>
+              </div>
+              <div>
+                <span className="text-[10px] text-surface-400 uppercase font-semibold">Payment Mode</span>
+                <div className="font-semibold uppercase">{deletingPayment.payment_mode}</div>
+              </div>
+              <div>
+                <span className="text-[10px] text-surface-400 uppercase font-semibold">Payment Status</span>
+                <div className="font-semibold uppercase">{deletingPayment.status}</div>
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <label className="block text-xs font-bold text-surface-700 dark:text-surface-300">
+                Reason for Deletion (Optional)
+              </label>
+              <input
+                type="text"
+                placeholder="e.g. Test payment, clerk error, duplicate entry..."
+                value={deleteReason}
+                onChange={(e) => setDeleteReason(e.target.value)}
                 className="w-full p-2.5 text-xs rounded-xl border border-surface-300 dark:border-surface-600 bg-white dark:bg-surface-800 text-surface-900 dark:text-white outline-none focus:ring-2 focus:ring-rose-500/30"
               />
             </div>

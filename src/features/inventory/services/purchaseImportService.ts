@@ -17,7 +17,8 @@
 import * as XLSX from 'xlsx';
 import { supabase } from '@/lib/supabase';
 import { mockStore } from '@/lib/mockStore';
-import { findProductMasterEntry, registerProductMasterEntry } from '@/features/products/data/productMaster';
+import { findProductMasterEntry, registerProductMasterEntry, findSapReferenceCatalog } from '@/features/products/data/productMaster';
+import { lookupHistoricalProductBySku } from '@/features/products/services/historicalSalesService';
 import type { SapPurchaseImport, SapPurchaseImportItem } from '@/lib/database.types';
 
 export interface ParsedPurchaseRow {
@@ -33,6 +34,7 @@ export interface ParsedPurchaseRow {
   invoiceNo: string;
   invoiceDate: string;
   batch: string;
+  itemNo?: string;
   mrp?: number;
   rate?: number;
   rawRow: Record<string, any>;
@@ -71,11 +73,18 @@ export interface PurchaseImportPreview {
   excluded: number;
   duplicateCount: number;
   totalReceivedQty: number;
+  alreadyImportedQty: number;
+  newInboundQty: number;
+  eligibleRowsCount: number;
   hasDuplicates: boolean;
   mrpUpdatesCount: number;
   conflictingMrpCount: number;
   hasMrpUpdates: boolean;
   hasConflictingMrp: boolean;
+  uniqueSkusCount: number;
+  matchedSkusCount: number;
+  historicalMatchesCount: number;
+  unmappedSkusCount: number;
 }
 
 export interface PurchaseImportResult {
@@ -145,20 +154,22 @@ export function extractSapProductDetails(row: ParsedPurchaseRow): ExtractedSapPr
   const mrp = rawMrp ? parseCleanNumber(rawMrp) : null;
   const rate = rawRate ? parseCleanNumber(rawRate) : null;
 
+  const ref = findSapReferenceCatalog(sku);
+
   return {
     sku,
-    name,
-    uom,
-    category,
-    subCategory,
-    brand,
-    subBrand,
-    variant,
-    ppg,
-    ppgDescription,
-    materialGroup,
-    prodHierarchy,
-    mrp: mrp && mrp > 0 ? mrp : null,
+    name: name || ref?.name || sku,
+    uom: uom || ref?.uom || 'EA',
+    category: category || ref?.category || null,
+    subCategory: subCategory || ref?.subCategory || null,
+    brand: brand || ref?.brand || 'Colgate',
+    subBrand: subBrand || ref?.subBrand || null,
+    variant: variant || ref?.variant || null,
+    ppg: ppg || ref?.ppg || null,
+    ppgDescription: ppgDescription || ref?.ppgDescription || null,
+    materialGroup: materialGroup || ref?.materialGroup || null,
+    prodHierarchy: prodHierarchy || ref?.prodHierarchy || null,
+    mrp: mrp && mrp > 0 ? mrp : ref?.mrp && ref.mrp > 0 ? ref.mrp : null,
     rate: rate && rate > 0 ? rate : null,
     unit: uom.toLowerCase() === 'doz' ? 'doz' : uom.toLowerCase() === 'cs' ? 'cs' : 'pcs',
   };
@@ -237,6 +248,25 @@ export async function parseSapPurchaseFile(file: File): Promise<{
     const sample = rawData[0];
     const keys = Object.keys(sample);
 
+    // Safeguard: Check if this file is actually a Historical Sales file (sale.xlsx)
+    const isHistoricalSalesFile =
+      file.name.toLowerCase().includes('sale') ||
+      (keys.includes('Cust Code') && keys.includes('Order_invoice_no')) ||
+      (keys.includes('Stockist Code') && keys.includes('Gross_val'));
+
+    const hasGoodsReceiptIndicators = keys.some((k) =>
+      /^(?:gr\s*document|gr\s*doc|material\s*document|posting\s*status|movement\s*type|po\s*number|purchase\s*order)$/i.test(k.trim())
+    );
+
+    if (isHistoricalSalesFile && !hasGoodsReceiptIndicators) {
+      return {
+        rows: [],
+        fileName: file.name,
+        batchRef: '',
+        error: `"${file.name}" appears to be a Historical Sales report (sale.xlsx), not an SAP Purchase / Goods Receipt file. Historical sales must be imported via the Historical Sales / Product Discovery workflow and do not increase current inventory.`,
+      };
+    }
+
     // 1. Resolve SKU / Article No column
     let skuKey = keys.find((k) =>
       /^(?:article\s*no\.?|article\s*number|material|sku|material\s*no\.?|material\s*number|item\s*code|product\s*code)$/i.test(k.trim())
@@ -304,6 +334,9 @@ export async function parseSapPurchaseFile(file: File): Promise<{
     const invoiceDateKey = keys.find((k) => /invoice\s*date/i.test(k));
     const poNumberKey = keys.find((k) => /^(?:po\s*no\.?|purchase\s*order|po\s*number|order\s*no\.?)$/i.test(k.trim()));
     const batchKey = keys.find((k) => /^(?:batch|lot|batch\s*no\.?)$/i.test(k.trim()));
+    const itemNoKey = keys.find((k) =>
+      /^(?:item\s*no\.?|item\s*number|line\s*no\.?|line\s*item|pos\.?)$/i.test(k.trim())
+    ) || keys.find((k) => /item\s*no/i.test(k));
 
     // 10. Resolve MRP and Rate columns if present
     const mrpKey = keys.find((k) =>
@@ -356,6 +389,7 @@ export async function parseSapPurchaseFile(file: File): Promise<{
       const invoiceDate = formatSapDateToIso(invoiceDateKey ? String(r[invoiceDateKey] || '').trim() : '');
       const poNumber = poNumberKey ? String(r[poNumberKey] || '').trim() : '';
       const batch = batchKey ? String(r[batchKey] || '').trim() : '';
+      const itemNo = itemNoKey ? String(r[itemNoKey] || '').trim() : '';
 
       const rawMrp = mrpKey ? r[mrpKey] : undefined;
       const mrp = rawMrp !== undefined && rawMrp !== null && String(rawMrp).trim() !== ''
@@ -383,6 +417,7 @@ export async function parseSapPurchaseFile(file: File): Promise<{
         invoiceNo,
         invoiceDate,
         batch,
+        itemNo,
         mrp,
         rate,
         rawRow: r,
@@ -430,6 +465,8 @@ export async function validateAndMatchPurchaseRows(
   let excludedCount = 0;
   let duplicateCount = 0;
   let totalReceivedQty = 0;
+  let alreadyImportedQty = 0;
+  let newInboundQty = 0;
 
   // Retrieve existing movements to check idempotency client-side for pre-warning
   const existingIdempKeys = new Set<string>();
@@ -474,13 +511,22 @@ export async function validateAndMatchPurchaseRows(
     }
   }
 
-  for (const row of rows) {
-    const normSku = row.sku.trim().toUpperCase();
+  // Track unique SKUs and their matching status
+  const uniqueSkus = new Set<string>();
+  const matchedSkus = new Set<string>();
+  const unmappedSkus = new Set<string>();
+  const historicalSkus = new Set<string>();
 
-    // Deterministic idempotency key:
-    // purchase_inward:{gr_doc_no || invoice_no || batch_ref}:{normSku}
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const normSku = row.sku.trim().toUpperCase();
+    uniqueSkus.add(normSku);
+
+    // Deterministic transaction-level idempotency key:
+    // purchase_inward:{gr_doc_no || invoice_no || batch_ref}:{item_no || batch || row_index}:{normSku}
     const docRef = row.grDocNo || row.invoiceNo || batchRef;
-    const idempotencyKey = `purchase_inward:${docRef}:${normSku}`;
+    const itemRef = row.itemNo || row.batch || `row_${i + 1}`;
+    const idempotencyKey = `purchase_inward:${docRef}:${itemRef}:${normSku}`;
 
     // 1. Check quantity validity
     if (row.receivedQty <= 0) {
@@ -514,7 +560,15 @@ export async function validateAndMatchPurchaseRows(
       continue;
     }
 
-    // 3. Exact Material/SKU matching via canonical SAP Product Master or registered master
+    // 3. Check for duplicate idempotency
+    const isDuplicate = existingIdempKeys.has(idempotencyKey);
+    if (isDuplicate) {
+      duplicateCount++;
+    } else {
+      existingIdempKeys.add(idempotencyKey);
+    }
+
+    // 4. Exact Material/SKU matching via canonical SAP Product Master or registered master
     let masterEntry = findProductMasterEntry(row.sku);
 
     if (!masterEntry) {
@@ -545,17 +599,28 @@ export async function validateAndMatchPurchaseRows(
     }
 
     if (!masterEntry) {
+      // Check historical sales catalog fallback
+      const hist = await lookupHistoricalProductBySku(normSku);
+      if (hist) {
+        historicalSkus.add(normSku);
+      } else {
+        unmappedSkus.add(normSku);
+      }
+
       unmappedCount++;
       previewRows.push({
         ...row,
         matchStatus: 'UNMAPPED',
         validationError: 'SKU not found in official Colgate-Palmolive Product Master',
         idempotencyKey,
+        isDuplicate,
       });
       continue;
     }
 
-    // 4. Check for MRP mismatch / conflict
+    matchedSkus.add(normSku);
+
+    // 5. Check for MRP mismatch / conflict
     const currentMrp = Number(masterEntry.mrp || 0);
     const incomingMrpSet = skuToMrps.get(normSku);
     const distinctIncomingMrps = incomingMrpSet ? Array.from(incomingMrpSet) : [];
@@ -576,12 +641,6 @@ export async function validateAndMatchPurchaseRows(
       }
     }
 
-    // 5. Check for duplicate idempotency
-    const isDuplicate = existingIdempKeys.has(idempotencyKey);
-    if (isDuplicate) {
-      duplicateCount++;
-    }
-
     let matchStatus: PurchaseRowMatchStatus = 'MATCHED';
     let valError: string | undefined = undefined;
 
@@ -594,6 +653,11 @@ export async function validateAndMatchPurchaseRows(
 
     matchedCount++;
     totalReceivedQty += row.receivedQty;
+    if (isDuplicate) {
+      alreadyImportedQty += row.receivedQty;
+    } else {
+      newInboundQty += row.receivedQty;
+    }
 
     previewRows.push({
       ...row,
@@ -625,11 +689,18 @@ export async function validateAndMatchPurchaseRows(
     excluded: excludedCount,
     duplicateCount,
     totalReceivedQty,
+    alreadyImportedQty,
+    newInboundQty,
+    eligibleRowsCount: matchedCount,
     hasDuplicates: duplicateCount > 0,
     mrpUpdatesCount,
     conflictingMrpCount,
     hasMrpUpdates: mrpUpdatesCount > 0,
     hasConflictingMrp: conflictingMrpCount > 0,
+    uniqueSkusCount: uniqueSkus.size,
+    matchedSkusCount: matchedSkus.size,
+    historicalMatchesCount: historicalSkus.size,
+    unmappedSkusCount: unmappedSkus.size,
   };
 }
 
@@ -684,6 +755,8 @@ export async function confirmPurchaseImport(
     gr_doc_no: r.grDocNo || null,
     po_number: r.poNumber || null,
     invoice_no: r.invoiceNo || null,
+    item_no: r.itemNo || null,
+    idempotency_key: r.idempotencyKey,
   }));
 
   // 1. Try secure Supabase RPC path
@@ -752,6 +825,7 @@ function executeMockPurchaseImport(
         gr_doc_no: r.grDocNo || null,
         po_number: r.poNumber || null,
         invoice_no: r.invoiceNo || null,
+        item_no: r.itemNo || null,
         idempotency_key: r.idempotencyKey,
         movement_id: null,
         status: 'unmapped',
@@ -772,6 +846,7 @@ function executeMockPurchaseImport(
         gr_doc_no: r.grDocNo || null,
         po_number: r.poNumber || null,
         invoice_no: r.invoiceNo || null,
+        item_no: r.itemNo || null,
         idempotency_key: r.idempotencyKey,
         movement_id: null,
         status: 'error',
@@ -795,6 +870,7 @@ function executeMockPurchaseImport(
         gr_doc_no: r.grDocNo || null,
         po_number: r.poNumber || null,
         invoice_no: r.invoiceNo || null,
+        item_no: r.itemNo || null,
         idempotency_key: r.idempotencyKey,
         movement_id: existing?.id || null,
         status: 'duplicate',
@@ -833,7 +909,7 @@ function executeMockPurchaseImport(
       to_location: 'warehouse',
       reference_number: r.grDocNo || r.invoiceNo || batchRef,
       idempotency_key: r.idempotencyKey,
-      notes: `Weekly SAP Purchase/GR Inbound: ${r.grDocNo || batchRef} - ${r.canonicalName || r.productName}`,
+      notes: `Weekly SAP Purchase/GR Inbound: ${r.grDocNo || batchRef} Item ${r.itemNo || 'N/A'} - ${r.canonicalName || r.productName}`,
       source_location: 'supplier',
       destination_location: 'warehouse',
     });
@@ -851,6 +927,7 @@ function executeMockPurchaseImport(
       gr_doc_no: r.grDocNo || null,
       po_number: r.poNumber || null,
       invoice_no: r.invoiceNo || null,
+      item_no: r.itemNo || null,
       idempotency_key: r.idempotencyKey,
       movement_id: movement.id,
       status: 'created',
@@ -903,4 +980,140 @@ export async function getRecentPurchaseImports(): Promise<SapPurchaseImport[]> {
   }
 
   return mockStore.getSapPurchaseImports();
+}
+
+export interface CanonicalRecoveryItem {
+  sku: string;
+  productName: string;
+  uom: string;
+  quantity: number;
+  grDocNo: string;
+  invoiceNo: string;
+  itemNo: string;
+  batch: string;
+  grDate: string;
+  grStatus: string;
+  idempotencyKey: string;
+}
+
+export const CANONICAL_RECOVERY_ITEMS: CanonicalRecoveryItem[] = [
+  {
+    sku: '1601319',
+    productName: 'Col TPdr. 200 gms',
+    uom: 'DOZ',
+    quantity: 4,
+    grDocNo: '3025221175',
+    invoiceNo: '81D0001878',
+    itemNo: '72',
+    batch: '',
+    grDate: '2026-09-10',
+    grStatus: 'Completed',
+    idempotencyKey: 'purchase_inward:3025221175:72:1601319',
+  },
+  {
+    sku: '61050884',
+    productName: 'CDC 100 NF',
+    uom: 'DOZ',
+    quantity: 144,
+    grDocNo: '3025221175',
+    invoiceNo: '81D0001878',
+    itemNo: '10',
+    batch: '',
+    grDate: '2026-09-10',
+    grStatus: 'Completed',
+    idempotencyKey: 'purchase_inward:3025221175:10:61050884',
+  },
+  {
+    sku: '61059906',
+    productName: 'CMF B 42g 6Dz Premia',
+    uom: 'DOZ',
+    quantity: 78,
+    grDocNo: '3025221175',
+    invoiceNo: '81D0001878',
+    itemNo: '4',
+    batch: '',
+    grDate: '2026-09-10',
+    grStatus: 'Completed',
+    idempotencyKey: 'purchase_inward:3025221175:4:61059906',
+  },
+  {
+    sku: 'IN00991A',
+    productName: 'CMF Red 150g - 8 doz case',
+    uom: 'DOZ',
+    quantity: 24,
+    grDocNo: '3025221175',
+    invoiceNo: '81D0001878',
+    itemNo: '50',
+    batch: '',
+    grDate: '2026-09-10',
+    grStatus: 'Completed',
+    idempotencyKey: 'purchase_inward:3025221175:50:IN00991A',
+  },
+  {
+    sku: '61059906',
+    productName: 'CMF B 42g 6Dz Premia',
+    uom: 'DOZ',
+    quantity: 180,
+    grDocNo: '3025221175',
+    invoiceNo: '81D0001878',
+    itemNo: '48',
+    batch: '',
+    grDate: '2026-09-10',
+    grStatus: 'Completed',
+    idempotencyKey: 'purchase_inward:3025221175:48:61059906',
+  },
+  {
+    sku: '61058281',
+    productName: 'CMF 42g 6+1 Bundle',
+    uom: 'DOZ',
+    quantity: 1080,
+    grDocNo: '3025221175',
+    invoiceNo: '81D0001878',
+    itemNo: '46',
+    batch: '',
+    grDate: '2026-09-10',
+    grStatus: 'Completed',
+    idempotencyKey: 'purchase_inward:3025221175:46:61058281',
+  },
+];
+
+export async function recoverMissingPurchaseTransactions(
+  items: CanonicalRecoveryItem[] = CANONICAL_RECOVERY_ITEMS
+): Promise<{ success: boolean; recoveredCount: number; totalRecoveredQty: number; message: string }> {
+  try {
+    const rpcPayload = items.map((it) => ({
+      sku: it.sku,
+      product_name: it.productName,
+      quantity: it.quantity,
+      uom: it.uom,
+      gr_status: it.grStatus,
+      gr_date: it.grDate,
+      gr_doc_no: it.grDocNo,
+      invoice_no: it.invoiceNo,
+      item_no: it.itemNo,
+      batch: it.batch || null,
+      idempotency_key: it.idempotencyKey,
+    }));
+    const { data, error } = await supabase.rpc('recover_missing_sap_purchase_items', {
+      p_items: rpcPayload as any,
+    });
+    if (!error && data && data.success) {
+      return {
+        success: true,
+        recoveredCount: Number(data.recovered_count || 0),
+        totalRecoveredQty: Number(data.total_recovered_qty || 0),
+        message: data.message || `Successfully recovered ${data.recovered_count} items (+${data.total_recovered_qty} DOZ)`,
+      };
+    }
+  } catch (err) {
+    console.warn('[RECOVERY] Supabase RPC failed or offline:', err);
+  }
+
+  const res = mockStore.recoverMissingPurchaseMovements(items);
+  return {
+    success: true,
+    recoveredCount: res.recoveredCount,
+    totalRecoveredQty: res.totalRecoveredQty,
+    message: `Recovered ${res.recoveredCount} missing purchase line items (+${res.totalRecoveredQty} DOZ) non-destructively.`,
+  };
 }

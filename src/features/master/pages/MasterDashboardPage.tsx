@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import {
   TrendingUp, Package, Truck, CreditCard, Users,
-  AlertCircle, CheckCircle2, Clock, ArrowUp, ArrowDown,
+  CheckCircle2, Clock, ArrowUp, ArrowDown,
   RefreshCw, CalendarDays, Building2, ClipboardList,
   AlertTriangle, ShieldAlert, XCircle, Activity,
   Scale, FileSpreadsheet, ExternalLink, ChevronRight,
@@ -11,11 +12,13 @@ import {
   getMasterKPIs, getMasterExceptions, getMasterAuditLog,
   getMasterInventoryHealth, getMasterInventoryExceptions,
   todayRange, monthRange,
-  type DateRange, type MasterKPIs, type MasterExceptions,
+  type DateRange, type MasterExceptions,
   type MasterInventoryHealth, type MasterInventoryExceptionItem,
 } from '@/features/master/services/masterService';
 import type { MasterAuditLog } from '@/lib/database.types';
 import { useAuth } from '@/app/AuthProvider';
+import { QK } from '@/lib/queryKeys';
+import { PendingCollectionsPanel } from '@/features/dashboard/components/PendingCollectionsPanel';
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -655,35 +658,53 @@ export function MasterDashboardPage() {
   const [preset, setPreset] = useState<Preset>('this_month');
   const [customYear, setCustomYear] = useState(now.getFullYear());
   const [customMonth, setCustomMonth] = useState(now.getMonth() + 1);
-  const [kpis, setKpis] = useState<MasterKPIs | null>(null);
-  const [exceptions, setExceptions] = useState<MasterExceptions | null>(null);
-  const [invHealth, setInvHealth] = useState<MasterInventoryHealth | null>(null);
-  const [invExceptions, setInvExceptions] = useState<MasterInventoryExceptionItem[]>([]);
-  const [recentLogs, setRecentLogs] = useState<MasterAuditLog[]>([]);
-  const [loading, setLoading] = useState(true);
   const [lastRefreshed, setLastRefreshed] = useState<Date>(now);
 
   const range = getPresetRange(preset, { year: customYear, month: customMonth });
 
-  const load = async () => {
-    setLoading(true);
-    const [kpiData, excData, logData, healthData, invExcData] = await Promise.all([
-      getMasterKPIs(range),
-      getMasterExceptions(range),
-      getMasterAuditLog({ range, limit: 10 }),
-      getMasterInventoryHealth(),
-      getMasterInventoryExceptions(),
-    ]);
-    setKpis(kpiData);
-    setExceptions(excData);
-    setRecentLogs(logData);
-    setInvHealth(healthData);
-    setInvExceptions(invExcData);
-    setLastRefreshed(new Date());
-    setLoading(false);
-  };
+  const { data: kpis, isLoading: kpisLoading, refetch: refetchKpis, isFetching: kpisFetching } = useQuery({
+    queryKey: QK.masterKpis(range.from, range.to),
+    queryFn: () => getMasterKPIs(range),
+    refetchInterval: 15_000,
+  });
 
-  useEffect(() => { load(); }, [preset, customYear, customMonth]); // eslint-disable-line react-hooks/exhaustive-deps
+  const { data: exceptions, isLoading: excLoading, refetch: refetchExc } = useQuery({
+    queryKey: QK.masterExceptions(range.from, range.to),
+    queryFn: () => getMasterExceptions(range),
+    refetchInterval: 30_000,
+  });
+
+  const { data: recentLogs = [], refetch: refetchLogs } = useQuery({
+    queryKey: QK.masterAuditLog(range.from, range.to),
+    queryFn: () => getMasterAuditLog({ range, limit: 10 }),
+    refetchInterval: 30_000,
+  });
+
+  const { data: invHealth, isLoading: healthLoading, refetch: refetchHealth } = useQuery({
+    queryKey: QK.masterInventory,
+    queryFn: getMasterInventoryHealth,
+    refetchInterval: 30_000,
+  });
+
+  const { data: invExceptions = [], refetch: refetchInvExc } = useQuery({
+    queryKey: ['master-inventory-exceptions'],
+    queryFn: getMasterInventoryExceptions,
+    refetchInterval: 30_000,
+  });
+
+  const loading = kpisLoading || excLoading || healthLoading;
+  const isFetching = kpisFetching || loading;
+
+  const handleRefresh = async () => {
+    setLastRefreshed(new Date());
+    await Promise.all([
+      refetchKpis(),
+      refetchExc(),
+      refetchLogs(),
+      refetchHealth(),
+      refetchInvExc(),
+    ]);
+  };
 
   const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const years = Array.from({ length: 5 }, (_, i) => now.getFullYear() - i);
@@ -740,12 +761,12 @@ export function MasterDashboardPage() {
           )}
 
           <button
-            onClick={load}
-            disabled={loading}
+            onClick={handleRefresh}
+            disabled={isFetching}
             className="p-2 rounded-lg bg-white border border-slate-200 text-slate-500 hover:text-indigo-600 hover:border-indigo-300 transition-colors disabled:opacity-40 cursor-pointer"
             title="Refresh"
           >
-            <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
           </button>
         </div>
       </div>
@@ -807,12 +828,12 @@ export function MasterDashboardPage() {
           {/* ── Secondary Oversight KPIs ───────────────────────── */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
             <KpiCard
-              label="Outstanding Debt"
-              value={fmt(kpis.outstandingAmount)}
-              sub="Party balances"
-              icon={AlertCircle}
+              label="Pending Credit (Udhari)"
+              value={fmt(kpis.totalCredit)}
+              sub="Sales not yet collected"
+              icon={Clock}
               color="amber"
-              trend={kpis.outstandingAmount > 0 ? 'down' : 'up'}
+              trend={kpis.totalCredit > 0 ? 'down' : 'up'}
             />
             <KpiCard
               label="Approved Expenses"
@@ -855,6 +876,11 @@ export function MasterDashboardPage() {
             />
           </div>
 
+          {/* ── Pending Collections Queue (Credit Receivables) ── */}
+          <div className="mb-6">
+            <PendingCollectionsPanel maxRows={20} />
+          </div>
+
           {/* ── Recent Activity / Audit Feed ───────────────────── */}
           <RecentActivitySummary logs={recentLogs} />
 
@@ -880,9 +906,11 @@ export function MasterDashboardPage() {
                     { label: 'Cheques Cleared', value: fmtFull(kpis.chequeCleared) },
                     { label: 'Cheques Pending Clearance', value: fmtFull(kpis.chequePending) },
                     { label: 'Total Cheque Collections (Cleared + Pending)', value: fmtFull(kpis.totalCheque) },
-                    { label: 'Credit Extended (Udhari)', value: fmtFull(kpis.totalCredit) },
                     { label: 'Total Realized Collections (Cash + UPI + Cheque)', value: fmtFull(kpis.totalCollections) },
-                    { label: 'Total Outstanding Debt (Parties)', value: fmtFull(kpis.outstandingAmount) },
+                    { label: 'Collections from Current-Period Sales', value: fmtFull(kpis.currentPeriodCollected) },
+                    { label: 'Prior-Period Udhari / Advance Collected', value: fmtFull(kpis.priorPeriodCollected) },
+                    { label: 'Total Outstanding Udhari (Authoritative Open Receivables)', value: fmtFull(kpis.outstandingAmount) },
+                    { label: 'Customer Advances / Overpayments Held', value: fmtFull(kpis.customerAdvance) },
                     { label: 'Approved Route Operating Expenses', value: fmtFull(kpis.totalExpenses) },
                     { label: 'Approved Cash Route Expenses', value: fmtFull(kpis.totalCashExpenses) },
                     { label: 'Contribution Before COGS (Commercial Sales − Approved Expenses)', value: fmtFull(kpis.contributionBeforeCogs) },

@@ -13,6 +13,7 @@ import {
 import { getWorkers } from '@/features/workers/services/workerService';
 import { getRoutes } from '@/features/routes/services/routeService';
 import { formatCurrency, formatDate, getLocalDateString } from '@/shared/utils/format';
+import { QK } from '@/lib/queryKeys';
 import type { Expense, ExpenseStatus, ExpensePaymentMethod } from '@/lib/database.types';
 
 export const EXPENSE_CATEGORIES = [
@@ -61,9 +62,12 @@ export function ExpensesPage() {
   const createMut = useMutation({
     mutationFn: createExpense,
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['expenses'] });
-      qc.invalidateQueries({ queryKey: ['dashboard-stats'] });
+      qc.invalidateQueries({ queryKey: QK.expenses });
+      qc.invalidateQueries({ queryKey: QK.dashboardStats });
       qc.invalidateQueries({ queryKey: ['route-profitability'] });
+      qc.invalidateQueries({ queryKey: QK.masterOperations });
+      qc.invalidateQueries({ queryKey: QK.masterKpisAny });
+      qc.invalidateQueries({ queryKey: QK.masterExceptionsAny });
       toast.success('Expense recorded successfully');
       closeModal();
     },
@@ -73,9 +77,12 @@ export function ExpensesPage() {
   const approveMut = useMutation({
     mutationFn: (id: string) => approveExpense(id),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['expenses'] });
-      qc.invalidateQueries({ queryKey: ['dashboard-stats'] });
+      qc.invalidateQueries({ queryKey: QK.expenses });
+      qc.invalidateQueries({ queryKey: QK.dashboardStats });
       qc.invalidateQueries({ queryKey: ['route-profitability'] });
+      qc.invalidateQueries({ queryKey: QK.masterOperations });
+      qc.invalidateQueries({ queryKey: QK.masterKpisAny });
+      qc.invalidateQueries({ queryKey: QK.masterExceptionsAny });
       toast.success('Expense approved and incorporated into route totals');
     },
     onError: (e: Error) => toast.error(e.message),
@@ -84,9 +91,11 @@ export function ExpensesPage() {
   const rejectMut = useMutation({
     mutationFn: ({ id, reason }: { id: string; reason: string }) => rejectExpense(id, reason),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['expenses'] });
-      qc.invalidateQueries({ queryKey: ['dashboard-stats'] });
+      qc.invalidateQueries({ queryKey: QK.expenses });
+      qc.invalidateQueries({ queryKey: QK.dashboardStats });
       qc.invalidateQueries({ queryKey: ['route-profitability'] });
+      qc.invalidateQueries({ queryKey: QK.masterOperations });
+      qc.invalidateQueries({ queryKey: QK.masterExceptionsAny });
       toast.success('Expense rejected');
       closeRejectModal();
     },
@@ -96,9 +105,12 @@ export function ExpensesPage() {
   const reverseMut = useMutation({
     mutationFn: ({ id, reason }: { id: string; reason: string }) => reverseExpense(id, reason),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['expenses'] });
-      qc.invalidateQueries({ queryKey: ['dashboard-stats'] });
+      qc.invalidateQueries({ queryKey: QK.expenses });
+      qc.invalidateQueries({ queryKey: QK.dashboardStats });
       qc.invalidateQueries({ queryKey: ['route-profitability'] });
+      qc.invalidateQueries({ queryKey: QK.masterOperations });
+      qc.invalidateQueries({ queryKey: QK.masterKpisAny });
+      qc.invalidateQueries({ queryKey: QK.masterExceptionsAny });
       toast.success('Approved expense reversed successfully');
       closeReverseModal();
     },
