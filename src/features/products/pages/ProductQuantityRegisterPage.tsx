@@ -65,6 +65,8 @@ export function ProductQuantityRegisterPage() {
     totalReturnedQty: 0,
     totalNetSoldQty: 0,
     totalSalesAmount: 0,
+    totalCogs: 0,
+    totalGrossProfit: 0,
     rowCount: 0,
   };
 
@@ -342,6 +344,9 @@ export function ProductQuantityRegisterPage() {
                   <th className="text-right">Net Sold Qty</th>
                   <th className="text-right">Rate</th>
                   <th className="text-right">Sales Amount</th>
+                  <th className="text-right text-amber-600 dark:text-amber-400">Unit Cost (WAC)</th>
+                  <th className="text-right text-amber-600 dark:text-amber-400">COGS</th>
+                  <th className="text-right text-emerald-600 dark:text-emerald-400">Gross Profit</th>
                 </tr>
               </thead>
               <tbody>
@@ -373,6 +378,15 @@ export function ProductQuantityRegisterPage() {
                     <td className="text-xs text-right font-bold tabular-nums text-surface-900 dark:text-surface-100">
                       {formatCurrency(r.salesAmount)}
                     </td>
+                    <td className="text-xs text-right tabular-nums text-surface-600 dark:text-surface-400">
+                      {r.unitPurchaseCost !== null && r.unitPurchaseCost !== undefined ? `₹${r.unitPurchaseCost.toFixed(2)}` : '—'}
+                    </td>
+                    <td className="text-xs text-right font-semibold text-amber-700 dark:text-amber-400 tabular-nums">
+                      {r.cogs !== null && r.cogs !== undefined ? formatCurrency(r.cogs) : '—'}
+                    </td>
+                    <td className="text-xs text-right font-bold text-emerald-700 dark:text-emerald-400 tabular-nums">
+                      {r.grossProfit !== null && r.grossProfit !== undefined ? formatCurrency(r.grossProfit) : '—'}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -385,6 +399,9 @@ export function ProductQuantityRegisterPage() {
                   <td className="text-right text-xs font-bold text-indigo-600">{summary.totalNetSoldQty.toLocaleString()}</td>
                   <td></td>
                   <td className="text-right text-xs font-bold">{formatCurrency(summary.totalSalesAmount)}</td>
+                  <td></td>
+                  <td className="text-right text-xs font-bold text-amber-700 dark:text-amber-400">{formatCurrency(summary.totalCogs || 0)}</td>
+                  <td className="text-right text-xs font-bold text-emerald-700 dark:text-emerald-400">{formatCurrency(summary.totalGrossProfit || 0)}</td>
                 </tr>
               </tfoot>
             </table>

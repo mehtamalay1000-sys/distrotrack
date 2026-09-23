@@ -50,6 +50,16 @@ export interface MasterKPIs {
   totalCashExpenses: number;
   expectedPhysicalCash: number;
   contributionBeforeCogs: number;
+  // Authoritative COGS and Profitability
+  cogs: number;
+  grossProfit: number;
+  netProfit: number;
+  grossMarginPct: number;
+  netMarginPct: number;
+  cogsCoveragePct: number;
+  cogsStatus: 'complete' | 'incomplete';
+  missingCostSkusCount: number;
+  missingCostSalesValue: number;
   totalDeliveries: number;
   completedDeliveries: number;
   pendingDeliveries: number;
@@ -133,6 +143,15 @@ export async function getMasterKPIs(range: DateRange): Promise<MasterKPIs> {
     const totalCashExpenses = Number(finSummaryRes?.cash_expenses ?? 0);
     const expectedPhysicalCash = Number(finSummaryRes?.net_cash ?? (totalCash - totalCashExpenses));
     const contributionBeforeCogs = Number(finSummaryRes?.contribution_before_cogs ?? (totalSales - totalExpenses));
+    const cogs = Number(finSummaryRes?.cogs ?? 0);
+    const grossProfit = Number(finSummaryRes?.gross_profit ?? (totalSales - cogs));
+    const netProfit = Number(finSummaryRes?.net_profit ?? (grossProfit - totalExpenses));
+    const grossMarginPct = Number(finSummaryRes?.gross_margin_pct ?? (totalSales > 0 ? (grossProfit / totalSales * 100) : 0));
+    const netMarginPct = Number(finSummaryRes?.net_margin_pct ?? (totalSales > 0 ? (netProfit / totalSales * 100) : 0));
+    const cogsCoveragePct = Number(finSummaryRes?.cogs_coverage_pct ?? 0);
+    const cogsStatus = (finSummaryRes?.cogs_status ?? (finSummaryRes?.missing_cost_skus_count ? 'incomplete' : 'complete')) as 'complete' | 'incomplete';
+    const missingCostSkusCount = Number(finSummaryRes?.missing_cost_skus_count ?? 0);
+    const missingCostSalesValue = Number(finSummaryRes?.missing_cost_sales_value ?? 0);
     const currentPeriodCollected = Number(finSummaryRes?.current_period_collected ?? 0);
     const priorPeriodCollected = Number(finSummaryRes?.prior_period_collected ?? 0);
     const customerAdvance = Number(finSummaryRes?.customer_advance ?? 0);
@@ -177,6 +196,15 @@ export async function getMasterKPIs(range: DateRange): Promise<MasterKPIs> {
         totalCashExpenses: mTotalCashExpenses,
         expectedPhysicalCash: mCash - mTotalCashExpenses,
         contributionBeforeCogs: mTotalSales - mTotalExpenses,
+        cogs: 0,
+        grossProfit: mTotalSales,
+        netProfit: mTotalSales - mTotalExpenses,
+        grossMarginPct: mTotalSales > 0 ? 100 : 0,
+        netMarginPct: mTotalSales > 0 ? ((mTotalSales - mTotalExpenses) / mTotalSales * 100) : 0,
+        cogsCoveragePct: 0,
+        cogsStatus: 'incomplete',
+        missingCostSkusCount: 0,
+        missingCostSalesValue: 0,
         totalDeliveries: mockDeliveries.length,
         completedDeliveries: mCompleted,
         pendingDeliveries: mPending,
@@ -205,6 +233,15 @@ export async function getMasterKPIs(range: DateRange): Promise<MasterKPIs> {
       totalCashExpenses,
       expectedPhysicalCash,
       contributionBeforeCogs,
+      cogs,
+      grossProfit,
+      netProfit,
+      grossMarginPct,
+      netMarginPct,
+      cogsCoveragePct,
+      cogsStatus,
+      missingCostSkusCount,
+      missingCostSalesValue,
       totalDeliveries: deliveries.length,
       completedDeliveries,
       pendingDeliveries,
@@ -250,6 +287,15 @@ export async function getMasterKPIs(range: DateRange): Promise<MasterKPIs> {
       totalCashExpenses: mTotalCashExpenses,
       expectedPhysicalCash: mCash - mTotalCashExpenses,
       contributionBeforeCogs: mTotalSales - mTotalExpenses,
+      cogs: 0,
+      grossProfit: mTotalSales,
+      netProfit: mTotalSales - mTotalExpenses,
+      grossMarginPct: mTotalSales > 0 ? 100 : 0,
+      netMarginPct: mTotalSales > 0 ? ((mTotalSales - mTotalExpenses) / mTotalSales * 100) : 0,
+      cogsCoveragePct: 0,
+      cogsStatus: 'incomplete',
+      missingCostSkusCount: 0,
+      missingCostSalesValue: 0,
       totalDeliveries: mockDeliveries.length,
       completedDeliveries: mCompleted,
       pendingDeliveries: mPending,

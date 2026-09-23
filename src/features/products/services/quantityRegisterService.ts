@@ -21,6 +21,8 @@ export interface QuantityRegisterSummary {
   totalReturnedQty: number;
   totalNetSoldQty: number;
   totalSalesAmount: number;
+  totalCogs: number;
+  totalGrossProfit: number;
   rowCount: number;
 }
 
@@ -53,17 +55,19 @@ export async function getProductQuantityRegister(filter?: QuantityRegisterFilter
   let routes: any[] = [];
   let products: Product[] = [];
   let sapSalesItems: any[] = [];
+  let sapPurchaseItems: any[] = [];
 
   let isSupabaseSuccess = false;
 
   try {
-    const [plRes, delRes, itemsRes, rRes, prodRes, sapRes] = await Promise.all([
+    const [plRes, delRes, itemsRes, rRes, prodRes, sapRes, purchRes] = await Promise.all([
       supabase.from('picklists').select('*'),
       supabase.from('deliveries').select('*'),
       supabase.from('delivery_items').select('*'),
       supabase.from('routes').select('*'),
       supabase.from('products').select('*'),
       supabase.from('sap_sales_import_items').select('*'),
+      supabase.from('sap_purchase_import_items').select('*'),
     ]);
 
     if (!plRes.error && !delRes.error && !sapRes.error) {
@@ -74,6 +78,7 @@ export async function getProductQuantityRegister(filter?: QuantityRegisterFilter
       routes = rRes.data || [];
       products = (prodRes.data as Product[]) || [];
       sapSalesItems = sapRes.data || [];
+      sapPurchaseItems = purchRes.data || [];
     }
   } catch (err) {
     console.warn('[QUANTITY REGISTER] Supabase query error, using mockStore:', err);
@@ -87,6 +92,7 @@ export async function getProductQuantityRegister(filter?: QuantityRegisterFilter
     routes = mockStore.getRoutes();
     products = mockStore.getProducts();
     sapSalesItems = mockStore.getSapSalesImportItems();
+    sapPurchaseItems = mockStore.getSapPurchaseImportItems();
   } else if (picklists.length === 0 && deliveryItems.length === 0) {
     // If Supabase has no operational picklists/deliveries yet, fallback operational records for demo,
     // but DO NOT resurrect deleted SAP sales items when Supabase returned 0 items.
@@ -96,6 +102,42 @@ export async function getProductQuantityRegister(filter?: QuantityRegisterFilter
       deliveries = mockStore.getDeliveries();
       deliveryItems = mockStore.getDeliveryItems();
       routes = mockStore.getRoutes();
+    }
+    if (sapPurchaseItems.length === 0) {
+      sapPurchaseItems = mockStore.getSapPurchaseImportItems();
+    }
+  }
+
+  // Compute authoritative WAC by canonical SKU (taking into account DOZ -> EA conversion)
+  const wacBySku = new Map<string, number>();
+  const costAcc = new Map<string, { totalCost: number; totalEaQty: number }>();
+  for (const p of sapPurchaseItems as any[]) {
+    const isConfirmed =
+      p.status === 'valid' ||
+      p.gr_status === 'GR Completed' ||
+      p.gr_status === 'Received' ||
+      !p.gr_status;
+    if (!isConfirmed) continue;
+    const cleanSku = String(p.sku || '').trim().toUpperCase();
+    if (!cleanSku) continue;
+    const recQty = Number(p.received_qty || 0);
+    if (recQty <= 0) continue;
+    const uom = (p.uom || 'DOZ').toUpperCase().trim();
+    const eaQty = uom === 'DOZ' ? recQty * 12 : recQty;
+    const rowTotal =
+      p.total_purchase_cost !== undefined && p.total_purchase_cost !== null
+        ? Number(p.total_purchase_cost)
+        : recQty * Number(p.unit_purchase_cost || 0);
+    if (rowTotal > 0 && eaQty > 0) {
+      const cur = costAcc.get(cleanSku) || { totalCost: 0, totalEaQty: 0 };
+      cur.totalCost += rowTotal;
+      cur.totalEaQty += eaQty;
+      costAcc.set(cleanSku, cur);
+    }
+  }
+  for (const [s, data] of costAcc.entries()) {
+    if (data.totalEaQty > 0) {
+      wacBySku.set(s, Number((data.totalCost / data.totalEaQty).toFixed(4)));
     }
   }
 
@@ -149,6 +191,12 @@ export async function getProductQuantityRegister(filter?: QuantityRegisterFilter
     const mrp = Number(di.mrp_at_sale ?? di.mrp ?? master?.mrp ?? rate);
     const salesAmount = netSold * rate;
 
+    // Costing via authoritative WAC
+    const wac = wacBySku.get(sku.toUpperCase()) ?? (di.unit_cost ? Number(di.unit_cost) : null);
+    const unitPurchaseCost = wac !== undefined && wac !== null ? Number(wac.toFixed(2)) : null;
+    const cogs = unitPurchaseCost !== null ? Number((netSold * unitPurchaseCost).toFixed(2)) : null;
+    const grossProfit = cogs !== null ? Number((salesAmount - cogs).toFixed(2)) : null;
+
     rawRows.push({
       date,
       picklistNumber,
@@ -167,6 +215,9 @@ export async function getProductQuantityRegister(filter?: QuantityRegisterFilter
       rate,
       mrp,
       salesAmount,
+      unitPurchaseCost,
+      cogs,
+      grossProfit,
       source: 'DistroTrack',
       transactionType: 'DistroTrack Delivery',
       invoiceNumber: del?.invoice_id || undefined,
@@ -192,6 +243,11 @@ export async function getProductQuantityRegister(filter?: QuantityRegisterFilter
     const salesAmount = Number(sItem.net_val !== null && sItem.net_val !== undefined ? sItem.net_val : netSold * rate);
     const mrp = Number(master?.mrp || rate);
 
+    const wac = wacBySku.get(sku.toUpperCase());
+    const unitPurchaseCost = wac !== undefined && wac !== null ? Number(wac.toFixed(2)) : null;
+    const cogs = unitPurchaseCost !== null ? Number((netSold * unitPurchaseCost).toFixed(2)) : null;
+    const grossProfit = cogs !== null ? Number((salesAmount - cogs).toFixed(2)) : null;
+
     rawRows.push({
       date: sItem.invoice_date || (sItem.created_at ? sItem.created_at.split('T')[0] : new Date().toISOString().split('T')[0]),
       picklistNumber: sItem.invoice_no,
@@ -210,6 +266,9 @@ export async function getProductQuantityRegister(filter?: QuantityRegisterFilter
       rate,
       mrp,
       salesAmount,
+      unitPurchaseCost,
+      cogs,
+      grossProfit,
       source: 'SAP',
       transactionType: isCancel ? 'SAP Sales Cancellation' : 'SAP Baseline Sale',
       invoiceNumber: sItem.invoice_no,
@@ -239,6 +298,13 @@ export async function getProductQuantityRegister(filter?: QuantityRegisterFilter
       // Historical transaction pricing integrity: Prioritize transaction snapshot (mrp_at_sale / mrp) over dynamic Product Master
       const mrp = Number(pi.mrp_at_sale ?? pi.mrp ?? master?.mrp ?? rate);
 
+      const wac = wacBySku.get(sku.toUpperCase());
+      const unitPurchaseCost = wac !== undefined && wac !== null ? Number(wac.toFixed(2)) : null;
+      const soldQty = pl?.status === 'completed' ? qty : 0;
+      const soldAmt = pl?.status === 'completed' ? amount : 0;
+      const cogs = unitPurchaseCost !== null ? Number((soldQty * unitPurchaseCost).toFixed(2)) : null;
+      const grossProfit = cogs !== null ? Number((soldAmt - cogs).toFixed(2)) : null;
+
       rawRows.push({
         date: pl?.date || new Date().toISOString().split('T')[0],
         picklistNumber: pl?.picklist_number || 'PL-SAMPLE',
@@ -251,12 +317,15 @@ export async function getProductQuantityRegister(filter?: QuantityRegisterFilter
         category,
         uom,
         picklistQty: qty,
-        deliveredQty: pl?.status === 'completed' ? qty : 0,
+        deliveredQty: soldQty,
         returnedQty: 0,
-        netSoldQty: pl?.status === 'completed' ? qty : 0,
+        netSoldQty: soldQty,
         rate,
         mrp,
-        salesAmount: pl?.status === 'completed' ? amount : 0,
+        salesAmount: soldAmt,
+        unitPurchaseCost,
+        cogs,
+        grossProfit,
       });
     }
   }
@@ -300,6 +369,8 @@ export async function getProductQuantityRegister(filter?: QuantityRegisterFilter
   let totalReturnedQty = 0;
   let totalNetSoldQty = 0;
   let totalSalesAmount = 0;
+  let totalCogs = 0;
+  let totalGrossProfit = 0;
 
   for (const r of filtered) {
     totalPicklistQty += r.picklistQty;
@@ -307,6 +378,8 @@ export async function getProductQuantityRegister(filter?: QuantityRegisterFilter
     totalReturnedQty += r.returnedQty;
     totalNetSoldQty += r.netSoldQty;
     totalSalesAmount += r.salesAmount;
+    if (r.cogs !== null && r.cogs !== undefined) totalCogs += r.cogs;
+    if (r.grossProfit !== null && r.grossProfit !== undefined) totalGrossProfit += r.grossProfit;
   }
 
   const summary: QuantityRegisterSummary = {
@@ -315,6 +388,8 @@ export async function getProductQuantityRegister(filter?: QuantityRegisterFilter
     totalReturnedQty,
     totalNetSoldQty,
     totalSalesAmount,
+    totalCogs: Number(totalCogs.toFixed(2)),
+    totalGrossProfit: Number(totalGrossProfit.toFixed(2)),
     rowCount: filtered.length,
   };
 
@@ -412,7 +487,7 @@ export function exportQuantityRegisterToCSV(rows: ProductQuantityRegisterRow[], 
     'Date', 'Source', 'Transaction Type', 'Invoice / Picklist', 'Customer Code', 'Customer Name',
     'Route Code', 'Route Name', 'SKU', 'Product Name',
     'Brand', 'Category', 'UOM', 'Ordered / Invoiced Qty', 'Delivered Qty', 'Returned Qty',
-    'Net Sold Qty', 'Rate (INR)', 'MRP (INR)', 'Sales Amount (INR)'
+    'Net Sold Qty', 'Rate (INR)', 'MRP (INR)', 'Sales Amount (INR)', 'Unit Purchase Cost (INR)', 'COGS (INR)', 'Gross Profit (INR)'
   ];
 
   const escapeCSV = (val: any) => {
@@ -446,6 +521,9 @@ export function exportQuantityRegisterToCSV(rows: ProductQuantityRegisterRow[], 
       r.rate.toFixed(2),
       r.mrp.toFixed(2),
       r.salesAmount.toFixed(2),
+      r.unitPurchaseCost !== null && r.unitPurchaseCost !== undefined ? r.unitPurchaseCost.toFixed(2) : 'Missing Cost',
+      r.cogs !== null && r.cogs !== undefined ? r.cogs.toFixed(2) : 'Incomplete',
+      r.grossProfit !== null && r.grossProfit !== undefined ? r.grossProfit.toFixed(2) : 'Incomplete',
     ].join(',')),
   ];
 
@@ -489,6 +567,9 @@ export function exportQuantityRegisterToXLSX(rows: ProductQuantityRegisterRow[],
     'Rate (INR)': r.rate,
     'MRP (INR)': r.mrp,
     'Sales Amount (INR)': r.salesAmount,
+    'Unit Purchase Cost (INR)': r.unitPurchaseCost !== null && r.unitPurchaseCost !== undefined ? r.unitPurchaseCost : 'Missing Cost',
+    'COGS (INR)': r.cogs !== null && r.cogs !== undefined ? r.cogs : 'Incomplete',
+    'Gross Profit (INR)': r.grossProfit !== null && r.grossProfit !== undefined ? r.grossProfit : 'Incomplete',
   }));
 
   const worksheet = XLSX.utils.json_to_sheet(data);

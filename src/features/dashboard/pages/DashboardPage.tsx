@@ -2,7 +2,8 @@ import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
   TrendingUp, DollarSign, Truck, CheckCircle2, Receipt,
-  FileUp, ArrowRight, ClipboardList, CalendarDays, Banknote, Clock, IndianRupee
+  FileUp, ArrowRight, ClipboardList, CalendarDays, Banknote, Clock, IndianRupee,
+  PieChart, AlertTriangle
 } from 'lucide-react';
 import { PageHeader, StatCard, Button, Card, StatusBadge, LoadingState } from '@/shared/ui';
 import { QK } from '@/lib/queryKeys';
@@ -212,6 +213,97 @@ export function DashboardPage() {
             </div>
             <div className="mt-1 text-[10px] text-amber-600/90 dark:text-amber-400 font-medium">
               Authoritative open receivables (≥ ₹0)
+            </div>
+          </div>
+        </div>
+
+        {/* ── Authoritative Monthly Profitability (Sales - COGS - Expenses = Net Profit) ── */}
+        <div className="mt-4 pt-4 border-t border-surface-200/80 dark:border-surface-700/80">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <PieChart className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+              <h3 className="text-xs font-bold text-surface-900 dark:text-surface-100 uppercase tracking-wider">
+                Monthly Profitability & COGS — {monthName}
+              </h3>
+            </div>
+            <div className="flex items-center gap-2">
+              {stats.cogsStatus === 'incomplete' ? (
+                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800">
+                  <AlertTriangle className="h-3 w-3" />
+                  COGS Incomplete ({stats.cogsCoveragePct}% coverage)
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+                  <CheckCircle2 className="h-3 w-3" />
+                  COGS Complete (100%)
+                </span>
+              )}
+            </div>
+          </div>
+
+          {stats.cogsStatus === 'incomplete' && (
+            <div className="mb-3 p-2.5 bg-amber-500/10 border border-amber-300 dark:border-amber-700/50 rounded-xl text-xs text-amber-800 dark:text-amber-300 flex items-center gap-2">
+              <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
+              <span>
+                <strong>Cost Coverage Notice:</strong> {stats.missingCostSkusCount > 0 ? `${stats.missingCostSkusCount} sold SKU(s)` : 'Some sold items'} currently lack authoritative SAP Purchase/GR inward cost records. Profitability strictly reflects available cost data and will not fabricate 100% margin.
+              </span>
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+            {/* 1. Sales Revenue */}
+            <div className="bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-xl p-3 shadow-xs">
+              <span className="text-[10px] font-bold text-surface-400 uppercase tracking-wider block">Sales Revenue</span>
+              <div className="text-lg font-black text-surface-900 dark:text-white mt-1">
+                {formatCurrency(stats.totalMonthlySales || stats.monthlySales)}
+              </div>
+              <span className="text-[10px] text-surface-400">Delivered commercial value</span>
+            </div>
+
+            {/* 2. COGS */}
+            <div className="bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-xl p-3 shadow-xs">
+              <span className="text-[10px] font-bold text-amber-600 dark:text-amber-400 uppercase tracking-wider block">Cost of Goods Sold (COGS)</span>
+              <div className="text-lg font-black text-amber-700 dark:text-amber-400 mt-1">
+                {formatCurrency(stats.monthlyCogs)}
+              </div>
+              <span className="text-[10px] text-amber-600/80">WAC based on SAP GR inwards</span>
+            </div>
+
+            {/* 3. Gross Profit */}
+            <div className="bg-gradient-to-br from-emerald-500/10 to-teal-500/10 border border-emerald-300 dark:border-emerald-800 rounded-xl p-3 shadow-xs">
+              <span className="text-[10px] font-bold text-emerald-700 dark:text-emerald-300 uppercase tracking-wider block">Gross Profit</span>
+              <div className="text-lg font-black text-emerald-700 dark:text-emerald-300 mt-1">
+                {formatCurrency(stats.monthlyGrossProfit)}
+              </div>
+              <span className="text-[10px] font-bold text-emerald-600">
+                Gross Margin: {stats.monthlyGrossMarginPct !== null ? `${stats.monthlyGrossMarginPct}%` : 'N/A'}
+              </span>
+            </div>
+
+            {/* 4. Operating Expenses */}
+            <div className="bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-xl p-3 shadow-xs">
+              <span className="text-[10px] font-bold text-rose-500 uppercase tracking-wider block">Operating Expenses</span>
+              <div className="text-lg font-black text-rose-600 dark:text-rose-400 mt-1">
+                {formatCurrency(stats.monthlyApprovedExpenses)}
+              </div>
+              <span className="text-[10px] text-rose-500/80">Approved business costs</span>
+            </div>
+
+            {/* 5. Net Profit */}
+            <div className={`border rounded-xl p-3 shadow-xs ${
+              stats.monthlyNetProfit >= 0
+                ? 'bg-gradient-to-br from-indigo-500/10 to-purple-500/10 border-indigo-300 dark:border-indigo-800 text-indigo-900 dark:text-indigo-200'
+                : 'bg-rose-500/10 border-rose-300 dark:border-rose-800 text-rose-900 dark:text-rose-200'
+            }`}>
+              <span className="text-[10px] font-bold uppercase tracking-wider block">Net Profit</span>
+              <div className={`text-lg font-black mt-1 ${
+                stats.monthlyNetProfit >= 0 ? 'text-indigo-700 dark:text-indigo-300' : 'text-rose-600 dark:text-rose-400'
+              }`}>
+                {formatCurrency(stats.monthlyNetProfit)}
+              </div>
+              <span className="text-[10px] font-bold">
+                Net Margin: {stats.monthlyNetMarginPct !== null ? `${stats.monthlyNetMarginPct}%` : 'N/A'}
+              </span>
             </div>
           </div>
         </div>

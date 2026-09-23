@@ -25,6 +25,19 @@ export interface DashboardStats {
   pendingCreditAmount: number;  // same as totalOutstanding (strictly >= 0)
   monthlyCash: number;
   monthlyCheque: number;
+  // Authoritative Profitability & COGS
+  todayCogs: number;
+  todayGrossProfit: number;
+  todayNetProfit: number;
+  monthlyCogs: number;
+  monthlyGrossProfit: number;
+  monthlyApprovedExpenses: number;
+  monthlyNetProfit: number;
+  monthlyGrossMarginPct: number | null;
+  monthlyNetMarginPct: number | null;
+  cogsCoveragePct: number;
+  cogsStatus: 'complete' | 'incomplete';
+  missingCostSkusCount: number;
   // Source-Aware Authoritative Monthly Sales Breakdown
   sapBaselineSales: number;
   distrotrackMonthlySales: number;
@@ -275,6 +288,25 @@ export async function getDashboardStats(): Promise<DashboardStats> {
       (monthSummaryRes?.pending_cheques ?? monthSummaryRes?.cheque_pending ?? 0)
     );
 
+    // ── Authoritative COGS and Profitability ────────────────────────
+    const todayCogs = Number(todaySummaryRes?.cogs ?? 0);
+    const todayGrossProfit = Number(todaySummaryRes?.gross_profit ?? (todaySales - todayCogs));
+    const todayNetProfit = Number(todaySummaryRes?.net_profit ?? (todayGrossProfit - totalExpensesToday));
+
+    const monthlyCogs = Number(monthSummaryRes?.cogs ?? 0);
+    const monthlyGrossProfit = Number(monthSummaryRes?.gross_profit ?? (monthlySales - monthlyCogs));
+    const monthlyApprovedExpenses = Number(monthSummaryRes?.expenses ?? monthSummaryRes?.total_expenses ?? 0);
+    const monthlyNetProfit = Number(monthSummaryRes?.net_profit ?? (monthlyGrossProfit - monthlyApprovedExpenses));
+    const monthlyGrossMarginPct = monthSummaryRes?.gross_margin_pct !== undefined && monthSummaryRes?.gross_margin_pct !== null
+      ? Number(monthSummaryRes.gross_margin_pct)
+      : (monthlySales > 0 ? Number(((monthlyGrossProfit / monthlySales) * 100).toFixed(2)) : null);
+    const monthlyNetMarginPct = monthSummaryRes?.net_margin_pct !== undefined && monthSummaryRes?.net_margin_pct !== null
+      ? Number(monthSummaryRes.net_margin_pct)
+      : (monthlySales > 0 ? Number(((monthlyNetProfit / monthlySales) * 100).toFixed(2)) : null);
+    const cogsCoveragePct = Number(monthSummaryRes?.cogs_coverage_pct ?? 100);
+    const cogsStatus = (monthSummaryRes?.cogs_status || (cogsCoveragePct >= 99.9 ? 'complete' : 'incomplete')) as 'complete' | 'incomplete';
+    const missingCostSkusCount = Number(monthSummaryRes?.missing_cost_skus_count ?? 0);
+
     return {
       todaySales,
       todayCollections,
@@ -295,6 +327,18 @@ export async function getDashboardStats(): Promise<DashboardStats> {
       pendingCreditAmount,
       monthlyCash,
       monthlyCheque,
+      todayCogs,
+      todayGrossProfit,
+      todayNetProfit,
+      monthlyCogs,
+      monthlyGrossProfit,
+      monthlyApprovedExpenses,
+      monthlyNetProfit,
+      monthlyGrossMarginPct,
+      monthlyNetMarginPct,
+      cogsCoveragePct,
+      cogsStatus,
+      missingCostSkusCount,
       sapBaselineSales,
       distrotrackMonthlySales,
       totalMonthlySales,
@@ -326,6 +370,18 @@ export async function getDashboardStats(): Promise<DashboardStats> {
       pendingCreditAmount: 0,
       monthlyCash: 0,
       monthlyCheque: 0,
+      todayCogs: 0,
+      todayGrossProfit: 0,
+      todayNetProfit: 0,
+      monthlyCogs: 0,
+      monthlyGrossProfit: 0,
+      monthlyApprovedExpenses: 0,
+      monthlyNetProfit: 0,
+      monthlyGrossMarginPct: null,
+      monthlyNetMarginPct: null,
+      cogsCoveragePct: 100,
+      cogsStatus: 'complete',
+      missingCostSkusCount: 0,
       sapBaselineSales: 0,
       distrotrackMonthlySales: 0,
       totalMonthlySales: 0,

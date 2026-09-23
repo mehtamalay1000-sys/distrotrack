@@ -1351,6 +1351,46 @@ class MockStore {
     return { importRecord, items: createdItems };
   }
 
+  getSkuWacCost(sku: string): number | null {
+    if (!sku) return null;
+    const cleanSku = sku.trim().toUpperCase();
+    let totalCost = 0;
+    let totalEaQty = 0;
+
+    for (const item of this.sapPurchaseImportItems) {
+      if ((item.sku || '').trim().toUpperCase() !== cleanSku) continue;
+      // Only confirmed/received purchase quantities contribute to available purchase-cost inventory
+      const isConfirmed =
+        item.status === 'valid' ||
+        item.status === 'created' ||
+        item.gr_status === 'GR Completed' ||
+        item.gr_status === 'Received' ||
+        !item.gr_status;
+      if (!isConfirmed) continue;
+
+      const receivedQty = Number(item.received_qty ?? item.quantity ?? 0);
+      if (receivedQty <= 0) continue;
+
+      const uom = (item.uom || 'DOZ').toUpperCase().trim();
+      const eaQty = uom === 'DOZ' ? receivedQty * 12 : receivedQty;
+      const unitCost = Number(item.unit_purchase_cost || 0);
+      const rowTotal =
+        item.total_purchase_cost !== undefined && item.total_purchase_cost !== null
+          ? Number(item.total_purchase_cost)
+          : receivedQty * unitCost;
+
+      if (rowTotal > 0 && eaQty > 0) {
+        totalCost += rowTotal;
+        totalEaQty += eaQty;
+      }
+    }
+
+    if (totalEaQty > 0 && totalCost > 0) {
+      return Number((totalCost / totalEaQty).toFixed(4));
+    }
+    return null;
+  }
+
   // ── SAP Sales Imports ───────────────────────────────────────────
   getSapSalesImports(): SapSalesImport[] {
     return [...this.sapSalesImports];

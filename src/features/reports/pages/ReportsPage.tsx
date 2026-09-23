@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import {
   TrendingUp, DollarSign, Receipt, Download,
   Calendar, Building2, CreditCard, Banknote, RefreshCw,
-  Truck, ArrowUpRight, Package, Users, FileSpreadsheet
+  Truck, CheckCircle2, Package, Users, FileSpreadsheet
 } from 'lucide-react';
 import { PageHeader, Card, StatCard, Button, LoadingState } from '@/shared/ui';
 import { getPicklists } from '@/features/picklists/services/picklistService';
@@ -38,6 +38,11 @@ interface SkuRow {
   deliveredQty: number;
   refusedQty: number;
   deliveredValue: number;
+  unitCost: number | null;
+  cogs: number | null;
+  grossProfit: number | null;
+  grossMarginPct: number | null;
+  cogsStatus: 'complete' | 'incomplete';
 }
 
 // ── Ledger-enriched party type ──────────────────────────────────
@@ -53,11 +58,14 @@ interface WorkerPerfRow {
   worker_name: string;
   picklist_count: number;
   sales: number;
+  cogs: number;
+  gross_profit: number;
   cash_collected: number;
   upi_collected: number;
   cheque_total: number;
   credit_sales: number;
   approved_expenses: number;
+  net_profit: number;
   contribution_before_cogs: number;
 }
 
@@ -178,7 +186,7 @@ export function ReportsPage() {
       let q = supabase
         .from('delivery_items')
         .select(
-          'id, sku, ordered_qty, delivered_qty, rate, delivery:deliveries!inner(id, status, picklist_id, picklist:picklists!inner(id, date))'
+          'id, sku, ordered_qty, delivered_qty, rate, unit_cost, cogs, delivery:deliveries!inner(id, status, picklist_id, picklist:picklists!inner(id, date))'
         );
       if (dateRange.startDateStr) {
         q = q.gte('delivery.picklist.date', dateRange.startDateStr);
@@ -192,6 +200,21 @@ export function ReportsPage() {
         return [];
       }
       return data ?? [];
+    },
+    enabled: reportType === 'products',
+  });
+
+  // Purchase items for SKU WAC Cost
+  const { data: purchaseItems = [] } = useQuery({
+    queryKey: ['sap-purchase-items-wac'],
+    queryFn: async () => {
+      try {
+        const { data, error } = await supabase
+          .from('sap_purchase_import_items')
+          .select('sku, received_qty, uom, unit_purchase_cost, total_purchase_cost, gr_status, status');
+        if (!error && data && data.length > 0) return data;
+      } catch {}
+      return mockStore.getSapPurchaseImportItems();
     },
     enabled: reportType === 'products',
   });
@@ -354,9 +377,18 @@ export function ReportsPage() {
   const totalApprovedExpenses = routeProfitability?.totals?.approved_expenses ??
     approvedFilteredExpenses.reduce((sum, e) => sum + Number(e.amount || 0), 0);
 
-  // Route Contribution Before COGS = Delivered Commercial Sales - Approved Operating Expenses
-  const routeContributionBeforeCogs = routeProfitability?.totals?.contribution_before_cogs ??
-    (totalSalesValue - totalApprovedExpenses);
+  // Authoritative COGS and Profitability Stack (Sales - COGS - Expenses = Net Profit)
+  const totalCogs = Number(routeProfitability?.totals?.cogs ?? 0);
+  const totalGrossProfit = Number(routeProfitability?.totals?.gross_profit ?? (totalSalesValue - totalCogs));
+  const totalNetProfit = Number(routeProfitability?.totals?.net_profit ?? (totalGrossProfit - totalApprovedExpenses));
+  const totalGrossMarginPct = routeProfitability?.totals?.gross_margin_pct !== undefined && routeProfitability.totals.gross_margin_pct !== null
+    ? Number(routeProfitability.totals.gross_margin_pct)
+    : (totalSalesValue > 0 ? Number(((totalGrossProfit / totalSalesValue) * 100).toFixed(2)) : null);
+  const totalNetMarginPct = routeProfitability?.totals?.net_margin_pct !== undefined && routeProfitability.totals.net_margin_pct !== null
+    ? Number(routeProfitability.totals.net_margin_pct)
+    : (totalSalesValue > 0 ? Number(((totalNetProfit / totalSalesValue) * 100).toFixed(2)) : null);
+  const cogsCoveragePct = Number(routeProfitability?.totals?.cogs_coverage_pct ?? 100);
+  const cogsStatus = (cogsCoveragePct < 99.9 ? 'incomplete' : 'complete') as 'complete' | 'incomplete';
 
   const totalApprovedCashExpenses = routeProfitability?.totals?.cash_expenses ??
     approvedFilteredExpenses
@@ -518,6 +550,42 @@ export function ReportsPage() {
     return Object.values(monthsMap);
   }, [routeProfitability, picklists, payments, expenses, sapSalesItems, salesSourceFilter, currentYear, currentMonth]);
 
+  // WAC calculation map by canonical SKU from authoritative SAP Goods Receipts
+  const wacMap = useMemo(() => {
+    const map = new Map<string, number>();
+    const costMap = new Map<string, { totalCost: number; totalEaQty: number }>();
+    for (const p of purchaseItems as any[]) {
+      const isConfirmed =
+        p.status === 'valid' ||
+        p.gr_status === 'GR Completed' ||
+        p.gr_status === 'Received' ||
+        !p.gr_status;
+      if (!isConfirmed) continue;
+      const cleanSku = String(p.sku || '').trim().toUpperCase();
+      if (!cleanSku) continue;
+      const recQty = Number(p.received_qty || 0);
+      if (recQty <= 0) continue;
+      const uom = (p.uom || 'DOZ').toUpperCase().trim();
+      const eaQty = uom === 'DOZ' ? recQty * 12 : recQty;
+      const rowTotal =
+        p.total_purchase_cost !== undefined && p.total_purchase_cost !== null
+          ? Number(p.total_purchase_cost)
+          : recQty * Number(p.unit_purchase_cost || 0);
+      if (rowTotal > 0 && eaQty > 0) {
+        const cur = costMap.get(cleanSku) || { totalCost: 0, totalEaQty: 0 };
+        cur.totalCost += rowTotal;
+        cur.totalEaQty += eaQty;
+        costMap.set(cleanSku, cur);
+      }
+    }
+    for (const [s, data] of costMap.entries()) {
+      if (data.totalEaQty > 0) {
+        map.set(s, Number((data.totalCost / data.totalEaQty).toFixed(4)));
+      }
+    }
+    return map;
+  }, [purchaseItems]);
+
   // ── P5: SKU Aggregation from delivery_items and SAP baseline sales ────
   const skuRows = useMemo((): SkuRow[] => {
     const skuMap: Record<string, SkuRow> = {};
@@ -537,6 +605,11 @@ export function ReportsPage() {
             deliveredQty: 0,
             refusedQty: 0,
             deliveredValue: 0,
+            unitCost: null,
+            cogs: null,
+            grossProfit: null,
+            grossMarginPct: null,
+            cogsStatus: 'incomplete',
           };
         }
         const ordered = Number(item.ordered_qty || 0);
@@ -566,6 +639,11 @@ export function ReportsPage() {
             deliveredQty: 0,
             refusedQty: 0,
             deliveredValue: 0,
+            unitCost: null,
+            cogs: null,
+            grossProfit: null,
+            grossMarginPct: null,
+            cogsStatus: 'incomplete',
           };
         }
         const isCancel = Boolean(sItem.is_cancellation);
@@ -583,8 +661,27 @@ export function ReportsPage() {
       }
     }
 
+    // Compute COGS & Gross Profit per SKU using authoritative WAC
+    for (const row of Object.values(skuMap)) {
+      const skuUpper = row.sku.toUpperCase();
+      const wac = wacMap.get(skuUpper);
+      if (wac !== undefined && wac !== null) {
+        row.unitCost = wac;
+        row.cogs = Number((row.deliveredQty * wac).toFixed(2));
+        row.grossProfit = Number((row.deliveredValue - row.cogs).toFixed(2));
+        row.grossMarginPct = row.deliveredValue > 0 ? Number(((row.grossProfit / row.deliveredValue) * 100).toFixed(2)) : null;
+        row.cogsStatus = 'complete';
+      } else {
+        row.unitCost = null;
+        row.cogs = null;
+        row.grossProfit = null;
+        row.grossMarginPct = null;
+        row.cogsStatus = 'incomplete';
+      }
+    }
+
     return Object.values(skuMap).sort((a, b) => b.deliveredValue - a.deliveredValue);
-  }, [deliveryItemsRaw, filteredSapSales, salesSourceFilter]);
+  }, [deliveryItemsRaw, filteredSapSales, salesSourceFilter, wacMap]);
 
   // ── P7: Worker Performance from routeProfitability ───────────────────
   const workerPerfRows = useMemo((): WorkerPerfRow[] => {
@@ -599,22 +696,28 @@ export function ReportsPage() {
           worker_name: rp.worker_name || 'Unknown',
           picklist_count: 0,
           sales: 0,
+          cogs: 0,
+          gross_profit: 0,
           cash_collected: 0,
           upi_collected: 0,
           cheque_total: 0,
           credit_sales: 0,
           approved_expenses: 0,
+          net_profit: 0,
           contribution_before_cogs: 0,
         };
       }
       const w = workerMap[key];
       w.picklist_count += 1;
       w.sales += Number(rp.sales || 0);
+      w.cogs += Number(rp.cogs || 0);
+      w.gross_profit += Number(rp.gross_profit || (rp.sales - (rp.cogs || 0)));
       w.cash_collected += Number(rp.cash_collected || 0);
       w.upi_collected += Number(rp.upi_collected || 0);
       w.cheque_total += Number((rp.cheque_cleared || 0) + (rp.cheque_pending || 0));
       w.credit_sales += Number(rp.credit_sales || 0);
       w.approved_expenses += Number(rp.approved_expenses || 0);
+      w.net_profit += Number(rp.net_profit || (w.gross_profit - w.approved_expenses));
       w.contribution_before_cogs += Number(rp.contribution_before_cogs || 0);
     }
     return Object.values(workerMap).sort((a, b) => b.sales - a.sales);
@@ -638,16 +741,66 @@ export function ReportsPage() {
 
     const summaryData = [
       { Metric: 'Reporting Period', Value: dateRange.label },
-      { Metric: 'Total Delivered Sales', Value: totalSalesValue },
+      { Metric: 'Sales Revenue (Delivered)', Value: totalSalesValue },
+      { Metric: 'Cost of Goods Sold (COGS)', Value: totalCogs },
+      { Metric: 'Gross Profit', Value: totalGrossProfit },
+      { Metric: 'Approved Operating Expenses', Value: totalApprovedExpenses },
+      { Metric: 'Net Profit', Value: totalNetProfit },
+      { Metric: 'Gross Margin %', Value: totalGrossMarginPct !== null ? `${totalGrossMarginPct}%` : 'N/A' },
+      { Metric: 'Net Margin %', Value: totalNetMarginPct !== null ? `${totalNetMarginPct}%` : 'N/A' },
+      { Metric: 'COGS Coverage %', Value: `${cogsCoveragePct}%` },
+      { Metric: 'COGS Status', Value: cogsStatus },
       { Metric: 'Total Realized Collections', Value: totalActualCollections },
       { Metric: 'Cash Collections', Value: totalCashCollected },
       { Metric: 'UPI Collections', Value: totalUpiCollected },
       { Metric: 'Cheque Collections', Value: totalChequeCollected },
-      { Metric: 'Total Approved Operating Expenses', Value: totalApprovedExpenses },
       { Metric: 'Total Outstanding Receivables (Udhari)', Value: totalOutstandingBalance },
     ];
     const wsSummary = XLSX.utils.json_to_sheet(summaryData);
     XLSX.utils.book_append_sheet(wb, wsSummary, 'Financial Summary');
+
+    if (routeProfitability?.routes && routeProfitability.routes.length > 0) {
+      const wsRoutes = XLSX.utils.json_to_sheet(
+        routeProfitability.routes.map((r) => ({
+          'Route Code': r.route_code,
+          'Route Name': r.route_name,
+          'Date': r.date,
+          'Worker': r.worker_name || '—',
+          'Delivered Sales': r.sales,
+          'COGS': r.cogs ?? 0,
+          'Gross Profit': r.gross_profit ?? (r.sales - (r.cogs ?? 0)),
+          'Approved Expenses': r.approved_expenses,
+          'Net Profit': r.net_profit ?? ((r.gross_profit ?? (r.sales - (r.cogs ?? 0))) - r.approved_expenses),
+          'Net Margin %': r.sales > 0 ? `${(((r.net_profit ?? (r.sales - (r.cogs ?? 0) - r.approved_expenses)) / r.sales) * 100).toFixed(1)}%` : 'N/A',
+          'Cost Status': r.cogs_status || 'complete',
+          'Cash Collected': r.cash_collected,
+          'Credit Sales': r.credit_sales,
+          'Expected Cash': r.expected_cash,
+          'Actual Cash': r.actual_cash_returned,
+          'Cash Discrepancy': r.cash_discrepancy,
+        }))
+      );
+      XLSX.utils.book_append_sheet(wb, wsRoutes, 'Route Profitability');
+    }
+
+    if (skuRows.length > 0) {
+      const wsSkus = XLSX.utils.json_to_sheet(
+        skuRows.map((s) => ({
+          'SKU': s.sku,
+          'Product Name': s.productName,
+          'Ordered Qty': s.orderedQty,
+          'Delivered Qty': s.deliveredQty,
+          'Refused Qty': s.refusedQty,
+          'Delivered Value (₹)': s.deliveredValue,
+          'Unit Purchase Cost (WAC)': s.unitCost !== null ? s.unitCost : 'Missing',
+          'COGS (₹)': s.cogs !== null ? s.cogs : 'Incomplete',
+          'Gross Profit (₹)': s.grossProfit !== null ? s.grossProfit : 'Incomplete',
+          'Gross Margin %': s.grossMarginPct !== null ? `${s.grossMarginPct}%` : 'N/A',
+          'Cost Status': s.cogsStatus,
+        }))
+      );
+      XLSX.utils.book_append_sheet(wb, wsSkus, 'Product Profitability');
+    }
 
     if (workerPerfRows.length > 0) {
       const wsWorkers = XLSX.utils.json_to_sheet(
@@ -655,12 +808,14 @@ export function ReportsPage() {
           'Worker Name': w.worker_name,
           'Picklists': w.picklist_count,
           'Commercial Sales': w.sales,
+          'COGS': w.cogs,
+          'Gross Profit': w.gross_profit,
+          'Approved Expenses': w.approved_expenses,
+          'Net Profit': w.net_profit,
           'Cash Collected': w.cash_collected,
           'UPI Collected': w.upi_collected,
           'Cheque Total': w.cheque_total,
           'Credit Sales': w.credit_sales,
-          'Approved Expenses': w.approved_expenses,
-          'Contribution Before COGS': w.contribution_before_cogs,
         }))
       );
       XLSX.utils.book_append_sheet(wb, wsWorkers, 'Worker Performance');
@@ -674,7 +829,7 @@ export function ReportsPage() {
     const wsParties = XLSX.utils.json_to_sheet(partyData);
     XLSX.utils.book_append_sheet(wb, wsParties, 'Customer Receivables');
 
-    XLSX.writeFile(wb, `DistroTrack_Financial_Report_${dateRange.startDateStr || 'all'}.xlsx`);
+    XLSX.writeFile(wb, `DistroTrack_Profitability_Report_${dateRange.startDateStr || 'all'}.xlsx`);
   };
 
   return (
@@ -798,30 +953,48 @@ export function ReportsPage() {
         </div>
       </div>
 
-      {/* ── KPI Cards ────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* ── Profitability Coverage Notice ────────────────────────────── */}
+      {cogsStatus === 'incomplete' && (
+        <div className="p-3 bg-amber-500/10 border border-amber-300 dark:border-amber-700/50 rounded-2xl flex items-center justify-between gap-3 text-xs text-amber-800 dark:text-amber-200">
+          <div className="flex items-center gap-2">
+            <span className="font-bold uppercase tracking-wider text-[11px] bg-amber-100 dark:bg-amber-950/70 text-amber-800 dark:text-amber-300 px-2 py-0.5 rounded">
+              COGS Incomplete ({cogsCoveragePct}% coverage)
+            </span>
+            <span>Some sold SKUs do not have confirmed SAP purchase/GR inward cost records. Profitability strictly reflects available cost data.</span>
+          </div>
+        </div>
+      )}
+
+      {/* ── KPI Cards: Authoritative Profitability (Sales - COGS - Expenses = Net Profit) ── */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
         <StatCard
-          label="Delivered Commercial Sales"
+          label="Sales Revenue"
           value={formatCurrency(totalSalesValue)}
           icon={<TrendingUp className="h-5 w-5 text-blue-600 dark:text-blue-400" />}
         />
 
         <StatCard
-          label="Realized Collections"
-          value={formatCurrency(totalActualCollections)}
-          icon={<DollarSign className="h-5 w-5 text-emerald-600 dark:text-emerald-400" />}
+          label="Cost of Goods Sold (COGS)"
+          value={formatCurrency(totalCogs)}
+          icon={<Package className="h-5 w-5 text-amber-600 dark:text-amber-400" />}
         />
 
         <StatCard
-          label="Approved Operating Expenses"
+          label={`Gross Profit (${totalGrossMarginPct !== null ? `${totalGrossMarginPct}%` : 'N/A'})`}
+          value={formatCurrency(totalGrossProfit)}
+          icon={<CheckCircle2 className="h-5 w-5 text-emerald-600 dark:text-emerald-400" />}
+        />
+
+        <StatCard
+          label="Operating Expenses"
           value={formatCurrency(totalApprovedExpenses)}
           icon={<Receipt className="h-5 w-5 text-rose-500 dark:text-rose-400" />}
         />
 
         <StatCard
-          label="Contribution Before COGS"
-          value={formatCurrency(routeContributionBeforeCogs)}
-          icon={<ArrowUpRight className="h-5 w-5 text-indigo-600 dark:text-indigo-400" />}
+          label={`Net Profit (${totalNetMarginPct !== null ? `${totalNetMarginPct}%` : 'N/A'})`}
+          value={formatCurrency(totalNetProfit)}
+          icon={<DollarSign className="h-5 w-5 text-indigo-600 dark:text-indigo-400" />}
         />
       </div>
 
@@ -915,29 +1088,35 @@ export function ReportsPage() {
                   <th>Date</th>
                   <th>Worker</th>
                   <th className="text-right">Delivered Sales</th>
+                  <th className="text-right text-amber-600 dark:text-amber-400">COGS</th>
+                  <th className="text-right text-emerald-600 dark:text-emerald-400">Gross Profit</th>
+                  <th className="text-right">Approved Expenses</th>
+                  <th className="text-right font-black text-indigo-700 dark:text-indigo-300">Net Profit</th>
+                  <th className="text-right">Margin %</th>
                   <th className="text-right">Cash</th>
                   <th className="text-right">UPI</th>
                   <th className="text-right">Cheque</th>
                   <th className="text-right">Credit</th>
-                  <th className="text-right">Approved Expenses</th>
-                  <th className="text-right">Cash Expenses</th>
                   <th className="text-right">Expected Cash</th>
                   <th className="text-right">Actual Cash</th>
-                  <th className="text-right">Difference</th>
-                  <th className="text-right font-black">Contribution Before COGS</th>
+                  <th className="text-right">Diff</th>
                   <th className="text-center">Status</th>
                 </tr>
               </thead>
               <tbody>
                 {(!routeProfitability?.routes || routeProfitability.routes.length === 0) && (
                   <tr>
-                    <td colSpan={15} className="text-center py-12 text-xs text-surface-400">
+                    <td colSpan={17} className="text-center py-12 text-xs text-surface-400">
                       No route financial runs found for {dateRange.label}.
                     </td>
                   </tr>
                 )}
                 {routeProfitability?.routes?.map((item, idx) => {
                   const hasDiscrepancy = Math.abs(item.cash_discrepancy) > 0.01;
+                  const itemCogs = Number(item.cogs ?? 0);
+                  const itemGrossProfit = Number(item.gross_profit ?? (item.sales - itemCogs));
+                  const itemNetProfit = Number(item.net_profit ?? (itemGrossProfit - item.approved_expenses));
+                  const itemMargin = item.sales > 0 ? ((itemNetProfit / item.sales) * 100).toFixed(1) : null;
                   return (
                     <tr key={item.picklist_id || idx} className="hover:bg-surface-50/70 dark:hover:bg-surface-700/50">
                       <td className="font-semibold text-surface-900 dark:text-white">
@@ -952,6 +1131,21 @@ export function ReportsPage() {
                       </td>
                       <td className="text-right font-bold text-surface-900 dark:text-white">
                         {formatCurrency(item.sales)}
+                      </td>
+                      <td className="text-right font-semibold text-amber-700 dark:text-amber-400">
+                        {formatCurrency(itemCogs)}
+                      </td>
+                      <td className="text-right font-bold text-emerald-700 dark:text-emerald-400">
+                        {formatCurrency(itemGrossProfit)}
+                      </td>
+                      <td className="text-right font-medium text-rose-600 dark:text-rose-400">
+                        {formatCurrency(item.approved_expenses)}
+                      </td>
+                      <td className={`text-right font-black ${itemNetProfit >= 0 ? 'text-indigo-700 dark:text-indigo-300' : 'text-rose-600 dark:text-rose-400'}`}>
+                        {formatCurrency(itemNetProfit)}
+                      </td>
+                      <td className="text-right font-medium text-surface-600 dark:text-surface-400">
+                        {itemMargin !== null ? `${itemMargin}%` : 'N/A'}
                       </td>
                       <td className="text-right font-medium text-emerald-700 dark:text-emerald-400">
                         {formatCurrency(item.cash_collected)}
@@ -970,12 +1164,6 @@ export function ReportsPage() {
                       <td className="text-right font-medium text-amber-600 dark:text-amber-400">
                         {formatCurrency(item.credit_sales)}
                       </td>
-                      <td className="text-right font-medium text-rose-600 dark:text-rose-400">
-                        {formatCurrency(item.approved_expenses)}
-                      </td>
-                      <td className="text-right font-medium text-rose-500 dark:text-rose-400">
-                        {formatCurrency(item.cash_expenses)}
-                      </td>
                       <td className="text-right font-bold text-surface-900 dark:text-white">
                         {formatCurrency(item.expected_cash)}
                       </td>
@@ -985,17 +1173,21 @@ export function ReportsPage() {
                       <td className={`text-right font-bold ${hasDiscrepancy ? 'text-rose-600 dark:text-rose-400' : 'text-surface-400'}`}>
                         {formatCurrency(item.cash_discrepancy)}
                       </td>
-                      <td className="text-right font-black text-indigo-700 dark:text-indigo-300">
-                        {formatCurrency(item.contribution_before_cogs)}
-                      </td>
                       <td className="text-center">
-                        <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                          item.financial_status === 'reconciled'
-                            ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800'
-                            : 'bg-amber-50 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-200 dark:border-amber-800'
-                        }`}>
-                          {item.financial_status}
-                        </span>
+                        <div className="flex flex-col items-center gap-0.5">
+                          <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                            item.financial_status === 'reconciled'
+                              ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800'
+                              : 'bg-amber-50 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-200 dark:border-amber-800'
+                          }`}>
+                            {item.financial_status}
+                          </span>
+                          {item.cogs_status === 'incomplete' && (
+                            <span className="text-[9px] font-bold text-amber-600 dark:text-amber-400">
+                              COGS Inc
+                            </span>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   );
@@ -1010,6 +1202,23 @@ export function ReportsPage() {
                     <td className="text-right text-surface-900 dark:text-white">
                       {formatCurrency(routeProfitability.totals.sales)}
                     </td>
+                    <td className="text-right text-amber-700 dark:text-amber-400">
+                      {formatCurrency(routeProfitability.totals.cogs ?? 0)}
+                    </td>
+                    <td className="text-right text-emerald-700 dark:text-emerald-400">
+                      {formatCurrency(routeProfitability.totals.gross_profit ?? (routeProfitability.totals.sales - (routeProfitability.totals.cogs ?? 0)))}
+                    </td>
+                    <td className="text-right text-rose-600 dark:text-rose-400">
+                      {formatCurrency(routeProfitability.totals.approved_expenses)}
+                    </td>
+                    <td className="text-right text-indigo-700 dark:text-indigo-300">
+                      {formatCurrency(routeProfitability.totals.net_profit ?? ((routeProfitability.totals.gross_profit ?? (routeProfitability.totals.sales - (routeProfitability.totals.cogs ?? 0))) - routeProfitability.totals.approved_expenses))}
+                    </td>
+                    <td className="text-right text-surface-600 dark:text-surface-400">
+                      {routeProfitability.totals.sales > 0
+                        ? `${(((routeProfitability.totals.net_profit ?? (routeProfitability.totals.sales - (routeProfitability.totals.cogs ?? 0) - routeProfitability.totals.approved_expenses)) / routeProfitability.totals.sales) * 100).toFixed(1)}%`
+                        : 'N/A'}
+                    </td>
                     <td className="text-right text-emerald-700 dark:text-emerald-400">
                       {formatCurrency(routeProfitability.totals.cash_collected)}
                     </td>
@@ -1022,12 +1231,6 @@ export function ReportsPage() {
                     <td className="text-right text-amber-600 dark:text-amber-400">
                       {formatCurrency(routeProfitability.totals.credit_sales)}
                     </td>
-                    <td className="text-right text-rose-600 dark:text-rose-400">
-                      {formatCurrency(routeProfitability.totals.approved_expenses)}
-                    </td>
-                    <td className="text-right text-rose-500 dark:text-rose-400">
-                      {formatCurrency(routeProfitability.totals.cash_expenses)}
-                    </td>
                     <td className="text-right text-surface-900 dark:text-white">
                       {formatCurrency(routeProfitability.totals.expected_cash)}
                     </td>
@@ -1036,9 +1239,6 @@ export function ReportsPage() {
                     </td>
                     <td className="text-right text-surface-900 dark:text-white">
                       {formatCurrency(routeProfitability.totals.cash_discrepancy)}
-                    </td>
-                    <td className="text-right text-indigo-700 dark:text-indigo-300">
-                      {formatCurrency(routeProfitability.totals.contribution_before_cogs)}
                     </td>
                     <td></td>
                   </tr>
@@ -1572,77 +1772,89 @@ export function ReportsPage() {
                 <thead>
                   <tr>
                     <th>SKU</th>
-                    <th className="text-right">Ordered Qty</th>
                     <th className="text-right">Delivered Qty</th>
-                    <th className="text-right">Refused Qty</th>
-                    <th className="text-right">Delivered Value (₹)</th>
-                    <th className="text-right">Fulfillment %</th>
+                    <th className="text-right">Sales Value (₹)</th>
+                    <th className="text-right text-amber-600 dark:text-amber-400">Unit Cost (WAC)</th>
+                    <th className="text-right text-amber-600 dark:text-amber-400">COGS (₹)</th>
+                    <th className="text-right text-emerald-600 dark:text-emerald-400">Gross Profit (₹)</th>
+                    <th className="text-right">Margin %</th>
+                    <th className="text-center">Cost Status</th>
                   </tr>
                 </thead>
                 <tbody>
                   {skuRows.length === 0 && (
                     <tr>
-                      <td colSpan={6} className="text-center py-10 text-xs text-surface-400">
+                      <td colSpan={8} className="text-center py-10 text-xs text-surface-400">
                         No delivery item data found for {dateRange.label}.
                       </td>
                     </tr>
                   )}
-                  {skuRows.map((row) => {
-                    const fulfillPct = row.orderedQty > 0
-                      ? Math.round((row.deliveredQty / row.orderedQty) * 100)
-                      : 100;
-                    return (
-                      <tr key={row.sku} className="hover:bg-surface-50/70 dark:hover:bg-surface-700/50">
-                        <td className="font-mono font-extrabold text-primary-700 dark:text-primary-300">
-                          {row.sku}
-                        </td>
-                        <td className="text-right text-surface-700 dark:text-surface-300 tabular-nums">
-                          {row.orderedQty.toLocaleString('en-IN')}
-                        </td>
-                        <td className="text-right font-semibold text-emerald-700 dark:text-emerald-400 tabular-nums">
-                          {row.deliveredQty.toLocaleString('en-IN')}
-                        </td>
-                        <td className={`text-right tabular-nums ${row.refusedQty > 0 ? 'text-rose-600 dark:text-rose-400 font-semibold' : 'text-surface-400'}`}>
-                          {row.refusedQty > 0 ? row.refusedQty.toLocaleString('en-IN') : '—'}
-                        </td>
-                        <td className="text-right font-black text-surface-900 dark:text-white tabular-nums">
-                          {formatCurrency(row.deliveredValue)}
-                        </td>
-                        <td className="text-right tabular-nums">
-                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                            fulfillPct >= 95
-                              ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300'
-                              : fulfillPct >= 70
-                              ? 'bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300'
-                              : 'bg-rose-50 text-rose-700 dark:bg-rose-950/40 dark:text-rose-300'
-                          }`}>
-                            {fulfillPct}%
-                          </span>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-                {skuRows.length > 0 && (
-                  <tfoot>
-                    <tr className="bg-surface-100/80 dark:bg-surface-750 font-black border-t-2 border-surface-300 dark:border-surface-600">
-                      <td className="text-surface-900 dark:text-white uppercase">Totals ({skuRows.length} SKUs)</td>
-                      <td className="text-right text-surface-900 dark:text-white tabular-nums">
-                        {skuRows.reduce((s, r) => s + r.orderedQty, 0).toLocaleString('en-IN')}
+                  {skuRows.map((row) => (
+                    <tr key={row.sku} className="hover:bg-surface-50/70 dark:hover:bg-surface-700/50">
+                      <td className="font-mono font-extrabold text-primary-700 dark:text-primary-300">
+                        {row.sku}
                       </td>
-                      <td className="text-right text-emerald-700 dark:text-emerald-400 tabular-nums">
-                        {skuRows.reduce((s, r) => s + r.deliveredQty, 0).toLocaleString('en-IN')}
+                      <td className="text-right font-semibold text-emerald-700 dark:text-emerald-400 tabular-nums">
+                        {row.deliveredQty.toLocaleString('en-IN')}
                       </td>
-                      <td className="text-right text-rose-600 dark:text-rose-400 tabular-nums">
-                        {skuRows.reduce((s, r) => s + r.refusedQty, 0).toLocaleString('en-IN')}
+                      <td className="text-right font-black text-surface-900 dark:text-white tabular-nums">
+                        {formatCurrency(row.deliveredValue)}
                       </td>
-                      <td className="text-right text-indigo-700 dark:text-indigo-300 tabular-nums">
-                        {formatCurrency(skuRows.reduce((s, r) => s + r.deliveredValue, 0))}
+                      <td className="text-right tabular-nums text-surface-700 dark:text-surface-300">
+                        {row.unitCost !== null ? `₹${row.unitCost.toFixed(2)}` : <span className="text-amber-600 dark:text-amber-400 text-[10px] font-semibold">Missing Cost</span>}
                       </td>
-                      <td></td>
+                      <td className="text-right font-semibold text-amber-700 dark:text-amber-400 tabular-nums">
+                        {row.cogs !== null ? formatCurrency(row.cogs) : <span className="text-amber-600 text-[10px]">Incomplete</span>}
+                      </td>
+                      <td className="text-right font-bold text-emerald-700 dark:text-emerald-400 tabular-nums">
+                        {row.grossProfit !== null ? formatCurrency(row.grossProfit) : <span className="text-amber-600 text-[10px]">Incomplete</span>}
+                      </td>
+                      <td className="text-right tabular-nums font-medium text-surface-600 dark:text-surface-400">
+                        {row.grossMarginPct !== null ? `${row.grossMarginPct}%` : 'N/A'}
+                      </td>
+                      <td className="text-center">
+                        <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                          row.cogsStatus === 'complete'
+                            ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800'
+                            : 'bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300 border border-amber-200 dark:border-amber-800'
+                        }`}>
+                          {row.cogsStatus === 'complete' ? 'Confirmed' : 'Missing Cost'}
+                        </span>
+                      </td>
                     </tr>
-                  </tfoot>
-                )}
+                  ))}
+                </tbody>
+                {skuRows.length > 0 && (() => {
+                  const totalDelivered = skuRows.reduce((s, r) => s + r.deliveredQty, 0);
+                  const totalVal = skuRows.reduce((s, r) => s + r.deliveredValue, 0);
+                  const totalSkuCogs = skuRows.reduce((s, r) => s + (r.cogs || 0), 0);
+                  const totalSkuGp = skuRows.reduce((s, r) => s + (r.grossProfit || 0), 0);
+                  const avgMargin = totalVal > 0 ? ((totalSkuGp / totalVal) * 100).toFixed(1) : null;
+                  return (
+                    <tfoot>
+                      <tr className="bg-surface-100/80 dark:bg-surface-750 font-black border-t-2 border-surface-300 dark:border-surface-600">
+                        <td className="text-surface-900 dark:text-white uppercase">Totals ({skuRows.length} SKUs)</td>
+                        <td className="text-right text-emerald-700 dark:text-emerald-400 tabular-nums">
+                          {totalDelivered.toLocaleString('en-IN')}
+                        </td>
+                        <td className="text-right text-surface-900 dark:text-white tabular-nums">
+                          {formatCurrency(totalVal)}
+                        </td>
+                        <td></td>
+                        <td className="text-right text-amber-700 dark:text-amber-400 tabular-nums">
+                          {formatCurrency(totalSkuCogs)}
+                        </td>
+                        <td className="text-right text-emerald-700 dark:text-emerald-400 tabular-nums">
+                          {formatCurrency(totalSkuGp)}
+                        </td>
+                        <td className="text-right text-surface-600 dark:text-surface-400 tabular-nums">
+                          {avgMargin !== null ? `${avgMargin}%` : 'N/A'}
+                        </td>
+                        <td></td>
+                      </tr>
+                    </tfoot>
+                  );
+                })()}
               </table>
             )}
           </div>
@@ -1657,7 +1869,7 @@ export function ReportsPage() {
                   <Users className="h-4 w-4 text-primary-500" /> Worker Performance Report
                 </h3>
                 <p className="text-xs text-surface-500 mt-0.5">
-                  Per-worker delivered commercial sales, cash collected, credit extended, and approved expenses — from authoritative route profitability
+                  Per-worker delivered commercial sales, COGS, gross profit, operating expenses, and net profit from authoritative route profitability
                 </p>
               </div>
             </div>
@@ -1667,18 +1879,20 @@ export function ReportsPage() {
                   <th>Worker / Salesman</th>
                   <th className="text-center">Trips</th>
                   <th className="text-right">Delivered Sales</th>
-                  <th className="text-right">Cash Collected</th>
+                  <th className="text-right text-amber-600 dark:text-amber-400">COGS</th>
+                  <th className="text-right text-emerald-600 dark:text-emerald-400">Gross Profit</th>
+                  <th className="text-right">Approved Expenses</th>
+                  <th className="text-right font-black text-indigo-700 dark:text-indigo-300">Net Profit</th>
+                  <th className="text-right">Cash</th>
                   <th className="text-right">UPI</th>
                   <th className="text-right">Cheque</th>
-                  <th className="text-right">Credit Extended</th>
-                  <th className="text-right">Approved Expenses</th>
-                  <th className="text-right font-black">Contribution Before COGS</th>
+                  <th className="text-right">Credit</th>
                 </tr>
               </thead>
               <tbody>
                 {workerPerfRows.length === 0 && (
                   <tr>
-                    <td colSpan={9} className="text-center py-10 text-xs text-surface-400">
+                    <td colSpan={11} className="text-center py-10 text-xs text-surface-400">
                       No worker route data found for {dateRange.label}. Ensure routes have been processed.
                     </td>
                   </tr>
@@ -1694,6 +1908,22 @@ export function ReportsPage() {
                     <td className="text-right font-bold text-blue-700 dark:text-blue-300 tabular-nums">
                       {formatCurrency(w.sales)}
                     </td>
+                    <td className="text-right font-semibold text-amber-700 dark:text-amber-400 tabular-nums">
+                      {formatCurrency(w.cogs)}
+                    </td>
+                    <td className="text-right font-bold text-emerald-700 dark:text-emerald-400 tabular-nums">
+                      {formatCurrency(w.gross_profit)}
+                    </td>
+                    <td className="text-right text-rose-600 dark:text-rose-400 tabular-nums">
+                      {formatCurrency(w.approved_expenses)}
+                    </td>
+                    <td className={`text-right font-black tabular-nums ${
+                      w.net_profit >= 0
+                        ? 'text-indigo-700 dark:text-indigo-300'
+                        : 'text-rose-600 dark:text-rose-400'
+                    }`}>
+                      {formatCurrency(w.net_profit)}
+                    </td>
                     <td className="text-right text-emerald-700 dark:text-emerald-400 tabular-nums">
                       {formatCurrency(w.cash_collected)}
                     </td>
@@ -1706,16 +1936,6 @@ export function ReportsPage() {
                     <td className="text-right text-amber-600 dark:text-amber-400 tabular-nums">
                       {formatCurrency(w.credit_sales)}
                     </td>
-                    <td className="text-right text-rose-600 dark:text-rose-400 tabular-nums">
-                      {formatCurrency(w.approved_expenses)}
-                    </td>
-                    <td className={`text-right font-black tabular-nums ${
-                      w.contribution_before_cogs >= 0
-                        ? 'text-indigo-700 dark:text-indigo-300'
-                        : 'text-rose-600 dark:text-rose-400'
-                    }`}>
-                      {formatCurrency(w.contribution_before_cogs)}
-                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -1725,12 +1945,14 @@ export function ReportsPage() {
                     <td className="text-surface-900 dark:text-white uppercase">Totals ({workerPerfRows.length} Workers)</td>
                     <td className="text-center">{workerPerfRows.reduce((s, w) => s + w.picklist_count, 0)}</td>
                     <td className="text-right text-blue-700 dark:text-blue-300">{formatCurrency(workerPerfRows.reduce((s, w) => s + w.sales, 0))}</td>
+                    <td className="text-right text-amber-700 dark:text-amber-400">{formatCurrency(workerPerfRows.reduce((s, w) => s + w.cogs, 0))}</td>
+                    <td className="text-right text-emerald-700 dark:text-emerald-400">{formatCurrency(workerPerfRows.reduce((s, w) => s + w.gross_profit, 0))}</td>
+                    <td className="text-right text-rose-600">{formatCurrency(workerPerfRows.reduce((s, w) => s + w.approved_expenses, 0))}</td>
+                    <td className="text-right text-indigo-700 dark:text-indigo-300">{formatCurrency(workerPerfRows.reduce((s, w) => s + w.net_profit, 0))}</td>
                     <td className="text-right text-emerald-700">{formatCurrency(workerPerfRows.reduce((s, w) => s + w.cash_collected, 0))}</td>
                     <td className="text-right text-cyan-700">{formatCurrency(workerPerfRows.reduce((s, w) => s + w.upi_collected, 0))}</td>
                     <td className="text-right text-surface-700">{formatCurrency(workerPerfRows.reduce((s, w) => s + w.cheque_total, 0))}</td>
                     <td className="text-right text-amber-600">{formatCurrency(workerPerfRows.reduce((s, w) => s + w.credit_sales, 0))}</td>
-                    <td className="text-right text-rose-600">{formatCurrency(workerPerfRows.reduce((s, w) => s + w.approved_expenses, 0))}</td>
-                    <td className="text-right text-indigo-700 dark:text-indigo-300">{formatCurrency(workerPerfRows.reduce((s, w) => s + w.contribution_before_cogs, 0))}</td>
                   </tr>
                 </tfoot>
               )}

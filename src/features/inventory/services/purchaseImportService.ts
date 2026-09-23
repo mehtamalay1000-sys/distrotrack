@@ -756,6 +756,9 @@ export async function confirmPurchaseImport(
     po_number: r.poNumber || null,
     invoice_no: r.invoiceNo || null,
     item_no: r.itemNo || null,
+    batch: r.batch || null,
+    unit_cost: r.rate || null,
+    total_cost: r.rate && r.receivedQty ? Number((r.rate * r.receivedQty).toFixed(4)) : null,
     idempotency_key: r.idempotencyKey,
   }));
 
@@ -909,6 +912,8 @@ function executeMockPurchaseImport(
       to_location: 'warehouse',
       reference_number: r.grDocNo || r.invoiceNo || batchRef,
       idempotency_key: r.idempotencyKey,
+      unit_cost: r.rate || null,
+      total_cost: r.rate && r.receivedQty ? Number((r.rate * r.receivedQty).toFixed(4)) : null,
       notes: `Weekly SAP Purchase/GR Inbound: ${r.grDocNo || batchRef} Item ${r.itemNo || 'N/A'} - ${r.canonicalName || r.productName}`,
       source_location: 'supplier',
       destination_location: 'warehouse',
@@ -928,6 +933,9 @@ function executeMockPurchaseImport(
       po_number: r.poNumber || null,
       invoice_no: r.invoiceNo || null,
       item_no: r.itemNo || null,
+      batch: r.batch || null,
+      unit_purchase_cost: r.rate || null,
+      total_purchase_cost: r.rate && r.receivedQty ? Number((r.rate * r.receivedQty).toFixed(4)) : null,
       idempotency_key: r.idempotencyKey,
       movement_id: movement.id,
       status: 'created',

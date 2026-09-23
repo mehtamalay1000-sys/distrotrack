@@ -378,10 +378,10 @@ export function WorkerPartyDeliveryPage() {
         {delivery.party?.address && (
           <p className="text-xs text-surface-400 mt-1 ml-5">{delivery.party.address}</p>
         )}
-        {(delivery.party?.outstanding_amount || 0) > 0 && (
+        {(delivery.party?.outstanding_amount || 0) > 1 && (
           <div className="mt-2 flex items-center gap-1.5 text-xs font-medium text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 px-2 py-1 rounded-lg w-fit">
             <AlertTriangle className="h-3 w-3" />
-            Outstanding: {formatCurrency(delivery.party?.outstanding_amount || 0)}
+            Prior Outstanding: {formatCurrency(delivery.party?.outstanding_amount || 0)}
           </div>
         )}
       </div>

@@ -349,6 +349,8 @@ export interface DeliveryItem {
   damaged_free_qty: number;
   rate: number;
   amount: number;
+  unit_cost?: number | null;
+  cogs?: number | null;
   mrp?: number | null;
   mrp_at_sale?: number | null;
   notes: string | null;
@@ -502,6 +504,17 @@ export interface FinancialSummary {
   expenses?: number;
   net_cash?: number;
   contribution_before_cogs?: number;
+
+  // Authoritative COGS and Profitability fields
+  cogs?: number;
+  gross_profit?: number;
+  net_profit?: number;
+  gross_margin_pct?: number;
+  net_margin_pct?: number;
+  cogs_coverage_pct?: number;
+  cogs_status?: 'complete' | 'incomplete';
+  missing_cost_skus_count?: number;
+  missing_cost_sales_value?: number;
 }
 
 export interface RouteFinancialReconciliationResult {
@@ -587,6 +600,15 @@ export interface RouteProfitabilityItem {
   actual_cash_returned: number;
   cash_discrepancy: number;
   contribution_before_cogs: number;
+  // Authoritative COGS fields
+  cogs?: number;
+  gross_profit?: number;
+  net_profit?: number;
+  gross_margin_pct?: number;
+  net_margin_pct?: number;
+  cogs_coverage_pct?: number;
+  cogs_status?: 'complete' | 'incomplete';
+  missing_cost_items_count?: number;
   financial_status: string;
   reconciled_at: string | null;
 }
@@ -606,6 +628,16 @@ export interface RouteProfitabilityTotals {
   actual_cash_returned: number;
   cash_discrepancy: number;
   contribution_before_cogs: number;
+  // Authoritative COGS totals
+  cogs?: number;
+  gross_profit?: number;
+  net_profit?: number;
+  gross_margin_pct?: number;
+  net_margin_pct?: number;
+  cogs_coverage_pct?: number;
+  cogs_status?: 'complete' | 'incomplete';
+  missing_cost_skus_count?: number;
+  missing_cost_sales_value?: number;
 }
 
 export interface RouteProfitabilityResponse {
@@ -624,6 +656,8 @@ export interface InventoryMovement {
   direction: InventoryMovementDirection;
   from_location: InventoryLocation | string;
   to_location: InventoryLocation | string;
+  unit_cost?: number | null;
+  total_cost?: number | null;
   picklist_id?: string | null;
   route_id?: string | null;
   delivery_id?: string | null;
@@ -747,6 +781,7 @@ export interface SapPurchaseImportItem {
   product_id: string | null;
   product_name: string;
   quantity: number;
+  received_qty?: number | null;
   uom: string;
   gr_status: string | null;
   gr_date: string | null;
@@ -754,9 +789,12 @@ export interface SapPurchaseImportItem {
   po_number: string | null;
   invoice_no: string | null;
   item_no?: string | null;
+  batch?: string | null;
+  unit_purchase_cost?: number | null;
+  total_purchase_cost?: number | null;
   idempotency_key: string;
   movement_id: string | null;
-  status: 'created' | 'duplicate' | 'unmapped' | 'error';
+  status: 'created' | 'duplicate' | 'unmapped' | 'error' | 'valid';
   notes?: string | null;
   created_at: string;
 }
@@ -821,6 +859,9 @@ export interface ProductQuantityRegisterRow {
   rate: number;
   mrp: number;
   salesAmount: number;
+  unitPurchaseCost?: number | null;
+  cogs?: number | null;
+  grossProfit?: number | null;
   source?: 'SAP' | 'DistroTrack';
   transactionType?: 'SAP Baseline Sale' | 'SAP Sales Cancellation' | 'DistroTrack Delivery';
   invoiceNumber?: string;

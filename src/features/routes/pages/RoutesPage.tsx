@@ -392,7 +392,10 @@ export function RoutesPage() {
             const routeCashCollected = rProfit ? rProfit.cash_collected : (routePicklists.reduce((s, pl) => s + Number(pl.total_cash || 0), 0));
             const routeCreditAmount = rProfit ? rProfit.credit_sales : (routePicklists.reduce((s, pl) => s + Number(pl.total_credit || 0), 0));
             const routeApprovedExpenses = rProfit ? rProfit.approved_expenses : 0;
-            const routeContribution = rProfit ? rProfit.contribution_before_cogs : (routeSales - routeApprovedExpenses);
+            const routeCogs = rProfit?.cogs ?? 0;
+            const routeGrossProfit = rProfit?.gross_profit ?? (routeSales - routeCogs);
+            const routeNetProfit = rProfit?.net_profit ?? (routeGrossProfit - routeApprovedExpenses);
+            const routeCogsStatus = rProfit?.cogs_status || 'complete';
 
             return (
               <Card key={route.id} className="p-0 overflow-hidden border border-surface-200 dark:border-surface-700">
@@ -436,10 +439,21 @@ export function RoutesPage() {
                       <span className="font-bold text-primary-700 dark:text-primary-400 text-sm">{formatCurrency(routeSales)}</span>
                     </div>
 
-                    {/* Cash Collected */}
+                    {/* COGS */}
                     <div className="text-xs">
-                      <span className="text-surface-400 block uppercase font-medium text-[10px]">Cash Collected</span>
-                      <span className="font-black text-emerald-700 dark:text-emerald-400 text-sm">{formatCurrency(routeCashCollected)}</span>
+                      <span className="text-amber-600 dark:text-amber-400 block uppercase font-medium text-[10px] flex items-center gap-1">
+                        COGS
+                        {routeCogsStatus === 'incomplete' && (
+                          <span className="px-1 py-0.2 rounded text-[8px] bg-amber-100 text-amber-800 font-bold">Inc</span>
+                        )}
+                      </span>
+                      <span className="font-bold text-amber-700 dark:text-amber-400 text-sm">{formatCurrency(routeCogs)}</span>
+                    </div>
+
+                    {/* Gross Profit */}
+                    <div className="text-xs">
+                      <span className="text-emerald-600 dark:text-emerald-400 block uppercase font-medium text-[10px]">Gross Profit</span>
+                      <span className="font-black text-emerald-700 dark:text-emerald-400 text-sm">{formatCurrency(routeGrossProfit)}</span>
                     </div>
 
                     {/* Approved Expenses */}
@@ -450,10 +464,18 @@ export function RoutesPage() {
                       </div>
                     )}
 
-                    {/* Contribution Before COGS */}
+                    {/* Net Profit */}
                     <div className="text-xs">
-                      <span className="text-surface-400 block uppercase font-medium text-[10px]">Contribution Before COGS</span>
-                      <span className="font-black text-indigo-700 dark:text-indigo-400 text-sm">{formatCurrency(routeContribution)}</span>
+                      <span className="text-surface-400 block uppercase font-medium text-[10px]">Net Profit</span>
+                      <span className={`font-black text-sm ${routeNetProfit >= 0 ? 'text-indigo-700 dark:text-indigo-400' : 'text-rose-600 dark:text-rose-400'}`}>
+                        {formatCurrency(routeNetProfit)}
+                      </span>
+                    </div>
+
+                    {/* Cash Collected */}
+                    <div className="text-xs">
+                      <span className="text-surface-400 block uppercase font-medium text-[10px]">Cash Collected</span>
+                      <span className="font-black text-emerald-700 dark:text-emerald-400 text-sm">{formatCurrency(routeCashCollected)}</span>
                     </div>
 
                     {/* Credit / Udhar */}

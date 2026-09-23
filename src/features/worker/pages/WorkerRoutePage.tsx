@@ -944,9 +944,9 @@ export function WorkerRoutePage() {
                     }`}
                   >
                     <span className="truncate">{d.party?.name || 'Unknown Party'}</span>
-                    {!isDone && Number(d.party?.outstanding_amount || 0) > 0 && (
+                    {!isDone && Number(d.party?.outstanding_amount || 0) > 1 && (
                       <span className="no-underline inline-flex items-center text-[9px] font-bold px-1.5 py-0.2 rounded bg-amber-100 text-amber-800 dark:bg-amber-900/50 dark:text-amber-300 flex-shrink-0">
-                        Udhar: {formatCurrency(Number(d.party?.outstanding_amount))}
+                        Prior Udhar: {formatCurrency(Number(d.party?.outstanding_amount))}
                       </span>
                     )}
                   </div>
@@ -962,11 +962,24 @@ export function WorkerRoutePage() {
                     <div className="text-xs font-semibold text-emerald-600 dark:text-emerald-400">
                       {formatCurrency(d.collected_amount)}
                     </div>
-                    {Math.max(0, Number(d.delivered_amount || d.total_amount || 0) - Number(d.collected_amount || 0)) > 0 && (
-                      <div className="text-[10px] font-bold text-amber-600 dark:text-amber-400">
-                        Udhar: {formatCurrency(Math.max(0, Number(d.delivered_amount || d.total_amount || 0) - Number(d.collected_amount || 0)))}
-                      </div>
-                    )}
+                    {(() => {
+                      // For non-credit payments, only show Udhar if collected < invoice total by more than ₹1
+                      // This guards against floating-point noise and stale delivered_amount fields
+                      const invoiceDue = Number(d.total_amount || 0);
+                      const collected = Number(d.collected_amount || 0);
+                      const deliveredAmt = Number(d.delivered_amount || 0);
+                      // Prefer delivered_amount if it's non-zero; fall back to total_amount
+                      const authoritative = deliveredAmt > 0 ? deliveredAmt : invoiceDue;
+                      const udhar = Math.round((authoritative - collected) * 100) / 100;
+                      // Credit deliveries always have udhar; non-credit must exceed ₹1 threshold
+                      const isCredit = d.payment_mode === 'credit';
+                      const showUdhar = isCredit ? udhar > 0 : udhar > 1;
+                      return showUdhar ? (
+                        <div className="text-[10px] font-bold text-amber-600 dark:text-amber-400">
+                          Udhar: {formatCurrency(udhar)}
+                        </div>
+                      ) : null;
+                    })()}
                   </div>
                 ) : canOpen ? (
                   <ChevronRight className="h-4 w-4 text-surface-400" />

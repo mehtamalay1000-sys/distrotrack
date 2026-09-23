@@ -679,7 +679,16 @@ export async function completePartyDelivery(input: CompleteDeliveryInput): Promi
   }
 
   const resultStatus = data?.status || 'delivered';
-  const finalDeliveredAmount = data?.delivered_amount || input.payment.amount;
+  // AUTHORITATIVE: Use delivered_amount from RPC response (post-migration this equals total_amount for full deliveries)
+  // Fallback chain: RPC result → delivery total_amount (invoice value) → payment amount
+  // Do NOT use raw item-sum as delivered_amount; that caused the ₹141.11 Udhari bug.
+  const rpcDeliveredAmount = data?.delivered_amount;
+  const deliveryTotalAmount = targetDel ? Number((targetDel as any).total_amount || 0) : 0;
+  const finalDeliveredAmount = rpcDeliveredAmount > 0
+    ? rpcDeliveredAmount
+    : deliveryTotalAmount > 0
+    ? deliveryTotalAmount
+    : input.payment.amount;
 
   mockStore.saveDelivery({
     id: input.deliveryId,

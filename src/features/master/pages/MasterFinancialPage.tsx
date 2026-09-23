@@ -88,13 +88,21 @@ export function MasterFinancialPage() {
   })();
 
   const totalSales = kpis?.totalSales ?? 0;
+  const totalCogs = kpis?.cogs ?? 0;
+  const grossProfit = kpis?.grossProfit ?? (totalSales - totalCogs);
+  const totalExpenses = kpis?.totalExpenses ?? 0;
+  const netProfit = kpis?.netProfit ?? (grossProfit - totalExpenses);
+  const grossMarginPct = kpis?.grossMarginPct ?? (totalSales > 0 ? ((grossProfit / totalSales) * 100) : 0);
+  const netMarginPct = kpis?.netMarginPct ?? (totalSales > 0 ? ((netProfit / totalSales) * 100) : 0);
+  const cogsCoveragePct = kpis?.cogsCoveragePct ?? 0;
+  const isCogsIncomplete = (kpis?.cogsStatus === 'incomplete') || ((kpis?.missingCostSkusCount ?? 0) > 0);
+
   const totalCollected = kpis?.totalCollections ?? 0;
   const totalOutstanding = Math.max(
     0,
     kpis?.totalCredit ?? 0,
     kpis?.outstandingAmount && kpis.outstandingAmount > 0 ? kpis.outstandingAmount : 0
   );
-  const totalExpenses = kpis?.totalExpenses ?? 0;
   const netCash = totalCollected - totalExpenses;
 
   return (
@@ -103,7 +111,7 @@ export function MasterFinancialPage() {
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-xl font-bold text-slate-900">Financial Oversight</h1>
-          <p className="text-sm text-slate-500 mt-0.5">Authoritative financial view — all roles</p>
+          <p className="text-sm text-slate-500 mt-0.5">Authoritative financial view — Sales, COGS & Operating Profitability</p>
         </div>
         <div className="flex items-center gap-2">
           <PeriodSelector value={period} onChange={setPeriod} />
@@ -117,45 +125,82 @@ export function MasterFinancialPage() {
         </div>
       </div>
 
-      {/* KPI Cards */}
+      {/* COGS Incomplete Alert */}
+      {isCogsIncomplete && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-3.5 flex items-start gap-3">
+          <AlertTriangle className="h-5 w-5 text-amber-500 flex-shrink-0 mt-0.5" />
+          <div className="text-xs text-amber-800">
+            <span className="font-bold">COGS Coverage Incomplete ({cogsCoveragePct.toFixed(1)}%):</span> Some sold products have no confirmed SAP purchase cost imported. COGS is calculated strictly from confirmed purchase inward data without guessing or substituting MRP.
+          </div>
+        </div>
+      )}
+
+      {/* Core Profitability Cards */}
       {finLoading ? (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          {Array.from({ length: 4 }).map((_, i) => (
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+          {Array.from({ length: 5 }).map((_, i) => (
             <div key={i} className="bg-white rounded-xl border border-slate-200 p-4 animate-pulse h-28" />
           ))}
         </div>
       ) : (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
           <KpiCard
-            label="Total Sales"
+            label="Sales Revenue"
             value={formatCurrency(totalSales)}
             sub={period === 'today' ? 'Today' : 'This Month'}
             color="bg-indigo-100 text-indigo-600"
             icon={TrendingUp}
           />
           <KpiCard
-            label="Collected"
-            value={formatCurrency(totalCollected)}
-            sub={`Current: ${formatCurrency(kpis?.currentPeriodCollected ?? 0)} | Prior: ${formatCurrency(kpis?.priorPeriodCollected ?? 0)}`}
+            label="COGS"
+            value={formatCurrency(totalCogs)}
+            sub={`Coverage: ${cogsCoveragePct.toFixed(1)}%${isCogsIncomplete ? ' (Incomplete)' : ''}`}
+            color="bg-blue-100 text-blue-600"
+            icon={BarChart2}
+          />
+          <KpiCard
+            label="Gross Profit"
+            value={formatCurrency(grossProfit)}
+            sub={`Gross Margin: ${grossMarginPct.toFixed(1)}%`}
             color="bg-emerald-100 text-emerald-600"
             icon={IndianRupee}
           />
           <KpiCard
-            label="Outstanding"
-            value={formatCurrency(totalOutstanding)}
-            sub="Pending from parties"
-            color="bg-amber-100 text-amber-600"
-            icon={Clock}
-          />
-          <KpiCard
-            label="Expenses"
+            label="Operating Expenses"
             value={formatCurrency(totalExpenses)}
-            sub={`Net cash: ${formatCurrency(netCash)}`}
+            sub={`Net Cash Flow: ${formatCurrency(netCash)}`}
             color="bg-rose-100 text-rose-600"
             icon={CreditCard}
           />
+          <KpiCard
+            label="Net Profit"
+            value={formatCurrency(netProfit)}
+            sub={`Net Margin: ${netMarginPct.toFixed(1)}%`}
+            color={netProfit >= 0 ? 'bg-teal-100 text-teal-700' : 'bg-red-100 text-red-600'}
+            icon={TrendingUp}
+          />
         </div>
       )}
+
+      {/* Cash Flow & Receivables Quick Summary */}
+      <div className="grid grid-cols-2 sm:grid-cols-2 gap-3">
+        <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 flex items-center justify-between">
+          <div>
+            <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Collections Realized</div>
+            <div className="text-lg font-bold text-slate-800 tabular-nums">{formatCurrency(totalCollected)}</div>
+            <div className="text-[11px] text-slate-500">Current Sales: {formatCurrency(kpis?.currentPeriodCollected ?? 0)} | Prior Udhari: {formatCurrency(kpis?.priorPeriodCollected ?? 0)}</div>
+          </div>
+          <IndianRupee className="h-6 w-6 text-emerald-600" />
+        </div>
+        <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 flex items-center justify-between">
+          <div>
+            <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Outstanding Receivables (Udhari)</div>
+            <div className="text-lg font-bold text-amber-700 tabular-nums">{formatCurrency(totalOutstanding)}</div>
+            <div className="text-[11px] text-slate-500">Pending customer balances across routes</div>
+          </div>
+          <Clock className="h-6 w-6 text-amber-600" />
+        </div>
+      </div>
 
       {/* Payment Breakdown */}
       {payBreakdown && (
@@ -200,7 +245,7 @@ export function MasterFinancialPage() {
         </div>
       )}
 
-      {/* Route Profitability */}
+      {/* Route Profitability Table */}
       {routeProfit && routeProfit.routes && routeProfit.routes.length > 0 && (
         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
           <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
@@ -212,34 +257,61 @@ export function MasterFinancialPage() {
               {routeProfit.routes.length} route execution{routeProfit.routes.length === 1 ? '' : 's'}
             </span>
           </div>
-          <div className="divide-y divide-slate-100">
-            {routeProfit.routes.slice(0, 10).map((r: any) => {
-              const routeRevenue = Number(r.sales ?? r.total_revenue ?? 0);
-              const routeExpenses = Number(r.approved_expenses ?? r.total_expenses ?? 0);
-              const routeProfitAmount = Number(r.contribution_before_cogs ?? r.net_profit ?? (routeRevenue - routeExpenses));
-              return (
-                <div key={r.picklist_id || r.route_id || r.route_name} className="px-4 py-3 flex items-center gap-4">
-                  <div className="flex-1 min-w-0">
-                    <div className="font-semibold text-slate-800 text-sm">{r.route_name || '—'}</div>
-                    <div className="text-xs text-slate-500">
-                      {r.picklist_number ? `Picklist #${r.picklist_number}` : 'Daily Route'}
-                      {r.worker_name ? ` · ${r.worker_name}` : ''}
-                      {r.date ? ` · ${r.date}` : ''}
-                    </div>
-                  </div>
-                  <div className="text-right">
-                    <div className="font-bold text-slate-900 text-sm">{formatCurrency(routeRevenue)}</div>
-                    <div className="text-xs text-slate-400">sales revenue</div>
-                  </div>
-                  <div className="text-right">
-                    <div className={`font-bold text-sm ${routeProfitAmount >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                      {formatCurrency(routeProfitAmount)}
-                    </div>
-                    <div className="text-xs text-slate-400">net profit</div>
-                  </div>
-                </div>
-              );
-            })}
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs text-left">
+              <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 uppercase tracking-wider font-semibold">
+                <tr>
+                  <th className="py-2.5 px-3">Route / Trip</th>
+                  <th className="py-2.5 px-3">Date</th>
+                  <th className="py-2.5 px-3">Worker</th>
+                  <th className="py-2.5 px-3 text-right">Sales Revenue</th>
+                  <th className="py-2.5 px-3 text-right">COGS</th>
+                  <th className="py-2.5 px-3 text-right">Gross Profit</th>
+                  <th className="py-2.5 px-3 text-right">Expenses</th>
+                  <th className="py-2.5 px-3 text-right">Net Profit</th>
+                  <th className="py-2.5 px-3 text-center">Cost Status</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {routeProfit.routes.map((r: any) => {
+                  const routeRevenue = Number(r.sales ?? r.delivered_revenue ?? 0);
+                  const routeCogs = Number(r.cogs ?? 0);
+                  const routeGrossProfit = Number(r.gross_profit ?? (routeRevenue - routeCogs));
+                  const routeExpenses = Number(r.approved_expenses ?? r.total_expenses ?? 0);
+                  const routeNetProfit = Number(r.net_profit ?? (routeGrossProfit - routeExpenses));
+                  const routeCostStatus = r.cogs_status || (r.missing_cost_items_count > 0 ? 'incomplete' : 'complete');
+
+                  return (
+                    <tr key={r.picklist_id || r.route_id || r.route_name} className="hover:bg-slate-50/70">
+                      <td className="py-2.5 px-3">
+                        <div className="font-semibold text-slate-900">{r.route_name || '—'}</div>
+                        <div className="text-[10px] text-slate-400 font-mono">{r.picklist_number ? `#${r.picklist_number}` : ''}</div>
+                      </td>
+                      <td className="py-2.5 px-3 text-slate-600 whitespace-nowrap">{r.date || '—'}</td>
+                      <td className="py-2.5 px-3 text-slate-700">{r.worker_name || '—'}</td>
+                      <td className="py-2.5 px-3 text-right font-bold text-slate-900">{formatCurrency(routeRevenue)}</td>
+                      <td className="py-2.5 px-3 text-right text-slate-600">{formatCurrency(routeCogs)}</td>
+                      <td className="py-2.5 px-3 text-right font-medium text-emerald-700">{formatCurrency(routeGrossProfit)}</td>
+                      <td className="py-2.5 px-3 text-right text-rose-600">{formatCurrency(routeExpenses)}</td>
+                      <td className="py-2.5 px-3 text-right font-bold">
+                        <span className={routeNetProfit >= 0 ? 'text-teal-700' : 'text-rose-600'}>
+                          {formatCurrency(routeNetProfit)}
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-3 text-center">
+                        <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${
+                          routeCostStatus === 'complete'
+                            ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                            : 'bg-amber-50 text-amber-700 border border-amber-200'
+                        }`}>
+                          {routeCostStatus}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         </div>
       )}
