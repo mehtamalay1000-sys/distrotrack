@@ -2,7 +2,8 @@ import type {
   Worker, Route, Party, Product, Picklist, Delivery, Payment, Expense, PicklistItem, DeliveryItem,
   RouteStockException, UnmappedSkuException, SapStockReconciliation, SapStockReconciliationItem,
   InventoryMovement, SapPurchaseImport, SapPurchaseImportItem, ProductMrpHistory, HistoricalSalesProduct,
-  SapSalesImport, SapSalesImportItem, RouteDeletePreview
+  SapSalesImport, SapSalesImportItem, RouteDeletePreview, MonthEndPurchaseMarginSummary,
+  PurchaseBatchDrilldown, SalesRouteDrilldown, ExpenseBreakdownItem
 } from '@/lib/database.types';
 import { registerProductMasterEntry, findSapReferenceCatalog } from '@/features/products/data/productMaster';
 import { HISTORICAL_SALES_CATALOG } from '@/features/products/data/historicalSalesCatalog';
@@ -1389,6 +1390,197 @@ class MockStore {
       return Number((totalCost / totalEaQty).toFixed(4));
     }
     return null;
+  }
+
+  getMonthEndPurchaseMargin(year: number, month: number): MonthEndPurchaseMarginSummary {
+    const monthPrefix = `${year}-${String(month).padStart(2, '0')}`;
+    const startDate = `${monthPrefix}-01`;
+    const lastDay = new Date(year, month, 0).getDate();
+    const endDate = `${monthPrefix}-${String(lastDay).padStart(2, '0')}`;
+
+    // 1. Monthly Sales Revenue (commercial deliveries + SAP baseline sales)
+    const monthSapSales = this.sapSalesImportItems.filter((s: any) => {
+      if (s.status === 'duplicate') return false;
+      const invDate = s.invoice_date || (s.created_at ? s.created_at.slice(0, 10) : '');
+      return invDate.startsWith(monthPrefix);
+    });
+
+    let sapSalesTotal = 0;
+    for (const s of monthSapSales) {
+      const isCancel = Boolean(s.is_cancellation);
+      const qty = Number(s.quantity || 0);
+      const rate = Number(s.rate || 0);
+      const netVal = Number(
+        s.net_val !== null && s.net_val !== undefined
+          ? s.net_val
+          : (isCancel ? -qty : qty) * rate
+      );
+      sapSalesTotal += netVal;
+    }
+
+    let goLiveCutoffDate: string | null = null;
+    for (const imp of this.sapSalesImports) {
+      if (imp.cutoff_date && imp.cutoff_date.startsWith(monthPrefix)) {
+        if (!goLiveCutoffDate || imp.cutoff_date > goLiveCutoffDate) {
+          goLiveCutoffDate = imp.cutoff_date;
+        }
+      }
+    }
+
+    const monthDeliveries = this.deliveries.filter((d: any) => {
+      const isDelivered = d.status === 'delivered' || d.status === 'partial';
+      const dDate = d.delivery_date || (d.created_at ? d.created_at.slice(0, 10) : '');
+      if (!isDelivered || !dDate.startsWith(monthPrefix)) return false;
+      if (goLiveCutoffDate && dDate <= goLiveCutoffDate) return false;
+      return true;
+    });
+
+    const deliverySales = monthDeliveries.reduce((sum, d: any) => sum + Number(d.delivered_amount || 0), 0);
+    const sales_revenue = Number((sapSalesTotal + deliverySales).toFixed(2));
+
+    // Group sales by route
+    const routeSalesMap: Record<string, { route_name: string; route_code: string; sales: number; deliveries_count: number }> = {};
+    if (sapSalesTotal > 0) {
+      routeSalesMap['SAP_BASELINE'] = {
+        route_name: 'SAP Commercial Baseline Invoices',
+        route_code: 'SAP-BASE',
+        sales: Number(sapSalesTotal.toFixed(2)),
+        deliveries_count: monthSapSales.length,
+      };
+    }
+    for (const d of monthDeliveries as any[]) {
+      const rName = d.route?.name || d.route_name || 'Unassigned Route';
+      const rCode = d.route?.code || d.route_code || 'N/A';
+      const key = `${rCode}_${rName}`;
+      if (!routeSalesMap[key]) {
+        routeSalesMap[key] = { route_name: rName, route_code: rCode, sales: 0, deliveries_count: 0 };
+      }
+      routeSalesMap[key].sales += Number(d.delivered_amount || 0);
+      routeSalesMap[key].deliveries_count++;
+    }
+    const sales_by_route: SalesRouteDrilldown[] = Object.values(routeSalesMap).sort((a, b) => b.sales - a.sales);
+
+    // 2. Confirmed Monthly SAP Purchases
+    const confirmedPurchaseItems = this.sapPurchaseImportItems.filter((pi) => {
+      const isConfirmed =
+        pi.status === 'valid' ||
+        pi.status === 'created' ||
+        pi.gr_status === 'GR Completed' ||
+        pi.gr_status === 'Received' ||
+        pi.gr_status === 'Completed' ||
+        !pi.gr_status;
+      if (!isConfirmed) return false;
+      const grDate = pi.gr_date || (pi.created_at ? pi.created_at.slice(0, 10) : '');
+      return grDate.startsWith(monthPrefix);
+    });
+
+    let purchase_spend = 0;
+    let total_received_qty = 0;
+    const batchMap: Record<string, PurchaseBatchDrilldown> = {};
+
+    for (const pi of confirmedPurchaseItems) {
+      const qty = Number(pi.received_qty ?? pi.quantity ?? 0);
+      const unitCost = Number(pi.unit_purchase_cost || 0);
+      const rowTotal =
+        pi.total_purchase_cost !== undefined && pi.total_purchase_cost !== null
+          ? Number(pi.total_purchase_cost)
+          : qty * unitCost;
+
+      purchase_spend += rowTotal;
+      total_received_qty += qty;
+
+      const importId = pi.import_id || 'unknown';
+      const grDoc = pi.gr_doc_no || 'N/A';
+      const batchKey = `${importId}_${grDoc}`;
+
+      if (!batchMap[batchKey]) {
+        const imp = this.sapPurchaseImports.find((b) => b.id === importId);
+        batchMap[batchKey] = {
+          import_id: importId,
+          batch_ref: imp?.batch_ref || `BATCH-${pi.gr_date?.replace(/-/g, '') || 'SAP'}`,
+          file_name: imp?.file_name || 'purchase.xlsx',
+          gr_date: pi.gr_date || startDate,
+          gr_doc_no: grDoc,
+          sku_count: 0,
+          line_items_count: 0,
+          total_qty: 0,
+          total_amount: 0,
+        };
+      }
+      batchMap[batchKey].line_items_count++;
+      batchMap[batchKey].total_qty += qty;
+      batchMap[batchKey].total_amount += rowTotal;
+    }
+
+    const purchase_batches: PurchaseBatchDrilldown[] = Object.values(batchMap).sort(
+      (a, b) => a.gr_date.localeCompare(b.gr_date)
+    );
+
+    // 3. Approved Operating Expenses
+    const monthExpenses = this.expenses.filter((e) => {
+      const isApproved = e.status === 'approved';
+      const eDate = e.date || (e.created_at ? e.created_at.slice(0, 10) : '');
+      return isApproved && eDate.startsWith(monthPrefix);
+    });
+
+    const approved_expenses = monthExpenses.reduce((sum, e) => sum + Number(e.amount || 0), 0);
+
+    const expenseCategoryMap: Record<string, ExpenseBreakdownItem> = {};
+    for (const e of monthExpenses) {
+      const cat = e.category || 'General';
+      if (!expenseCategoryMap[cat]) {
+        expenseCategoryMap[cat] = { category: cat, count: 0, amount: 0 };
+      }
+      expenseCategoryMap[cat].count++;
+      expenseCategoryMap[cat].amount += Number(e.amount || 0);
+    }
+    const expenses_breakdown: ExpenseBreakdownItem[] = Object.values(expenseCategoryMap).sort(
+      (a, b) => b.amount - a.amount
+    );
+
+    // 4. Month-End Net Margin Calculation
+    const month_end_net_margin = Number((sales_revenue - purchase_spend - approved_expenses).toFixed(2));
+    const net_margin_pct =
+      sales_revenue > 0 ? Number(((month_end_net_margin / sales_revenue) * 100).toFixed(2)) : null;
+
+    // 5. Realized Route COGS & Profit for contrast
+    let realized_cogs = 0;
+    const delIds = new Set(monthDeliveries.map((d: any) => d.id));
+    for (const di of this.deliveryItems) {
+      if (delIds.has(di.delivery_id)) {
+        const wac = this.getSkuWacCost(di.sku || '');
+        const cost = Number(di.unit_cost ?? wac ?? 0);
+        const qty = Number(di.delivered_qty ?? (di as any).quantity ?? 0);
+        realized_cogs += qty * cost;
+      }
+    }
+    realized_cogs = Number(realized_cogs.toFixed(2));
+    const realized_gross_profit = Number((sales_revenue - realized_cogs).toFixed(2));
+    const realized_net_profit = Number((realized_gross_profit - approved_expenses).toFixed(2));
+
+    return {
+      success: true,
+      year,
+      month,
+      start_date: startDate,
+      end_date: endDate,
+      sales_revenue: Number(sales_revenue.toFixed(2)),
+      purchase_spend: Number(purchase_spend.toFixed(2)),
+      approved_expenses: Number(approved_expenses.toFixed(2)),
+      month_end_net_margin,
+      net_margin_pct,
+      purchase_batches_count: purchase_batches.length,
+      purchase_items_count: confirmedPurchaseItems.length,
+      total_received_qty: Number(total_received_qty.toFixed(2)),
+      purchase_batches,
+      sales_by_route,
+      expenses_breakdown,
+      realized_cogs,
+      realized_gross_profit,
+      realized_net_profit,
+      model_label: 'Month-End Net Margin (Purchase Basis)',
+      model_explanation: 'Sales − Confirmed Monthly Purchases − Approved Expenses',
+    };
   }
 
   // ── SAP Sales Imports ───────────────────────────────────────────

@@ -646,6 +646,55 @@ export interface RouteProfitabilityResponse {
   totals: RouteProfitabilityTotals;
 }
 
+export interface PurchaseBatchDrilldown {
+  import_id: string;
+  batch_ref: string;
+  file_name: string;
+  gr_date: string;
+  gr_doc_no: string;
+  sku_count: number;
+  line_items_count: number;
+  total_qty: number;
+  total_amount: number;
+}
+
+export interface SalesRouteDrilldown {
+  route_name: string;
+  route_code: string;
+  sales: number;
+  deliveries_count: number;
+}
+
+export interface ExpenseBreakdownItem {
+  category: string;
+  count: number;
+  amount: number;
+}
+
+export interface MonthEndPurchaseMarginSummary {
+  success: boolean;
+  year: number;
+  month: number;
+  start_date: string;
+  end_date: string;
+  sales_revenue: number;
+  purchase_spend: number;
+  approved_expenses: number;
+  month_end_net_margin: number;
+  net_margin_pct: number | null;
+  purchase_batches_count: number;
+  purchase_items_count: number;
+  total_received_qty: number;
+  purchase_batches: PurchaseBatchDrilldown[];
+  sales_by_route: SalesRouteDrilldown[];
+  expenses_breakdown: ExpenseBreakdownItem[];
+  realized_cogs: number;
+  realized_gross_profit: number;
+  realized_net_profit: number;
+  model_label: string;
+  model_explanation: string;
+}
+
 export interface InventoryMovement {
   id: string;
   occurred_at: string;

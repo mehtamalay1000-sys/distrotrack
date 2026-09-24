@@ -10,6 +10,7 @@ import { getPicklists } from '@/features/picklists/services/picklistService';
 import { getPayments } from '@/features/payments/services/paymentService';
 import { getParties } from '@/features/parties/services/partyService';
 import { getExpenses, getRouteProfitability } from '@/features/expenses/services/expenseService';
+import { getMonthEndPurchaseMargin } from '@/features/expenses/services/monthEndProfitabilityService';
 import { supabase } from '@/lib/supabase';
 import { mockStore } from '@/lib/mockStore';
 import * as XLSX from 'xlsx';
@@ -82,7 +83,7 @@ export function ReportsPage() {
   const [customEndDate, setCustomEndDate] = useState<string>('');
 
   const [reportType, setReportType] = useState<
-    'profitability' | 'sales' | 'collections' | 'monthly' | 'udhari' | 'expenses' | 'products' | 'workers'
+    'profitability' | 'month_end_purchase_margin' | 'sales' | 'collections' | 'monthly' | 'udhari' | 'expenses' | 'products' | 'workers'
   >('profitability');
   const [salesSourceFilter, setSalesSourceFilter] = useState<'all' | 'sap' | 'distrotrack'>('all');
 
@@ -269,6 +270,24 @@ export function ReportsPage() {
     },
   });
 
+  const queryYear = preset === 'custom_month'
+    ? selectedYear
+    : preset === 'last_month'
+    ? (currentMonth === 0 ? currentYear - 1 : currentYear)
+    : currentYear;
+
+  const queryMonth = preset === 'custom_month'
+    ? selectedMonth + 1
+    : preset === 'last_month'
+    ? (currentMonth === 0 ? 12 : currentMonth)
+    : currentMonth + 1;
+
+  const { data: monthEndMarginData, refetch: refetchMonthEndMargin } = useQuery({
+    queryKey: ['reports_month_end_purchase_margin', queryYear, queryMonth],
+    queryFn: () => getMonthEndPurchaseMargin(queryYear, queryMonth),
+    enabled: reportType === 'month_end_purchase_margin',
+  });
+
   const isDataLoading = rpLoading || plLoading || payLoading || partLoading || expLoading;
 
   const handleRefresh = () => {
@@ -280,6 +299,7 @@ export function ReportsPage() {
     refetchDi();
     refetchLedger();
     refetchSapSales();
+    refetchMonthEndMargin();
   };
 
   // ── Helper: Check if item date is within range ──────────────────────
@@ -1042,6 +1062,9 @@ export function ReportsPage() {
         <button onClick={() => setReportType('profitability')} className={tabClass(reportType === 'profitability')}>
           📈 Route Contribution & Profitability ({routeProfitability?.routes?.length || 0})
         </button>
+        <button onClick={() => setReportType('month_end_purchase_margin')} className={tabClass(reportType === 'month_end_purchase_margin')}>
+          📦 Month-End Net Margin (Purchase Basis)
+        </button>
         <button onClick={() => setReportType('sales')} className={tabClass(reportType === 'sales')}>
           Sales Invoices ({filteredPicklists.length})
         </button>
@@ -1245,6 +1268,171 @@ export function ReportsPage() {
                 </tfoot>
               )}
             </table>
+          </div>
+        )}
+
+        {/* ── 0b. MONTH-END PURCHASE-BASIS NET MARGIN REPORT ───────── */}
+        {reportType === 'month_end_purchase_margin' && (
+          <div className="p-4 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-surface-100 dark:border-surface-700 pb-3">
+              <div>
+                <h3 className="text-sm font-bold text-surface-900 dark:text-white flex items-center gap-2">
+                  <Package className="h-4 w-4 text-purple-600 dark:text-purple-400" />
+                  Month-End Net Margin (Purchase Basis) — {dateRange.label}
+                </h3>
+                <p className="text-xs text-surface-500 mt-0.5">
+                  Authoritative monthly closing metric: Monthly Sales − Total Confirmed SAP Purchases − Approved Operating Expenses
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  icon={<FileSpreadsheet className="h-3.5 w-3.5" />}
+                  onClick={() => {
+                    if (!monthEndMarginData) return;
+                    const summaryWs = XLSX.utils.json_to_sheet([
+                      {
+                        Period: dateRange.label,
+                        'Monthly Sales': monthEndMarginData.sales_revenue,
+                        'Confirmed SAP Purchases': monthEndMarginData.purchase_spend,
+                        'Approved Operating Expenses': monthEndMarginData.approved_expenses,
+                        'Month-End Net Margin': monthEndMarginData.month_end_net_margin,
+                        'Net Margin %': monthEndMarginData.net_margin_pct !== null ? `${monthEndMarginData.net_margin_pct}%` : 'N/A',
+                        'Realized Delivery COGS': monthEndMarginData.realized_cogs,
+                        'Realized Route Profit': monthEndMarginData.realized_net_profit,
+                        Model: 'Month-End Net Margin (Purchase Basis)',
+                      },
+                    ]);
+                    const batchesWs = XLSX.utils.json_to_sheet(
+                      monthEndMarginData.purchase_batches.map((b) => ({
+                        'Batch Ref': b.batch_ref,
+                        'GR Document': b.gr_doc_no,
+                        'GR Date': b.gr_date,
+                        'Line Items': b.line_items_count,
+                        'Received Qty (DOZ)': b.total_qty,
+                        'Purchase Amount': b.total_amount,
+                        File: b.file_name,
+                      }))
+                    );
+                    const wb = XLSX.utils.book_new();
+                    XLSX.utils.book_append_sheet(wb, summaryWs, 'Margin Summary');
+                    XLSX.utils.book_append_sheet(wb, batchesWs, 'Purchase Inwards');
+                    XLSX.writeFile(wb, `DistroTrack_MonthEnd_Purchase_Margin_${queryYear}_${String(queryMonth).padStart(2, '0')}.xlsx`);
+                  }}
+                >
+                  Export Excel (.xlsx)
+                </Button>
+              </div>
+            </div>
+
+            {/* Explanatory Banner */}
+            <div className="p-3 bg-purple-500/10 border border-purple-200 dark:border-purple-800/40 rounded-xl text-xs text-purple-900 dark:text-purple-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div>
+                <span className="font-bold">Model Definition:</span> Month-End Net Margin evaluates total inventory inward spend incurred during the calendar month against monthly sales.
+                <div className="text-[11px] text-purple-700 dark:text-purple-300 mt-0.5">
+                  Realized COGS from actual delivered stock is {formatCurrency(monthEndMarginData?.realized_cogs ?? 0)} (Realized Route Profit: {formatCurrency(monthEndMarginData?.realized_net_profit ?? 0)}).
+                </div>
+              </div>
+              <span className="font-bold tabular-nums text-xs">
+                Formula: ₹{(monthEndMarginData?.sales_revenue ?? 0).toLocaleString('en-IN')} − ₹{(monthEndMarginData?.purchase_spend ?? 0).toLocaleString('en-IN')} − ₹{(monthEndMarginData?.approved_expenses ?? 0).toLocaleString('en-IN')}
+              </span>
+            </div>
+
+            {/* 4 Primary Cards */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              <div className="bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-xl p-3 shadow-xs">
+                <span className="text-[10px] font-bold text-surface-400 uppercase tracking-wider block">Monthly Sales</span>
+                <div className="text-lg font-black text-surface-900 dark:text-white mt-1">
+                  {formatCurrency(monthEndMarginData?.sales_revenue ?? 0)}
+                </div>
+                <span className="text-[10px] text-surface-400">Delivered commercial value</span>
+              </div>
+
+              <div className="bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-xl p-3 shadow-xs">
+                <span className="text-[10px] font-bold text-purple-600 dark:text-purple-400 uppercase tracking-wider block">Confirmed SAP Purchases</span>
+                <div className="text-lg font-black text-purple-700 dark:text-purple-400 mt-1">
+                  {formatCurrency(monthEndMarginData?.purchase_spend ?? 0)}
+                </div>
+                <span className="text-[10px] text-purple-600/80">
+                  {monthEndMarginData?.purchase_batches_count ?? 0} batches | {monthEndMarginData?.total_received_qty ?? 0} DOZ
+                </span>
+              </div>
+
+              <div className="bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-xl p-3 shadow-xs">
+                <span className="text-[10px] font-bold text-rose-500 uppercase tracking-wider block">Operating Expenses</span>
+                <div className="text-lg font-black text-rose-600 dark:text-rose-400 mt-1">
+                  {formatCurrency(monthEndMarginData?.approved_expenses ?? 0)}
+                </div>
+                <span className="text-[10px] text-rose-500/80">Approved business costs</span>
+              </div>
+
+              <div className={`border rounded-xl p-3 shadow-xs ${
+                (monthEndMarginData?.month_end_net_margin ?? 0) >= 0
+                  ? 'bg-gradient-to-br from-emerald-500/10 to-teal-500/10 border-emerald-300 dark:border-emerald-800 text-emerald-900 dark:text-emerald-200'
+                  : 'bg-rose-500/10 border-rose-300 dark:border-rose-800 text-rose-900 dark:text-rose-200'
+              }`}>
+                <span className="text-[10px] font-bold uppercase tracking-wider block">Month-End Net Margin</span>
+                <div className={`text-lg font-black mt-1 ${
+                  (monthEndMarginData?.month_end_net_margin ?? 0) >= 0 ? 'text-emerald-700 dark:text-emerald-300' : 'text-rose-600 dark:text-rose-400'
+                }`}>
+                  {formatCurrency(monthEndMarginData?.month_end_net_margin ?? 0)}
+                </div>
+                <span className="text-[10px] font-bold">
+                  Net Margin %: {monthEndMarginData?.net_margin_pct !== null && monthEndMarginData?.net_margin_pct !== undefined ? `${monthEndMarginData.net_margin_pct}%` : 'N/A'}
+                </span>
+              </div>
+            </div>
+
+            {/* Purchase Batches Drill-Down Table */}
+            <div className="bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-xl overflow-hidden">
+              <div className="px-4 py-2.5 bg-surface-50 dark:bg-surface-800/80 border-b border-surface-200 dark:border-surface-700 flex items-center justify-between">
+                <h4 className="text-xs font-bold text-surface-800 dark:text-surface-200 uppercase tracking-wide">
+                  Confirmed SAP Purchase Batches Drill-Down
+                </h4>
+                <span className="text-xs text-surface-500 font-medium">
+                  {monthEndMarginData?.purchase_batches?.length ?? 0} batch(es)
+                </span>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead>
+                    <tr className="border-b border-surface-200 dark:border-surface-700 text-surface-500 font-medium bg-surface-50/50">
+                      <th className="py-2 px-3">Batch Ref</th>
+                      <th className="py-2 px-3">Source File</th>
+                      <th className="py-2 px-3">GR Date</th>
+                      <th className="py-2 px-3">GR Document</th>
+                      <th className="py-2 px-3 text-right">Line Items</th>
+                      <th className="py-2 px-3 text-right">Received Qty</th>
+                      <th className="py-2 px-3 text-right">Purchase Spend</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-surface-100 dark:divide-surface-800">
+                    {monthEndMarginData?.purchase_batches && monthEndMarginData.purchase_batches.length > 0 ? (
+                      monthEndMarginData.purchase_batches.map((batch, idx) => (
+                        <tr key={idx} className="hover:bg-surface-50 dark:hover:bg-surface-800/60">
+                          <td className="py-2 px-3 font-mono font-medium text-surface-900 dark:text-white">{batch.batch_ref}</td>
+                          <td className="py-2 px-3 text-surface-600 dark:text-surface-300">{batch.file_name}</td>
+                          <td className="py-2 px-3 whitespace-nowrap">{batch.gr_date}</td>
+                          <td className="py-2 px-3 font-mono text-surface-600 dark:text-surface-300">{batch.gr_doc_no}</td>
+                          <td className="py-2 px-3 text-right tabular-nums">{batch.line_items_count}</td>
+                          <td className="py-2 px-3 text-right font-medium tabular-nums">{batch.total_qty.toLocaleString()} DOZ</td>
+                          <td className="py-2 px-3 text-right font-bold text-purple-700 dark:text-purple-300 tabular-nums">
+                            {formatCurrency(batch.total_amount)}
+                          </td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan={7} className="text-center py-6 text-surface-400">
+                          No confirmed SAP Purchase imports recorded for this month.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </div>
         )}
 
