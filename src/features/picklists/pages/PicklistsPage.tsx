@@ -141,7 +141,7 @@ export function PicklistsPage() {
                     {pl.route ? (
                       <span className="text-xs font-medium text-surface-700 dark:text-surface-300">{pl.route.name} ({pl.route.code})</span>
                     ) : (
-                      <span className="text-xs text-surface-400">Main Route</span>
+                      <span className="text-xs text-surface-400">—</span>
                     )}
                   </td>
                   <td>

@@ -1,6 +1,12 @@
-import { supabase } from '@/lib/supabase';
+import { supabase, isMockMode } from '@/lib/supabase';
 import { mockStore } from '@/lib/mockStore';
 import type { Route, RouteDeletePreview } from '@/lib/database.types';
+
+export interface ActorInfo {
+  userId?: string;
+  userName?: string;
+  role?: string;
+}
 
 export async function getRoutes(): Promise<Route[]> {
   try {
@@ -9,13 +15,14 @@ export async function getRoutes(): Promise<Route[]> {
       .select('*, worker:workers(*)')
       .order('code');
     if (error || !data) {
-      return mockStore.getRoutes();
+      return isMockMode() ? mockStore.getRoutes() : [];
     }
     return data as Route[];
   } catch {
-    return mockStore.getRoutes();
+    return isMockMode() ? mockStore.getRoutes() : [];
   }
 }
+
 
 export async function createRoute(input: { name: string; code: string; description?: string; assigned_worker_id?: string }): Promise<Route> {
   try {
@@ -31,12 +38,20 @@ export async function createRoute(input: { name: string; code: string; descripti
       .select()
       .single();
     if (error || !data) {
+      if (isMockMode()) {
+        return mockStore.saveRoute(input);
+      }
+      throw new Error(`Failed to create route: ${error?.message || 'Unknown database error'}`);
+    }
+    if (isMockMode()) {
+      mockStore.saveRoute(data as Route);
+    }
+    return data as Route;
+  } catch (err: any) {
+    if (isMockMode()) {
       return mockStore.saveRoute(input);
     }
-    mockStore.saveRoute(data as Route);
-    return data as Route;
-  } catch {
-    return mockStore.saveRoute(input);
+    throw err;
   }
 }
 
@@ -71,12 +86,20 @@ export async function updateRoute(id: string, input: Partial<Route>): Promise<Ro
     }
 
     if (error || !data) {
+      if (isMockMode()) {
+        return mockStore.saveRoute({ id, ...input });
+      }
+      throw new Error(`Failed to update route: ${error?.message || 'Unknown database error'}`);
+    }
+    if (isMockMode()) {
+      mockStore.saveRoute(data as Route);
+    }
+    return data as Route;
+  } catch (err: any) {
+    if (isMockMode()) {
       return mockStore.saveRoute({ id, ...input });
     }
-    mockStore.saveRoute(data as Route);
-    return data as Route;
-  } catch {
-    return mockStore.saveRoute({ id, ...input });
+    throw err;
   }
 }
 
@@ -206,10 +229,34 @@ export async function getRouteDeletePreview(id: string): Promise<RouteDeletePrev
     console.warn('[ROUTE] Direct table inspection failed, using mockStore:', directErr);
   }
 
-  // 3. Fallback to mockStore
-  const msPreview = mockStore.getRouteDeletePreview(id);
+  // 3. Fallback to mockStore ONLY in mock mode
+  if (isMockMode()) {
+    const msPreview = mockStore.getRouteDeletePreview(id);
+    return {
+      ...msPreview,
+      has_pending_offline_mutations: !isOnline,
+      can_delete: isOnline,
+      block_reason: !isOnline ? 'Cannot delete route while offline.' : null,
+    };
+  }
+
   return {
-    ...msPreview,
+    route_id: id,
+    route_code: '',
+    route_name: '',
+    assigned_worker_id: null,
+    assigned_worker_name: null,
+    assignments_count: 0,
+    picklists_count: 0,
+    deliveries_count: 0,
+    delivery_items_count: 0,
+    payments_count: 0,
+    expenses_count: 0,
+    returns_count: 0,
+    inventory_movements_count: 0,
+    financial_records_count: 0,
+    exceptions_count: 0,
+    parties_unlinked_count: 0,
     has_pending_offline_mutations: !isOnline,
     can_delete: isOnline,
     block_reason: !isOnline ? 'Cannot delete route while offline.' : null,
@@ -234,6 +281,27 @@ export async function deleteRoute(
     if (!['owner', 'master', 'admin'].includes(r)) {
       throw new Error('Unauthorized: Only Admin or Master can delete routes.');
     }
+  }
+
+  // 2.5 Guard: Live routes with financial/operational history MUST NOT be hard deleted
+  const preview = await getRouteDeletePreview(id).catch(() => null);
+  const routeName = preview?.route_name || '';
+  const routeCode = preview?.route_code || '';
+  const isTestRoute =
+    /^(TEST|DEMO|VERIF|SAMPLE)/i.test(routeCode) ||
+    /^(TEST|DEMO|VERIF|SAMPLE)/i.test(routeName) ||
+    id.toLowerCase().includes('test') ||
+    isMockMode();
+  const hasFinancialOrOperationalHistory =
+    (preview?.payments_count || 0) > 0 ||
+    (preview?.financial_records_count || 0) > 0 ||
+    (preview?.deliveries_count || 0) > 0 ||
+    (preview?.picklists_count || 0) > 0;
+
+  if (!isTestRoute && hasFinancialOrOperationalHistory) {
+    throw new Error(
+      `LIVE ROUTE HARD DELETE BLOCKED: Route "${routeName}" contains live financial/operational history. Permanent deletion is blocked to protect historical audit records. Please ARCHIVE this route instead.`
+    );
   }
 
   // 3. Server-side deletion via RPC or direct PostgREST dependency order
@@ -359,7 +427,9 @@ export async function deleteRoute(
   }
 
   // 4. Synchronize local store (atomic deletion of route & route-owned data, preserving shared masters)
-  mockStore.deleteRoute(id, force, hardDelete);
+  if (isMockMode()) {
+    mockStore.deleteRoute(id, force, hardDelete);
+  }
 }
 
 export async function archiveRoute(id: string): Promise<Route | undefined> {
@@ -373,7 +443,10 @@ export async function archiveRoute(id: string): Promise<Route | undefined> {
       throw new Error(updError.message || rpcError.message);
     }
   }
-  return mockStore.archiveRoute(id);
+  if (isMockMode()) {
+    return mockStore.archiveRoute(id);
+  }
+  return undefined;
 }
 
 export async function unarchiveRoute(id: string): Promise<Route | undefined> {
@@ -387,7 +460,10 @@ export async function unarchiveRoute(id: string): Promise<Route | undefined> {
       throw new Error(updError.message || rpcError.message);
     }
   }
-  return mockStore.unarchiveRoute(id);
+  if (isMockMode()) {
+    return mockStore.unarchiveRoute(id);
+  }
+  return undefined;
 }
 
 export const OFFICIAL_ROUTES = [

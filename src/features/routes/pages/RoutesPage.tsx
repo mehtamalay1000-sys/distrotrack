@@ -11,7 +11,7 @@ import { getDeliveries } from '@/features/deliveries/services/deliveryService';
 import { getPicklists } from '@/features/picklists/services/picklistService';
 import { getPayments, createPayment } from '@/features/payments/services/paymentService';
 import { getRouteProfitability } from '@/features/expenses/services/expenseService';
-import { supabase } from '@/lib/supabase';
+import { supabase, isMockMode } from '@/lib/supabase';
 import { mockStore } from '@/lib/mockStore';
 import { formatCurrency } from '@/shared/utils/format';
 import type { Route, PaymentMode, RouteProfitabilityItem } from '@/lib/database.types';
@@ -172,14 +172,16 @@ export function RoutesPage() {
           // fallback
         }
 
-        mockStore.saveDelivery({
-          id: del.id,
-          status: 'delivered',
-          delivered_amount: billAmt,
-          collected_amount: collectedAmt,
-          payment_mode: mode,
-          delivered_at: deliveredAt,
-        });
+        if (isMockMode()) {
+          mockStore.saveDelivery({
+            id: del.id,
+            status: 'delivered',
+            delivered_amount: billAmt,
+            collected_amount: collectedAmt,
+            payment_mode: mode,
+            delivered_at: deliveredAt,
+          });
+        }
 
         // Record payment
         if (billAmt > 0 && mode !== 'credit') {
@@ -211,16 +213,18 @@ export function RoutesPage() {
           // fallback
         }
 
-        mockStore.savePicklist({
-          id: pl.id,
-          status: 'completed',
-          completed_at: new Date().toISOString(),
-          completed_parties: routeDeliveries.length,
-          total_collected: totalCollected,
-          total_cash: routeTotalCash,
-          total_cheque: routeTotalCheque,
-          total_credit: routeTotalCredit,
-        });
+        if (isMockMode()) {
+          mockStore.savePicklist({
+            id: pl.id,
+            status: 'completed',
+            completed_at: new Date().toISOString(),
+            completed_parties: routeDeliveries.length,
+            total_collected: totalCollected,
+            total_cash: routeTotalCash,
+            total_cheque: routeTotalCheque,
+            total_credit: routeTotalCredit,
+          });
+        }
       }
 
       await updateRoute(route.id, { status: 'completed' as any });

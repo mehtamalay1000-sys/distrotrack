@@ -1,4 +1,4 @@
-import { supabase } from '@/lib/supabase';
+import { supabase, isMockMode } from '@/lib/supabase';
 import { mockStore } from '@/lib/mockStore';
 import type { Delivery } from '@/lib/database.types';
 
@@ -9,7 +9,7 @@ export async function getDeliveries(): Promise<Delivery[]> {
       .select('*, party:parties(*), worker:workers(*), invoice:invoices(*), picklist:picklists(*), payments(*)')
       .order('created_at', { ascending: false });
     if (error || !data) {
-      return mockStore.getDeliveries();
+      return isMockMode() ? mockStore.getDeliveries() : [];
     }
 
     // Defense-in-depth: Deduplicate by canonical identity (invoice_id, or picklist_id + party_id)
@@ -32,7 +32,7 @@ export async function getDeliveries(): Promise<Delivery[]> {
     }
     return Array.from(seen.values());
   } catch {
-    return mockStore.getDeliveries();
+    return isMockMode() ? mockStore.getDeliveries() : [];
   }
 }
 
@@ -53,7 +53,9 @@ export async function updateDeliveryStatus(
   } catch {
     // fallback
   }
-  mockStore.saveDelivery({ id, status, notes });
+  if (isMockMode()) {
+    mockStore.saveDelivery({ id, status, notes });
+  }
 }
 
 export async function deleteDelivery(id: string): Promise<void> {
@@ -63,7 +65,9 @@ export async function deleteDelivery(id: string): Promise<void> {
   } catch (err) {
     console.error('Error deleting delivery:', err);
   }
-  mockStore.deleteDelivery(id);
+  if (isMockMode()) {
+    mockStore.deleteDelivery(id);
+  }
 }
 
 export async function assignDeliveryWorker(id: string, workerId: string | null): Promise<void> {
@@ -72,5 +76,7 @@ export async function assignDeliveryWorker(id: string, workerId: string | null):
   } catch {
     // fallback
   }
-  mockStore.saveDelivery({ id, worker_id: workerId });
+  if (isMockMode()) {
+    mockStore.saveDelivery({ id, worker_id: workerId });
+  }
 }

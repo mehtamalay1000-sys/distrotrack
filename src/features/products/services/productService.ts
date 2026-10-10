@@ -1,4 +1,4 @@
-import { supabase } from '@/lib/supabase';
+import { supabase, isMockMode } from '@/lib/supabase';
 import { mockStore } from '@/lib/mockStore';
 import { SAP_PRODUCT_MASTER, findProductMasterEntry, findProductMasterByDescription, registerProductMasterEntry, updateProductMasterMrp, resetProductMasterMemory } from '@/features/products/data/productMaster';
 import type { Product, ProductMrpHistory } from '@/lib/database.types';
@@ -12,32 +12,31 @@ export interface ProductFilterOptions {
 
 export async function getProducts(filter?: ProductFilterOptions): Promise<Product[]> {
   let allProds: Product[] = [];
-  try {
-    let query = supabase.from('products').select('*').order('name');
-    if (filter?.brand && filter.brand !== 'All') {
-      query = query.eq('brand', filter.brand);
-    }
-    if (filter?.category && filter.category !== 'All') {
-      query = query.eq('category', filter.category);
-    }
-    if (filter?.status && filter.status !== 'All') {
-      query = query.eq('status', filter.status);
-    }
-
-    const { data, error } = await query;
-    if (error || !data) {
-      allProds = mockStore.getProducts();
-    } else {
-      const filtered = (data as Product[]).filter(p => p && p.name && !p.name.includes('ZTIN:') && !p.name.includes('TAX Invoice'));
-      allProds = filtered;
-    }
-  } catch {
+  if (isMockMode()) {
     allProds = mockStore.getProducts();
-  }
+  } else {
+    try {
+      let query = supabase.from('products').select('*').order('name');
+      if (filter?.brand && filter.brand !== 'All') {
+        query = query.eq('brand', filter.brand);
+      }
+      if (filter?.category && filter.category !== 'All') {
+        query = query.eq('category', filter.category);
+      }
+      if (filter?.status && filter.status !== 'All') {
+        query = query.eq('status', filter.status);
+      }
 
-  // Fallback to mockStore only if Supabase returned nothing and mockStore has products
-  if (allProds.length === 0) {
-    allProds = mockStore.getProducts();
+      const { data, error } = await query;
+      if (error || !data) {
+        allProds = [];
+      } else {
+        const filtered = (data as Product[]).filter(p => p && p.name && !p.name.includes('ZTIN:') && !p.name.includes('TAX Invoice'));
+        allProds = filtered;
+      }
+    } catch {
+      allProds = [];
+    }
   }
 
   // Client-side filtering
@@ -82,12 +81,20 @@ export async function createProduct(input: {
       .select()
       .single();
     if (error || !data) {
+      if (isMockMode()) {
+        return mockStore.saveProduct(input);
+      }
+      throw new Error(`Failed to create product: ${error?.message || 'Unknown database error'}`);
+    }
+    if (isMockMode()) {
+      mockStore.saveProduct(data as Product);
+    }
+    return data as Product;
+  } catch (err: any) {
+    if (isMockMode()) {
       return mockStore.saveProduct(input);
     }
-    mockStore.saveProduct(data as Product);
-    return data as Product;
-  } catch {
-    return mockStore.saveProduct(input);
+    throw err;
   }
 }
 
@@ -95,12 +102,20 @@ export async function updateProduct(id: string, input: Partial<Product>): Promis
   try {
     const { data, error } = await supabase.from('products').update(input).eq('id', id).select().single();
     if (error || !data) {
+      if (isMockMode()) {
+        return mockStore.saveProduct({ id, ...input });
+      }
+      throw new Error(`Failed to update product: ${error?.message || 'Unknown database error'}`);
+    }
+    if (isMockMode()) {
+      mockStore.saveProduct(data as Product);
+    }
+    return data as Product;
+  } catch (err: any) {
+    if (isMockMode()) {
       return mockStore.saveProduct({ id, ...input });
     }
-    mockStore.saveProduct(data as Product);
-    return data as Product;
-  } catch {
-    return mockStore.saveProduct({ id, ...input });
+    throw err;
   }
 }
 
@@ -110,7 +125,9 @@ export async function deleteProduct(id: string): Promise<void> {
   } catch {
     // fallback
   }
-  mockStore.deleteProduct(id);
+  if (isMockMode()) {
+    mockStore.deleteProduct(id);
+  }
 }
 
 // ── Product Master Operations ─────────────────────────────────────────
@@ -146,12 +163,14 @@ export async function lookupProductBySku(sku: string): Promise<Product | null> {
     // fallback to mockStore
   }
 
-  // 2. Try mockStore
-  const mockProducts = mockStore.getProducts();
-  const found = mockProducts.find(
-    p => p.sku.toUpperCase() === normalizedSku.toUpperCase() || (unpaddedSku && p.sku.toUpperCase() === unpaddedSku.toUpperCase())
-  );
-  if (found) return found;
+  // 2. Try mockStore ONLY in mock mode
+  if (isMockMode()) {
+    const mockProducts = mockStore.getProducts();
+    const found = mockProducts.find(
+      p => p.sku.toUpperCase() === normalizedSku.toUpperCase() || (unpaddedSku && p.sku.toUpperCase() === unpaddedSku.toUpperCase())
+    );
+    if (found) return found;
+  }
 
   return null;
 }

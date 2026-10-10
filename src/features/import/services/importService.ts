@@ -1,4 +1,4 @@
-import { supabase } from '@/lib/supabase';
+import { supabase, isMockMode } from '@/lib/supabase';
 import { mockStore } from '@/lib/mockStore';
 import type { ParsedPicklist, MatchResult } from '../parsers/types';
 import { upsertPartyByCode } from '@/features/parties/services/partyService';
@@ -95,20 +95,22 @@ export async function confirmImportToDatabase(
       if (newRoute) routeId = newRoute.id;
     }
   } catch {
-    const existingMock = mockStore.getRoutes().find((r) => r.code === picklist.routeCode);
-    if (existingMock) {
-      routeId = existingMock.id;
-      if (assignedWorkerId) {
-        mockStore.saveRoute({ id: routeId, assigned_worker_id: assignedWorkerId });
+    if (isMockMode()) {
+      const existingMock = mockStore.getRoutes().find((r) => r.code === picklist.routeCode);
+      if (existingMock) {
+        routeId = existingMock.id;
+        if (assignedWorkerId) {
+          mockStore.saveRoute({ id: routeId, assigned_worker_id: assignedWorkerId });
+        }
+      } else {
+        const createdRoute = mockStore.saveRoute({
+          code: picklist.routeCode || 'R-SAP',
+          name: picklist.routeName || 'SAP Imported Route',
+          assigned_worker_id: assignedWorkerId || null,
+          status: 'active',
+        });
+        routeId = createdRoute.id;
       }
-    } else {
-      const createdRoute = mockStore.saveRoute({
-        code: picklist.routeCode || 'R-SAP',
-        name: picklist.routeName || 'SAP Imported Route',
-        assigned_worker_id: assignedWorkerId || null,
-        status: 'active',
-      });
-      routeId = createdRoute.id;
     }
   }
 
@@ -145,6 +147,28 @@ export async function confirmImportToDatabase(
           p_entity_id: picklist.picklistNumber,
         });
       } catch {}
+      if (isMockMode()) {
+        picklistRecord = mockStore.savePicklist({
+          picklist_number: picklist.picklistNumber,
+          date: effectiveDate,
+          route_id: routeId,
+          worker_id: assignedWorkerId || null,
+          status: 'confirmed',
+          total_amount: picklist.totalAmount,
+          total_items: picklist.totalItems,
+          notes: `Imported via SAP PDF. Matched ${matchResult.matchedCount} bills.`,
+        });
+      } else {
+        throw new Error(`Failed to persist picklist #${picklist.picklistNumber}: ${error?.message ?? 'Unknown DB error'}`);
+      }
+    } else {
+      picklistRecord = data as Picklist;
+      if (isMockMode()) {
+        mockStore.savePicklist(data as Picklist);
+      }
+    }
+  } catch (err: any) {
+    if (isMockMode()) {
       picklistRecord = mockStore.savePicklist({
         picklist_number: picklist.picklistNumber,
         date: effectiveDate,
@@ -156,20 +180,8 @@ export async function confirmImportToDatabase(
         notes: `Imported via SAP PDF. Matched ${matchResult.matchedCount} bills.`,
       });
     } else {
-      picklistRecord = data as Picklist;
-      mockStore.savePicklist(data as Picklist);
+      throw err;
     }
-  } catch {
-    picklistRecord = mockStore.savePicklist({
-      picklist_number: picklist.picklistNumber,
-      date: effectiveDate,
-      route_id: routeId,
-      worker_id: assignedWorkerId || null,
-      status: 'confirmed',
-      total_amount: picklist.totalAmount,
-      total_items: picklist.totalItems,
-      notes: `Imported via SAP PDF. Matched ${matchResult.matchedCount} bills.`,
-    });
   }
 
   // Stage 4B: Persist Page 1 load manifest to picklist_load_items
@@ -414,17 +426,19 @@ export async function confirmImportToDatabase(
         } catch {
           // ignore
         }
-        mockStore.savePicklistItem({
-          picklist_id: picklistRecord.id,
-          party_id: party.id,
-          product_id: product.id,
-          sku: finalSku,
-          product_name: finalName,
-          quantity: item.quantity,
-          free_quantity: item.freeQuantity || 0,
-          rate: item.rate,
-          amount: item.amount,
-        });
+        if (isMockMode()) {
+          mockStore.savePicklistItem({
+            picklist_id: picklistRecord.id,
+            party_id: party.id,
+            product_id: product.id,
+            sku: finalSku,
+            product_name: finalName,
+            quantity: item.quantity,
+            free_quantity: item.freeQuantity || 0,
+            rate: item.rate,
+            amount: item.amount,
+          });
+        }
       }
     }
 
@@ -486,19 +500,21 @@ export async function confirmImportToDatabase(
       console.error(`[IMPORT] Error querying/creating delivery for party ${pair.partyCode}:`, delErr);
     }
 
-    const mockDel = mockStore.saveDelivery({
-      id: deliveryId || undefined,
-      picklist_id: picklistRecord.id,
-      party_id: party.id,
-      worker_id: assignedWorkerId || null,
-      invoice_id: invoiceId,
-      status: 'pending',
-      total_amount: pair.picklistParty?.totalAmount || pair.invoice?.netAmount || 0,
-      delivery_date: effectiveDate,
-      notes: `Generated from SAP Picklist ${picklist.picklistNumber}`,
-    });
-
-    const targetDelId = deliveryId || mockDel.id;
+    let targetDelId = deliveryId;
+    if (isMockMode()) {
+      const mockDel = mockStore.saveDelivery({
+        id: deliveryId || undefined,
+        picklist_id: picklistRecord.id,
+        party_id: party.id,
+        worker_id: assignedWorkerId || null,
+        invoice_id: invoiceId,
+        status: 'pending',
+        total_amount: pair.picklistParty?.totalAmount || pair.invoice?.netAmount || 0,
+        delivery_date: effectiveDate,
+        notes: `Generated from SAP Picklist ${picklist.picklistNumber}`,
+      });
+      targetDelId = deliveryId || mockDel.id;
+    }
 
     // ── Delivery Items: Insert if delivery currently has 0 line items ────────
     // If delivery items already exist, do not duplicate. But if 0 exist, populate them.
@@ -546,22 +562,24 @@ export async function confirmImportToDatabase(
         } catch {
           // ignore
         }
-        mockStore.saveDeliveryItem({
-          delivery_id: targetDelId,
-          product_id: prod?.id || null,
-          sku: finalSku,
-          product_name: finalName,
-          ordered_qty: item.quantity,
-          delivered_qty: 0,
-          delivered_free_qty: 0,
-          returned_qty: 0,
-          returned_free_qty: 0,
-          damaged_qty: 0,
-          damaged_free_qty: 0,
-          free_quantity: item.freeQuantity || 0,
-          rate: item.rate,
-          amount: item.amount,
-        });
+        if (isMockMode() && targetDelId) {
+          mockStore.saveDeliveryItem({
+            delivery_id: targetDelId,
+            product_id: prod?.id || null,
+            sku: finalSku,
+            product_name: finalName,
+            ordered_qty: item.quantity,
+            delivered_qty: 0,
+            delivered_free_qty: 0,
+            returned_qty: 0,
+            returned_free_qty: 0,
+            damaged_qty: 0,
+            damaged_free_qty: 0,
+            free_quantity: item.freeQuantity || 0,
+            rate: item.rate,
+            amount: item.amount,
+          });
+        }
       }
     } else if (isExistingDelivery) {
       console.log(`[IMPORT] Delivery ${targetDelId} already exists — delivery_items insertion skipped.`);

@@ -171,7 +171,7 @@ export function PicklistDetailPage() {
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
         <Card className="p-4">
           <div className="text-xs text-surface-500 dark:text-surface-400 font-medium uppercase">Route</div>
-          <div className="text-sm font-semibold text-surface-900 dark:text-surface-100 mt-1">{picklist.route ? picklist.route.name : 'Main Route'}</div>
+          <div className="text-sm font-semibold text-surface-900 dark:text-surface-100 mt-1">{picklist.route ? picklist.route.name : '—'}</div>
           {picklist.route && <div className="font-mono text-xs text-surface-400 mt-0.5">{picklist.route.code}</div>}
         </Card>
         <Card className="p-4">

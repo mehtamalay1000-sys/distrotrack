@@ -196,11 +196,9 @@ export function PaymentsPage() {
     const dPicklist = (p.delivery as any)?.picklist;
     if (dPicklist?.route_id) return dPicklist.route_id;
     if (dPicklist?.route?.id) return dPicklist.route.id;
-    const pt = p.party || parties.find((x) => x.id === p.party_id || x.code === p.party_id);
-    if (pt?.route_id) return pt.route_id;
-    if (pt?.route?.id) return pt.route.id;
     return null;
   }
+
 
   // ── 1. Route Filter ────────────────────────────────────────────────────
   const routeFiltered = payments.filter((p) => {
@@ -476,17 +474,10 @@ export function PaymentsPage() {
               {finalFiltered.map((p) => {
                 const isPaid = p.payment_mode !== 'credit';
                 const party = p.party || parties.find((x) => x.id === p.party_id || x.code === p.party_id);
-                const routeId =
-                  (p.delivery as any)?.picklist?.route_id ||
-                  (p.delivery as any)?.picklist?.route?.id ||
-                  party?.route_id ||
-                  party?.route?.id;
-                const matchedRoute = routes.find((r) => r.id === routeId);
-                const routeName =
-                  (p.delivery?.picklist?.route as any)?.name ||
-                  party?.route?.name ||
-                  matchedRoute?.name ||
-                  'Main Route';
+                const directRoute = p.route || (p.route_id ? routes.find((r) => r.id === p.route_id) : null);
+                const deliveryRoute = (p.delivery as any)?.picklist?.route || (p.delivery?.picklist?.route_id ? routes.find((r) => r.id === p.delivery?.picklist?.route_id) : null);
+                const matchedRoute = directRoute || deliveryRoute;
+                const routeName = matchedRoute?.name || '—';
 
                 const isReversed = p.status === 'reversed';
                 const isChequePending = p.payment_mode === 'cheque' && p.status === 'pending';

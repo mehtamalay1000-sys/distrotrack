@@ -6,7 +6,7 @@
  */
 
 import * as XLSX from 'xlsx';
-import { supabase } from '@/lib/supabase';
+import { supabase, isMockMode } from '@/lib/supabase';
 import { mockStore } from '@/lib/mockStore';
 import { findProductMasterEntry } from '@/features/products/data/productMaster';
 import type { SapSalesImport, SapSalesImportItem } from '@/lib/database.types';
@@ -317,17 +317,19 @@ export async function annotateSalesRowsStatus(
     console.warn('[SAP SALES IMPORT] Supabase check skipped/offline:', err);
   }
 
-  // 2. Check mockStore
-  const mockMovements = mockStore.getInventoryMovements();
-  mockMovements.forEach((m) => {
-    if (m.idempotency_key?.startsWith('sales_import:')) {
-      existingIdemps.add(m.idempotency_key);
-    }
-  });
-  const mockItems = mockStore.getSapSalesImportItems();
-  mockItems.forEach((it) => {
-    if (it.idempotency_key) existingIdemps.add(it.idempotency_key);
-  });
+  // 2. Check mockStore ONLY in mock mode
+  if (isMockMode()) {
+    const mockMovements = mockStore.getInventoryMovements();
+    mockMovements.forEach((m) => {
+      if (m.idempotency_key?.startsWith('sales_import:')) {
+        existingIdemps.add(m.idempotency_key);
+      }
+    });
+    const mockItems = mockStore.getSapSalesImportItems();
+    mockItems.forEach((it) => {
+      if (it.idempotency_key) existingIdemps.add(it.idempotency_key);
+    });
+  }
 
   let duplicateCount = 0;
   let unmappedCount = 0;
@@ -425,7 +427,10 @@ export async function confirmSapSalesImport(
     console.warn('[SAP SALES IMPORT] Supabase RPC unavailable or offline, using mockStore fallback:', rpcErr);
   }
 
-  // 2. Fallback to mockStore
+  // 2. Fallback to mockStore ONLY in mock mode
+  if (!isMockMode()) {
+    throw new Error('Supabase RPC unavailable and mock mode is disabled');
+  }
   const mockRes = mockStore.importSapSalesBaseline({
     items: payloadItems,
     batch_ref: batchRef,
@@ -464,7 +469,10 @@ export async function getSapSalesImports(): Promise<SapSalesImport[]> {
     console.warn('[SAP SALES IMPORT] Querying Supabase sap_sales_imports failed:', err);
   }
 
-  return mockStore.getSapSalesImports();
+  if (isMockMode()) {
+    return mockStore.getSapSalesImports();
+  }
+  return [];
 }
 
 /**
@@ -485,5 +493,8 @@ export async function getSapSalesImportItems(importId?: string): Promise<SapSale
     console.warn('[SAP SALES IMPORT] Querying Supabase sap_sales_import_items failed:', err);
   }
 
-  return mockStore.getSapSalesImportItems(importId);
+  if (isMockMode()) {
+    return mockStore.getSapSalesImportItems(importId);
+  }
+  return [];
 }

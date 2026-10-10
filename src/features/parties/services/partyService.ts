@@ -1,4 +1,4 @@
-import { supabase } from '@/lib/supabase';
+import { supabase, isMockMode } from '@/lib/supabase';
 import { mockStore } from '@/lib/mockStore';
 import type { Party } from '@/lib/database.types';
 
@@ -17,7 +17,7 @@ export async function getParties(): Promise<Party[]> {
 
       if (error || !data) {
         if (allParties.length > 0) return allParties;
-        return mockStore.getParties();
+        return isMockMode() ? mockStore.getParties() : [];
       }
 
       allParties = allParties.concat(data as Party[]);
@@ -27,7 +27,7 @@ export async function getParties(): Promise<Party[]> {
 
     return allParties;
   } catch {
-    return mockStore.getParties();
+    return isMockMode() ? mockStore.getParties() : [];
   }
 }
 
@@ -39,15 +39,19 @@ export async function getParty(id: string): Promise<Party> {
       .eq('id', id)
       .single();
     if (error || !data) {
-      const found = mockStore.getParties().find((p) => p.id === id);
-      if (found) return found;
+      if (isMockMode()) {
+        const found = mockStore.getParties().find((p) => p.id === id);
+        if (found) return found;
+      }
       throw new Error('Party not found');
     }
     return data as Party;
-  } catch {
-    const found = mockStore.getParties().find((p) => p.id === id);
-    if (found) return found;
-    throw new Error('Party not found');
+  } catch (err) {
+    if (isMockMode()) {
+      const found = mockStore.getParties().find((p) => p.id === id);
+      if (found) return found;
+    }
+    throw err instanceof Error ? err : new Error('Party not found');
   }
 }
 
@@ -68,12 +72,20 @@ export async function createParty(input: {
       .select()
       .single();
     if (error || !data) {
+      if (isMockMode()) {
+        return mockStore.saveParty(input);
+      }
+      throw new Error(`Failed to create party: ${error?.message || 'Unknown database error'}`);
+    }
+    if (isMockMode()) {
+      mockStore.saveParty(data as Party);
+    }
+    return data as Party;
+  } catch (err: any) {
+    if (isMockMode()) {
       return mockStore.saveParty(input);
     }
-    mockStore.saveParty(data as Party);
-    return data as Party;
-  } catch {
-    return mockStore.saveParty(input);
+    throw err;
   }
 }
 
@@ -81,12 +93,20 @@ export async function updateParty(id: string, input: Partial<Party>): Promise<Pa
   try {
     const { data, error } = await supabase.from('parties').update(input).eq('id', id).select().single();
     if (error || !data) {
+      if (isMockMode()) {
+        return mockStore.saveParty({ id, ...input });
+      }
+      throw new Error(`Failed to update party: ${error?.message || 'Unknown database error'}`);
+    }
+    if (isMockMode()) {
+      mockStore.saveParty(data as Party);
+    }
+    return data as Party;
+  } catch (err: any) {
+    if (isMockMode()) {
       return mockStore.saveParty({ id, ...input });
     }
-    mockStore.saveParty(data as Party);
-    return data as Party;
-  } catch {
-    return mockStore.saveParty({ id, ...input });
+    throw err;
   }
 }
 
@@ -96,7 +116,9 @@ export async function deleteParty(id: string): Promise<void> {
   } catch {
     // fallback
   }
-  mockStore.deleteParty(id);
+  if (isMockMode()) {
+    mockStore.deleteParty(id);
+  }
 }
 
 /** Upsert a party by code – used during SAP import */
@@ -111,12 +133,20 @@ export async function upsertPartyByCode(code: string, name: string, routeId?: st
       .select()
       .single();
     if (error || !data) {
+      if (isMockMode()) {
+        return mockStore.saveParty({ code, name, route_id: routeId });
+      }
+      throw new Error(`Failed to insert party ${code}: ${error?.message || 'Unknown DB error'}`);
+    }
+    if (isMockMode()) {
+      mockStore.saveParty(data as Party);
+    }
+    return data as Party;
+  } catch (err: any) {
+    if (isMockMode()) {
       return mockStore.saveParty({ code, name, route_id: routeId });
     }
-    mockStore.saveParty(data as Party);
-    return data as Party;
-  } catch {
-    return mockStore.saveParty({ code, name, route_id: routeId });
+    throw err;
   }
 }
 

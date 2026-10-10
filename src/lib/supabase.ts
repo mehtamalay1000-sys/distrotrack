@@ -40,3 +40,19 @@ export const supabase = createClient<any>(
   supabaseAnonKey || 'placeholder-key',
   !isSupabaseConfigured ? { global: { fetch: offlineFetch } } : undefined
 );
+
+/**
+ * Isolated check for Development Mock Mode.
+ * IN PRODUCTION / LIVE SUPABASE MODE, THIS IS ALWAYS FALSE.
+ * Mock fallback is NEVER inferred from empty query results.
+ */
+export function isMockMode(): boolean {
+  if (typeof window !== 'undefined' && (window as any).__DISTROTRACK_FORCE_MOCK__ !== undefined) {
+    return Boolean((window as any).__DISTROTRACK_FORCE_MOCK__);
+  }
+  const explicitMock =
+    metaEnv?.VITE_USE_MOCK === 'true' ||
+    (typeof process !== 'undefined' && process.env?.VITE_USE_MOCK === 'true');
+  return explicitMock || !isSupabaseConfigured;
+}
+

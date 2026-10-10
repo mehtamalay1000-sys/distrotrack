@@ -1,4 +1,4 @@
-import { supabase } from '@/lib/supabase';
+import { supabase, isMockMode } from '@/lib/supabase';
 import { mockStore } from '@/lib/mockStore';
 import type { Picklist, Delivery, PaymentMode, PicklistItem, RouteStockCheck, RouteReturnItemInput } from '@/lib/database.types';
 import { addNotification } from '@/features/notifications/services/notificationService';
@@ -76,34 +76,39 @@ export async function getWorkerTodayRoute(workerId: string, workerName?: string)
       }
     }
 
-    // 3. Fallback to mockStore picklists if Supabase returned nothing
-    const mockPicklists = mockStore.getPicklists();
-    const activeMock =
-      mockPicklists.find(
-        (p) => idList.includes(p.worker_id || '') && p.status === 'in_progress'
-      ) ||
-      mockPicklists.find(
-        (p) =>
-          idList.includes(p.worker_id || '') &&
-          ['assigned', 'in_progress', 'confirmed', 'draft'].includes(p.status)
-      );
-    if (activeMock) return activeMock;
+    // 3. Fallback to mockStore picklists ONLY in explicit mock mode
+    if (isMockMode()) {
+      const mockPicklists = mockStore.getPicklists();
+      const activeMock =
+        mockPicklists.find(
+          (p) => idList.includes(p.worker_id || '') && p.status === 'in_progress'
+        ) ||
+        mockPicklists.find(
+          (p) =>
+            idList.includes(p.worker_id || '') &&
+            ['assigned', 'in_progress', 'confirmed', 'draft'].includes(p.status)
+        );
+      if (activeMock) return activeMock;
+    }
 
     return null;
   } catch {
-    const mockPicklists = mockStore.getPicklists();
-    const activeMock =
-      mockPicklists.find(
-        (p) =>
-          (p.worker_id === workerId || (workerName && p.notes?.includes(workerName))) &&
-          p.status === 'in_progress'
-      ) ||
-      mockPicklists.find(
-        (p) =>
-          (p.worker_id === workerId || (workerName && p.notes?.includes(workerName))) &&
-          ['assigned', 'in_progress', 'confirmed', 'draft'].includes(p.status)
-      );
-    return activeMock || null;
+    if (isMockMode()) {
+      const mockPicklists = mockStore.getPicklists();
+      const activeMock =
+        mockPicklists.find(
+          (p) =>
+            (p.worker_id === workerId || (workerName && p.notes?.includes(workerName))) &&
+            p.status === 'in_progress'
+        ) ||
+        mockPicklists.find(
+          (p) =>
+            (p.worker_id === workerId || (workerName && p.notes?.includes(workerName))) &&
+            ['assigned', 'in_progress', 'confirmed', 'draft'].includes(p.status)
+        );
+      return activeMock || null;
+    }
+    return null;
   }
 }
 
@@ -115,15 +120,18 @@ export async function getRouteDeliveries(picklistId: string): Promise<Delivery[]
       .select('*, party:parties(*), invoice:invoices(*), items:delivery_items(*)')
       .eq('picklist_id', picklistId)
       .order('sequence_order', { ascending: true });
-    if (!error && data && data.length > 0) {
+    if (!error && data) {
       return data as Delivery[];
     }
   } catch {
     // fallback
   }
 
-  const deliveries = mockStore.getDeliveries().filter((d) => d.picklist_id === picklistId);
-  return deliveries as Delivery[];
+  if (isMockMode()) {
+    const deliveries = mockStore.getDeliveries().filter((d) => d.picklist_id === picklistId);
+    return deliveries as Delivery[];
+  }
+  return [];
 }
 
 /** Get a single delivery with all details */
@@ -145,8 +153,8 @@ export async function getDeliveryDetail(deliveryId: string): Promise<Delivery | 
     // ignore
   }
 
-  // 2. Fallback to mockStore if not found in Supabase
-  if (!delivery) {
+  // 2. Fallback to mockStore ONLY in mock mode
+  if (!delivery && isMockMode()) {
     const deliveries = mockStore.getDeliveries();
     const found = deliveries.find((d: Delivery) => d.id === deliveryId);
     if (found) {
@@ -457,27 +465,29 @@ export async function startRoute(picklistId: string, workerId?: string, _workerN
   }
 
   // Sync mockStore and evaluate local stock shortages for offline fallback/consistency
-  const pl = mockStore.getPicklists().find((p) => p.id === picklistId);
-  if (pl) {
-    const assignedWorker = workerId || pl.worker_id;
+  if (isMockMode()) {
+    const pl = mockStore.getPicklists().find((p) => p.id === picklistId);
+    if (pl) {
+      const assignedWorker = workerId || pl.worker_id;
 
-    mockStore.savePicklist({
-      ...pl,
-      status: 'in_progress',
-      started_at: pl.started_at || new Date().toISOString(),
-      worker_id: assignedWorker || pl.worker_id,
-    });
-  }
-
-  // Update mock deliveries status to out_for_delivery
-  mockStore.getDeliveries()
-    .filter((d) => d.picklist_id === picklistId && d.status === 'pending')
-    .forEach((d) => {
-      mockStore.saveDelivery({
-        id: d.id,
-        status: 'out_for_delivery',
+      mockStore.savePicklist({
+        ...pl,
+        status: 'in_progress',
+        started_at: pl.started_at || new Date().toISOString(),
+        worker_id: assignedWorker || pl.worker_id,
       });
-    });
+    }
+
+    // Update mock deliveries status to out_for_delivery
+    mockStore.getDeliveries()
+      .filter((d) => d.picklist_id === picklistId && d.status === 'pending')
+      .forEach((d) => {
+        mockStore.saveDelivery({
+          id: d.id,
+          status: 'out_for_delivery',
+        });
+      });
+  }
 }
 
 /** End a route — finalize picklist, compute totals */
@@ -496,8 +506,10 @@ export async function endRoute(picklistId: string): Promise<void> {
     // fallback
   }
 
-  // 2. Also check mockStore deliveries
-  const mockDeliveries = mockStore.getDeliveries().filter((d) => d.picklist_id === picklistId);
+  // 2. Also check mockStore deliveries ONLY in mock mode
+  const mockDeliveries = isMockMode()
+    ? mockStore.getDeliveries().filter((d) => d.picklist_id === picklistId)
+    : [];
   const combinedDeliveries = dbDeliveries.length > 0 ? dbDeliveries : mockDeliveries;
 
   let totalCollected = 0;
@@ -562,20 +574,22 @@ export async function endRoute(picklistId: string): Promise<void> {
     console.warn('Could not update picklist in Supabase:', err);
   }
 
-  // Update mockStore
-  const pl = mockStore.getPicklists().find((p) => p.id === picklistId);
-  if (pl) {
-    mockStore.savePicklist({
-      ...pl,
-      status: 'completed',
-      completed_at: now,
-      completed_parties: completedParties,
-      total_collected: totalCollected,
-      total_cash: totalCash,
-      total_upi: totalUpi,
-      total_cheque: totalCheque,
-      total_credit: totalCredit,
-    });
+  // Update mockStore ONLY in mock mode
+  if (isMockMode()) {
+    const pl = mockStore.getPicklists().find((p) => p.id === picklistId);
+    if (pl) {
+      mockStore.savePicklist({
+        ...pl,
+        status: 'completed',
+        completed_at: now,
+        completed_parties: completedParties,
+        total_collected: totalCollected,
+        total_cash: totalCash,
+        total_upi: totalUpi,
+        total_cheque: totalCheque,
+        total_credit: totalCredit,
+      });
+    }
   }
 
   // Audit log: route completed with financial summary
@@ -666,53 +680,52 @@ export async function completePartyDelivery(input: CompleteDeliveryInput): Promi
     throw new Error(`Delivery completion failed: ${error.message}`);
   }
 
-  // Sync mockStore as fallback
-  for (const item of input.deliveredItems) {
-    mockStore.updateDeliveryItem(item.delivery_item_id, {
-      delivered_qty: item.delivered_qty,
-      delivered_free_qty: item.delivered_free_qty,
-      returned_qty: item.returned_qty,
-      returned_free_qty: item.returned_free_qty,
-      damaged_qty: item.damaged_qty,
-      damaged_free_qty: item.damaged_free_qty,
+  // Sync mockStore as fallback ONLY in mock mode
+  if (isMockMode()) {
+    for (const item of input.deliveredItems) {
+      mockStore.updateDeliveryItem(item.delivery_item_id, {
+        delivered_qty: item.delivered_qty,
+        delivered_free_qty: item.delivered_free_qty,
+        returned_qty: item.returned_qty,
+        returned_free_qty: item.returned_free_qty,
+        damaged_qty: item.damaged_qty,
+        damaged_free_qty: item.damaged_free_qty,
+      });
+    }
+
+    const resultStatus = data?.status || 'delivered';
+    const rpcDeliveredAmount = data?.delivered_amount;
+    const deliveryTotalAmount = targetDel ? Number((targetDel as any).total_amount || 0) : 0;
+    const finalDeliveredAmount = rpcDeliveredAmount > 0
+      ? rpcDeliveredAmount
+      : deliveryTotalAmount > 0
+      ? deliveryTotalAmount
+      : input.payment.amount;
+
+    mockStore.saveDelivery({
+      id: input.deliveryId,
+      status: resultStatus,
+      delivered_at: new Date().toISOString(),
+      delivered_amount: finalDeliveredAmount,
+      collected_amount: input.payment.mode === 'credit' ? 0 : input.payment.amount,
+      payment_mode: input.payment.mode,
+    });
+
+    mockStore.savePayment({
+      delivery_id: input.deliveryId,
+      party_id: input.partyId,
+      invoice_id: input.invoiceId,
+      worker_id: input.workerId,
+      amount: input.payment.amount,
+      payment_mode: input.payment.mode,
+      payment_date: getLocalDateString(),
+      cheque_number: input.payment.cheque_number,
+      cheque_date: input.payment.cheque_date,
+      cheque_bank: input.payment.cheque_bank,
+      notes: input.payment.notes,
+      status: input.payment.mode === 'credit' ? 'pending' : 'collected',
     });
   }
-
-  const resultStatus = data?.status || 'delivered';
-  // AUTHORITATIVE: Use delivered_amount from RPC response (post-migration this equals total_amount for full deliveries)
-  // Fallback chain: RPC result → delivery total_amount (invoice value) → payment amount
-  // Do NOT use raw item-sum as delivered_amount; that caused the ₹141.11 Udhari bug.
-  const rpcDeliveredAmount = data?.delivered_amount;
-  const deliveryTotalAmount = targetDel ? Number((targetDel as any).total_amount || 0) : 0;
-  const finalDeliveredAmount = rpcDeliveredAmount > 0
-    ? rpcDeliveredAmount
-    : deliveryTotalAmount > 0
-    ? deliveryTotalAmount
-    : input.payment.amount;
-
-  mockStore.saveDelivery({
-    id: input.deliveryId,
-    status: resultStatus,
-    delivered_at: new Date().toISOString(),
-    delivered_amount: finalDeliveredAmount,
-    collected_amount: input.payment.mode === 'credit' ? 0 : input.payment.amount,
-    payment_mode: input.payment.mode,
-  });
-
-  mockStore.savePayment({
-    delivery_id: input.deliveryId,
-    party_id: input.partyId,
-    invoice_id: input.invoiceId,
-    worker_id: input.workerId,
-    amount: input.payment.amount,
-    payment_mode: input.payment.mode,
-    payment_date: getLocalDateString(),
-    cheque_number: input.payment.cheque_number,
-    cheque_date: input.payment.cheque_date,
-    cheque_bank: input.payment.cheque_bank,
-    notes: input.payment.notes,
-    status: input.payment.mode === 'credit' ? 'pending' : 'collected',
-  });
 
     // 8. Trigger Realtime Notification
     try {
@@ -801,14 +814,16 @@ export async function closeRouteReconciliation(
     throw new Error(`Route reconciliation failed: ${error.message}`);
   }
 
-  // Sync mockStore
-  const pl = mockStore.getPicklists().find((p) => p.id === picklistId);
-  if (pl) {
-    mockStore.savePicklist({
-      ...pl,
-      status: 'completed',
-      completed_at: new Date().toISOString(),
-    });
+  // Sync mockStore ONLY in mock mode
+  if (isMockMode()) {
+    const pl = mockStore.getPicklists().find((p) => p.id === picklistId);
+    if (pl) {
+      mockStore.savePicklist({
+        ...pl,
+        status: 'completed',
+        completed_at: new Date().toISOString(),
+      });
+    }
   }
 
   return data;
@@ -845,14 +860,16 @@ export async function submitRouteCheckin(input: SubmitRouteCheckinInput): Promis
     throw new Error(`Route check-in failed: ${error.message}`);
   }
 
-  // Sync mockStore
-  const pl = mockStore.getPicklists().find((p) => p.id === input.picklistId);
-  if (pl) {
-    mockStore.savePicklist({
-      ...pl,
-      status: (data?.status as any) || 'completed',
-      completed_at: data?.status === 'completed' ? new Date().toISOString() : pl.completed_at,
-    });
+  // Sync mockStore ONLY in mock mode
+  if (isMockMode()) {
+    const pl = mockStore.getPicklists().find((p) => p.id === input.picklistId);
+    if (pl) {
+      mockStore.savePicklist({
+        ...pl,
+        status: (data?.status as any) || 'completed',
+        completed_at: data?.status === 'completed' ? new Date().toISOString() : pl.completed_at,
+      });
+    }
   }
 
   return data;

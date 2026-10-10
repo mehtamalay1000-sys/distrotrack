@@ -1,4 +1,4 @@
-import { supabase } from '@/lib/supabase';
+import { supabase, isMockMode } from '@/lib/supabase';
 import { mockStore, isPaymentLinkedToActiveRoute } from '@/lib/mockStore';
 import type { Payment, PaymentMode, FinancialSummary } from '@/lib/database.types';
 
@@ -37,7 +37,7 @@ export async function fetchPendingCreditPayments(filter?: PendingCreditFilter): 
       p_worker_id: filter?.workerId || null,
     });
 
-    if (!error && Array.isArray(pendingRpc) && pendingRpc.length > 0) {
+    if (!error && Array.isArray(pendingRpc)) {
       return pendingRpc.map((item: any) => ({
         id: `credit-${item.delivery_id}`,
         delivery_id: item.delivery_id,
@@ -101,10 +101,14 @@ export async function fetchPendingCreditPayments(filter?: PendingCreditFilter): 
       })) as Payment[];
     }
   } catch (err) {
-    console.warn('[paymentService] get_pending_credit_deliveries RPC failed, using mockStore:', err);
+    console.warn('[paymentService] get_pending_credit_deliveries RPC failed:', err);
   }
 
-  // Fallback to mockStore
+  // Fallback to mockStore ONLY in explicit mock mode
+  if (!isMockMode()) {
+    return [];
+  }
+
   const mockDeliveries = mockStore.getDeliveries();
   const mockParties = mockStore.getParties();
   const mockRoutes = mockStore.getRoutes();
@@ -178,6 +182,7 @@ export async function fetchPendingCreditPayments(filter?: PendingCreditFilter): 
 
 export async function getPayments(): Promise<Payment[]> {
   let recordedPayments: Payment[] = [];
+  let fetchSucceeded = false;
   try {
     const { data, error } = await supabase
       .from('payments')
@@ -194,13 +199,15 @@ export async function getPayments(): Promise<Payment[]> {
 
     if (!error && data) {
       recordedPayments = data as Payment[];
+      fetchSucceeded = true;
     }
   } catch (err) {
-    console.warn('[paymentService] Failed to load payments from Supabase, falling back to mockStore:', err);
+    console.warn('[paymentService] Failed to load payments from Supabase:', err);
   }
 
-  // Offline fallback only:
-  if (recordedPayments.length === 0) {
+  // Fallback to mockStore ONLY if Supabase fetch genuinely failed AND we are in mock mode.
+  // An authoritative 200 OK with [] rows returns [] directly.
+  if (!fetchSucceeded && isMockMode()) {
     const mockPayments = mockStore.getPayments();
     const allParties = mockStore.getParties();
     const allRoutes = mockStore.getRoutes();
@@ -225,6 +232,7 @@ export async function getPayments(): Promise<Payment[]> {
 
 export async function getWorkerPayments(workerId: string, workerName?: string): Promise<Payment[]> {
   let recordedPayments: Payment[] = [];
+  let fetchSucceeded = false;
   try {
     const workerIds = new Set<string>([workerId]);
     if (workerName) {
@@ -254,12 +262,14 @@ export async function getWorkerPayments(workerId: string, workerName?: string): 
 
     if (!error && data) {
       recordedPayments = data as Payment[];
+      fetchSucceeded = true;
     }
   } catch (err) {
     console.warn('[paymentService] Failed to load worker payments from Supabase:', err);
   }
 
-  if (recordedPayments.length === 0) {
+  // Fallback ONLY if server query genuinely failed AND mock mode is active
+  if (!fetchSucceeded && isMockMode()) {
     recordedPayments = mockStore.getPayments().filter(
       (p) => p.worker_id === workerId || (p as any).received_by_worker_id === workerId ||
              (p.worker && p.worker.id === workerId)
@@ -277,6 +287,10 @@ export async function getWorkerPayments(workerId: string, workerName?: string): 
  * Maintains party_financial_ledger and prevents overpayment.
  */
 export async function recordPartyPayment(input: RecordPaymentInput): Promise<any> {
+  if (!input.party_id) {
+    throw new Error('Party ID is required to record a payment');
+  }
+
   const { data, error } = await supabase.rpc('record_party_payment_with_ledger', {
     p_party_id: input.party_id,
     p_amount: input.amount,
@@ -299,26 +313,28 @@ export async function recordPartyPayment(input: RecordPaymentInput): Promise<any
     throw new Error(`Payment recording failed: ${error.message}`);
   }
 
-  // Sync to mockStore for offline fallback
-  mockStore.savePayment({
-    id: data?.payment_id || `pay_${Date.now()}`,
-    party_id: input.party_id,
-    delivery_id: input.delivery_id || null,
-    invoice_id: input.invoice_id || null,
-    worker_id: input.worker_id || null,
-    received_by_worker_id: input.worker_id || null,
-    amount: input.amount,
-    payment_mode: input.payment_mode,
-    reference_number: input.reference_number || null,
-    cheque_number: input.cheque_number || null,
-    cheque_date: input.cheque_date || null,
-    cheque_bank: input.cheque_bank || null,
-    notes: input.notes || null,
-    payment_date: input.payment_date || new Date().toISOString().split('T')[0],
-    status: data?.status || (input.payment_mode === 'cheque' ? 'pending' : 'collected'),
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  });
+  // Sync to mockStore only in mock mode
+  if (isMockMode()) {
+    mockStore.savePayment({
+      id: data?.payment_id || `pay_${Date.now()}`,
+      party_id: input.party_id,
+      delivery_id: input.delivery_id || null,
+      invoice_id: input.invoice_id || null,
+      worker_id: input.worker_id || null,
+      received_by_worker_id: input.worker_id || null,
+      amount: input.amount,
+      payment_mode: input.payment_mode,
+      reference_number: input.reference_number || null,
+      cheque_number: input.cheque_number || null,
+      cheque_date: input.cheque_date || null,
+      cheque_bank: input.cheque_bank || null,
+      notes: input.notes || null,
+      payment_date: input.payment_date || new Date().toISOString().split('T')[0],
+      status: data?.status || (input.payment_mode === 'cheque' ? 'pending' : 'collected'),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+  }
 
   return data;
 }

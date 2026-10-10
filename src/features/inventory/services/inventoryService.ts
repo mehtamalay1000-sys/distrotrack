@@ -12,7 +12,7 @@
  * 5. Primary source is Supabase `inventory_movements` with graceful offline fallback to `mockStore`.
  */
 
-import { supabase } from '@/lib/supabase';
+import { supabase, isMockMode } from '@/lib/supabase';
 import { mockStore } from '@/lib/mockStore';
 import { getProducts } from '@/features/products/services/productService';
 import { findProductMasterEntry } from '@/features/products/data/productMaster';
@@ -155,7 +155,10 @@ export async function getAllInventoryMovements(): Promise<InventoryMovement[]> {
     console.warn('[INVENTORY] Supabase inventory_movements query failed, falling back to mockStore:', err);
   }
 
-  return mockStore.getInventoryMovements();
+  if (isMockMode()) {
+    return mockStore.getInventoryMovements();
+  }
+  return [];
 }
 
 /**

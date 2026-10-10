@@ -8,6 +8,7 @@ import type {
 import { registerProductMasterEntry, findSapReferenceCatalog } from '@/features/products/data/productMaster';
 import { HISTORICAL_SALES_CATALOG } from '@/features/products/data/historicalSalesCatalog';
 import { getLocalDateString } from '@/shared/utils/format';
+import { isMockMode } from '@/lib/supabase';
 
 const INITIAL_WORKERS: Worker[] = [
   {
@@ -36,31 +37,8 @@ const INITIAL_WORKERS: Worker[] = [
   },
 ];
 
-const INITIAL_ROUTES: Route[] = [
-  // ── Worker 1: Mahendra Rashinkar (w-mahindra) — Sangamner 1 to 6 ──
-  { id: 'r-sangamner-1', code: 'SANGAMNER_1', name: 'SANGAMNER 1', description: null, assigned_worker_id: 'w-mahindra', status: 'active', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
-  { id: 'r-sangamner-2', code: 'SANGAMNER_2', name: 'SANGAMNER 2', description: null, assigned_worker_id: 'w-mahindra', status: 'active', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
-  { id: 'r-sangamner-3', code: 'SANGAMNER_3', name: 'SANGAMNER 3', description: null, assigned_worker_id: 'w-mahindra', status: 'active', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
-  { id: 'r-sangamner-4', code: 'SANGAMNER_4', name: 'SANGAMNER 4', description: null, assigned_worker_id: 'w-mahindra', status: 'active', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
-  { id: 'r-sangamner-5', code: 'SANGAMNER_5', name: 'SANGAMNER 5', description: null, assigned_worker_id: 'w-mahindra', status: 'active', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
-  { id: 'r-sangamner-6', code: 'SANGAMNER_6', name: 'SANGAMNER 6', description: null, assigned_worker_id: 'w-mahindra', status: 'active', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+const INITIAL_ROUTES: Route[] = [];
 
-  // ── Worker 2: Balu Murtadak (w-balu) — Rajur, Akole, Kotul, etc. ──
-  { id: 'r-rajur-1', code: 'RAJUR_1', name: 'RAJUR 1', description: null, assigned_worker_id: 'w-balu', status: 'active', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
-  { id: 'r-rajur-2', code: 'RAJUR_2', name: 'RAJUR 2', description: null, assigned_worker_id: 'w-balu', status: 'active', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
-  { id: 'r-aashvi-1', code: 'AASHVI_1', name: 'AASHVI 1', description: null, assigned_worker_id: 'w-balu', status: 'active', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
-  { id: 'r-akole-1', code: 'AKOLE_1', name: 'AKOLE 1', description: null, assigned_worker_id: 'w-balu', status: 'active', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
-  { id: 'r-ghulewadi', code: 'GHULEWADI', name: 'GHULEWADI', description: null, assigned_worker_id: 'w-balu', status: 'active', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
-  { id: 'r-akole-2', code: 'AKOLE_2', name: 'AKOLE 2', description: null, assigned_worker_id: 'w-balu', status: 'active', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
-  { id: 'r-kotul-1', code: 'KOTUL_1', name: 'KOTUL 1', description: null, assigned_worker_id: 'w-balu', status: 'active', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
-  { id: 'r-kotul-2', code: 'KOTUL_2', name: 'KOTUL 2', description: null, assigned_worker_id: 'w-balu', status: 'active', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
-  { id: 'r-sakur', code: 'SAKUR', name: 'SAKUR', description: null, assigned_worker_id: 'w-balu', status: 'active', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
-  { id: 'r-jorve', code: 'JORVE', name: 'JORVE', description: null, assigned_worker_id: 'w-balu', status: 'active', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
-  { id: 'r-saykhindi', code: 'SAYKHINDI', name: 'SAYKHINDI', description: null, assigned_worker_id: 'w-balu', status: 'active', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
-  { id: 'r-aklapur', code: 'AKLAPUR', name: 'AKLAPUR', description: null, assigned_worker_id: 'w-balu', status: 'active', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
-  { id: 'r-samsherpur', code: 'SAMSHERPUR', name: 'SAMSHERPUR', description: null, assigned_worker_id: 'w-balu', status: 'active', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
-  { id: 'r-kumbephal', code: 'KUMBEPHAL', name: 'KUMBEPHAL', description: null, assigned_worker_id: 'w-balu', status: 'active', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
-];
 
 const INITIAL_PARTIES: Party[] = [];
 const INITIAL_PRODUCTS: Product[] = [];
@@ -155,8 +133,9 @@ class MockStore {
       return;
     }
     try {
-      // Clean reset: purge all previous legacy stores containing old test products
+      // Clean reset: purge all obsolete transactional test stores
       const legacyKeys = [
+        'distrotrack_v6_clean',
         'distrotrack_clean_v5',
         'distrotrack_clean_v4',
         'distrotrack_clean_v3',
@@ -171,7 +150,13 @@ class MockStore {
         }
       }
 
-      let stored = localStorage.getItem('distrotrack_v6_clean');
+      // In production / live mode, mockStore must strictly start clean with empty state
+      if (!isMockMode()) {
+        this.resetToDefaults();
+        return;
+      }
+
+      let stored = localStorage.getItem('distrotrack_dev_mock');
       if (!stored) {
         this.resetToDefaults();
         return;
@@ -273,9 +258,13 @@ class MockStore {
     if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
       return;
     }
+    // NEVER save mock data to localStorage in production mode!
+    if (!isMockMode()) {
+      return;
+    }
     try {
       localStorage.setItem(
-        'distrotrack_v6_clean',
+        'distrotrack_dev_mock',
         JSON.stringify({
           workers: this.workers,
           routes: this.routes,

@@ -1,9 +1,14 @@
+import './lib/storageCleanup';
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { App } from './app/App';
 import './index.css';
-// Proactively clean up any previously registered Service Workers, caches, or offline DBs
+import { runStorageCleanup } from './lib/storageCleanup';
+
+// Run proactive storage cleanup on startup (PRESERVES theme and auth session)
 if (typeof window !== 'undefined') {
+  runStorageCleanup();
+
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.getRegistrations().then((registrations) => {
       for (const registration of registrations) {
@@ -27,7 +32,30 @@ if (typeof window !== 'undefined') {
       // Ignore if already absent
     }
   }
+
+  // Obsolete test transactional store cleanup (PRESERVES theme and auth session)
+  if (typeof localStorage !== 'undefined') {
+    const obsoleteTransactionalKeys = [
+      'distrotrack_v6_clean',
+      'distrotrack_clean_v5',
+      'distrotrack_clean_v4',
+      'distrotrack_clean_v3',
+      'distrotrack_clean_v2',
+      'distrotrack_storage_v2',
+      'distrotrack_mock_store',
+      'distrotrack_store',
+      'distrotrack_dev_mock',
+    ];
+    for (const key of obsoleteTransactionalKeys) {
+      try {
+        localStorage.removeItem(key);
+      } catch {
+        // Ignore
+      }
+    }
+  }
 }
+
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

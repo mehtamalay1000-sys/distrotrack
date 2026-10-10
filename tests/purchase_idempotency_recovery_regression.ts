@@ -37,23 +37,24 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import {
-  parseSapPurchaseFile,
-  validateAndMatchPurchaseRows,
-  confirmPurchaseImport,
-  CANONICAL_RECOVERY_ITEMS,
-  recoverMissingPurchaseTransactions,
-  extractSapProductDetails,
-  type ParsedPurchaseRow,
-} from '../src/features/inventory/services/purchaseImportService';
-import { mockStore } from '../src/lib/mockStore';
-import {
-  findProductMasterEntry,
-  resetProductMasterMemory,
-  registerProductMasterEntry,
-  SAP_PRODUCT_MASTER,
-} from '../src/features/products/data/productMaster';
-import { getOperationalInventoryData } from '../src/features/inventory/services/inventoryService';
+
+// Pre-load .env into process.env before dynamic imports
+const envPath = path.resolve('.env');
+if (fs.existsSync(envPath)) {
+  const content = fs.readFileSync(envPath, 'utf8');
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    const eqIdx = trimmed.indexOf('=');
+    if (eqIdx > 0 && !trimmed.startsWith('#')) {
+      const k = trimmed.slice(0, eqIdx).trim();
+      const v = trimmed.slice(eqIdx + 1).trim();
+      process.env[k] = v;
+    }
+  }
+}
+process.env.VITE_USE_MOCK = 'true';
+
+type ParsedPurchaseRow = any;
 
 interface TestResult {
   num: number;
@@ -77,6 +78,23 @@ async function runRegression() {
   console.log('================================================================');
   console.log('   SAP PURCHASE IDEMPOTENCY & RECOVERY 31-POINT REGRESSION SUITE');
   console.log('================================================================\n');
+
+  const {
+    parseSapPurchaseFile,
+    validateAndMatchPurchaseRows,
+    confirmPurchaseImport,
+    CANONICAL_RECOVERY_ITEMS,
+    recoverMissingPurchaseTransactions,
+    extractSapProductDetails,
+  } = await import('../src/features/inventory/services/purchaseImportService');
+  const { mockStore } = await import('../src/lib/mockStore');
+  const {
+    findProductMasterEntry,
+    resetProductMasterMemory,
+    registerProductMasterEntry,
+    SAP_PRODUCT_MASTER,
+  } = await import('../src/features/products/data/productMaster');
+  const { getOperationalInventoryData } = await import('../src/features/inventory/services/inventoryService');
 
   // Load real purchase.xlsx
   const filePath = path.resolve(process.cwd(), 'purchase.xlsx');

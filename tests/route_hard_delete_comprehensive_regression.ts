@@ -16,6 +16,7 @@ if (fs.existsSync(envPath)) {
     }
   }
 }
+process.env.VITE_USE_MOCK = 'true';
 
 let passed = 0;
 let failed = 0;

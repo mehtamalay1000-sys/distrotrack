@@ -4,8 +4,9 @@ import { toast } from 'sonner';
 import { X, Trash2, Plus, Edit2, User, ChevronDown, ChevronRight } from 'lucide-react';
 import { getParties } from '@/features/parties/services/partyService';
 import { getProducts } from '@/features/products/services/productService';
+import { getDeliveries } from '@/features/deliveries/services/deliveryService';
 import { mockStore } from '@/lib/mockStore';
-import { supabase } from '@/lib/supabase';
+import { supabase, isMockMode } from '@/lib/supabase';
 import { formatCurrency, getLocalDateString } from '@/shared/utils/format';
 import type { Route, DeliveryItem } from '@/lib/database.types';
 
@@ -22,18 +23,27 @@ export function AdminRouteEditorModal({ route, onClose }: AdminRouteEditorModalP
 
   const { data: allParties = [] } = useQuery({ queryKey: ['parties'], queryFn: getParties });
   const { data: allProducts = [] } = useQuery({ queryKey: ['products'], queryFn: () => getProducts() });
-
-  // Get all deliveries associated with this route
-  const deliveries = mockStore.getDeliveries().filter((d) => {
-    const p = mockStore.getParties().find((party) => party.id === d.party_id);
-    return d.picklist?.route_id === route.id || p?.route_id === route.id || p?.route?.code === route.code;
+  const { data: allDeliveries = [] } = useQuery({ queryKey: ['deliveries'], queryFn: getDeliveries });
+  const { data: allDeliveryItems = [] } = useQuery({
+    queryKey: ['delivery-items', route.id],
+    queryFn: async () => {
+      try {
+        const { data, error } = await supabase.from('delivery_items').select('*');
+        if (!error && data) return data as DeliveryItem[];
+      } catch {}
+      return isMockMode() ? mockStore.getDeliveryItems() : [];
+    },
   });
 
-  const deliveryItems = mockStore.getDeliveryItems();
+  // Get all deliveries associated with this route
+  const deliveries = allDeliveries.filter((d) => {
+    const p = allParties.find((party) => party.id === d.party_id);
+    return d.picklist?.route_id === route.id || (d as any).route_id === route.id || p?.route_id === route.id || p?.route?.code === route.code;
+  });
 
   // Helper to get delivery items for a delivery
   const getItemsForDelivery = (deliveryId: string) => {
-    return deliveryItems.filter((i) => i.delivery_id === deliveryId);
+    return allDeliveryItems.filter((i) => i.delivery_id === deliveryId);
   };
 
   // Add a party to the route
@@ -44,21 +54,29 @@ export function AdminRouteEditorModal({ route, onClose }: AdminRouteEditorModalP
       const party = allParties.find((p) => p.id === addingPartyId);
       if (!party) return;
 
-      // Create new delivery record
-      mockStore.saveDelivery({
+      // Create new delivery record in Supabase
+      const newDel = {
         party_id: party.id,
         worker_id: route.assigned_worker_id || null,
-        status: 'pending',
+        status: 'pending' as const,
         total_amount: 0,
         delivery_date: getLocalDateString(),
         notes: `Added to route ${route.name}`,
-      });
+      };
+      const { data: insertedDel } = await supabase.from('deliveries').insert(newDel).select().maybeSingle();
+
+      if (isMockMode()) {
+        mockStore.saveDelivery(insertedDel || newDel);
+      }
 
       // Update party route_id
       await supabase.from('parties').update({ route_id: route.id }).eq('id', party.id);
-      mockStore.saveParty({ ...party, route_id: route.id });
+      if (isMockMode()) {
+        mockStore.saveParty({ ...party, route_id: route.id });
+      }
 
       qc.invalidateQueries({ queryKey: ['deliveries'] });
+      qc.invalidateQueries({ queryKey: ['delivery-items', route.id] });
       qc.invalidateQueries({ queryKey: ['routes'] });
       qc.invalidateQueries({ queryKey: ['worker-today-route'] });
       toast.success(`Party ${party.name} added to route!`);
@@ -72,10 +90,13 @@ export function AdminRouteEditorModal({ route, onClose }: AdminRouteEditorModalP
   const handleRemovePartyFromRoute = async (deliveryId: string, partyName: string) => {
     if (!confirm(`Are you sure you want to remove ${partyName} from this route?`)) return;
     try {
-      mockStore.deleteDelivery(deliveryId);
       await supabase.from('deliveries').delete().eq('id', deliveryId);
+      if (isMockMode()) {
+        mockStore.deleteDelivery(deliveryId);
+      }
 
       qc.invalidateQueries({ queryKey: ['deliveries'] });
+      qc.invalidateQueries({ queryKey: ['delivery-items', route.id] });
       qc.invalidateQueries({ queryKey: ['routes'] });
       qc.invalidateQueries({ queryKey: ['worker-today-route'] });
       toast.success(`Removed ${partyName} from route.`);
@@ -85,36 +106,54 @@ export function AdminRouteEditorModal({ route, onClose }: AdminRouteEditorModalP
   };
 
   // Update item ordered quantity
-  const handleUpdateItemQty = (item: DeliveryItem, newQty: number) => {
+  const handleUpdateItemQty = async (item: DeliveryItem, newQty: number) => {
     const qty = Math.max(0, newQty);
     const amount = qty * Number(item.rate || 0);
 
-    mockStore.updateDeliveryItem(item.id, {
-      ordered_qty: qty,
-      delivered_qty: qty,
-      amount,
-    });
+    try {
+      await supabase.from('delivery_items').update({
+        ordered_qty: qty,
+        delivered_qty: qty,
+        amount,
+      }).eq('id', item.id);
+    } catch {}
+
+    if (isMockMode()) {
+      mockStore.updateDeliveryItem(item.id, {
+        ordered_qty: qty,
+        delivered_qty: qty,
+        amount,
+      });
+    }
 
     // Update parent delivery total amount
-    recalculateDeliveryTotal(item.delivery_id);
+    await recalculateDeliveryTotal(item.delivery_id);
 
     qc.invalidateQueries({ queryKey: ['deliveries'] });
+    qc.invalidateQueries({ queryKey: ['delivery-items', route.id] });
     qc.invalidateQueries({ queryKey: ['worker-today-route'] });
     toast.success(`Updated ${item.product_name} quantity to ${qty}`);
   };
 
   // Remove item from delivery
-  const handleDeleteItem = (itemId: string, deliveryId: string) => {
-    mockStore.deleteDeliveryItem(itemId);
-    recalculateDeliveryTotal(deliveryId);
+  const handleDeleteItem = async (itemId: string, deliveryId: string) => {
+    try {
+      await supabase.from('delivery_items').delete().eq('id', itemId);
+    } catch {}
+
+    if (isMockMode()) {
+      mockStore.deleteDeliveryItem(itemId);
+    }
+    await recalculateDeliveryTotal(deliveryId);
 
     qc.invalidateQueries({ queryKey: ['deliveries'] });
+    qc.invalidateQueries({ queryKey: ['delivery-items', route.id] });
     qc.invalidateQueries({ queryKey: ['worker-today-route'] });
     toast.success('Item removed from bill');
   };
 
   // Add product to delivery bill
-  const handleAddProductToDelivery = (deliveryId: string) => {
+  const handleAddProductToDelivery = async (deliveryId: string) => {
     const prodId = addingProductIdMap[deliveryId];
     if (!prodId) return;
 
@@ -124,7 +163,7 @@ export function AdminRouteEditorModal({ route, onClose }: AdminRouteEditorModalP
     const rate = Number(prod.rate || prod.mrp || 100);
     const amount = rate * 1;
 
-    mockStore.saveDeliveryItem({
+    const newItem = {
       delivery_id: deliveryId,
       product_id: prod.id,
       sku: prod.sku,
@@ -133,11 +172,23 @@ export function AdminRouteEditorModal({ route, onClose }: AdminRouteEditorModalP
       delivered_qty: 1,
       rate,
       amount,
-    });
+    };
 
-    recalculateDeliveryTotal(deliveryId);
+    try {
+      const { data: insertedItem } = await supabase.from('delivery_items').insert(newItem).select().maybeSingle();
+      if (isMockMode()) {
+        mockStore.saveDeliveryItem(insertedItem || newItem);
+      }
+    } catch {
+      if (isMockMode()) {
+        mockStore.saveDeliveryItem(newItem);
+      }
+    }
+
+    await recalculateDeliveryTotal(deliveryId);
 
     qc.invalidateQueries({ queryKey: ['deliveries'] });
+    qc.invalidateQueries({ queryKey: ['delivery-items', route.id] });
     qc.invalidateQueries({ queryKey: ['worker-today-route'] });
     toast.success(`Added ${prod.name} to bill`);
 
@@ -145,13 +196,19 @@ export function AdminRouteEditorModal({ route, onClose }: AdminRouteEditorModalP
   };
 
   // Recalculate parent delivery total amount
-  const recalculateDeliveryTotal = (deliveryId: string) => {
-    const items = mockStore.getDeliveryItems().filter((i) => i.delivery_id === deliveryId);
+  const recalculateDeliveryTotal = async (deliveryId: string) => {
+    const items = allDeliveryItems.filter((i) => i.delivery_id === deliveryId);
     const newTotal = items.reduce((sum, i) => sum + Number(i.amount || 0), 0);
-    const del = mockStore.getDeliveries().find((d) => d.id === deliveryId);
-    if (del) {
-      del.total_amount = newTotal;
-      mockStore.saveDelivery(del);
+    try {
+      await supabase.from('deliveries').update({ total_amount: newTotal }).eq('id', deliveryId);
+    } catch {}
+
+    if (isMockMode()) {
+      const del = mockStore.getDeliveries().find((d) => d.id === deliveryId);
+      if (del) {
+        del.total_amount = newTotal;
+        mockStore.saveDelivery(del);
+      }
     }
   };
 

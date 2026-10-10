@@ -1,4 +1,4 @@
-import { supabase } from '@/lib/supabase';
+import { supabase, isMockMode } from '@/lib/supabase';
 import { mockStore } from '@/lib/mockStore';
 import { getDeliveries } from '@/features/deliveries/services/deliveryService';
 import { getWorkers } from '@/features/workers/services/workerService';
@@ -162,7 +162,7 @@ export async function getDashboardStats(): Promise<DashboardStats> {
       // ignore
     }
 
-    if (!isSapFetchSuccess) {
+    if (!isSapFetchSuccess && isMockMode()) {
       sapSalesItems = mockStore.getSapSalesImportItems();
       sapImports = mockStore.getSapSalesImports();
     }
@@ -247,7 +247,7 @@ export async function getDashboardStats(): Promise<DashboardStats> {
 
     const rpcTodayCollections = Number(todaySummaryRes?.total_collected ?? 0);
     let todayCollections = rpcTodayCollections;
-    if (!todaySummaryRes && todayCollections === 0) {
+    if (!todaySummaryRes && todayCollections === 0 && isMockMode()) {
       const todayPayments = mockStore.getPayments().filter(p => (p.payment_date || '').startsWith(todayStr));
       todayCollections = todayPayments.reduce((sum, p) => sum + Number(p.amount || 0), 0);
     }
@@ -265,7 +265,7 @@ export async function getDashboardStats(): Promise<DashboardStats> {
 
     const rpcExpensesToday = Number(todaySummaryRes?.total_expenses ?? todaySummaryRes?.expenses ?? 0);
     let totalExpensesToday = rpcExpensesToday;
-    if (!todaySummaryRes && totalExpensesToday === 0) {
+    if (!todaySummaryRes && totalExpensesToday === 0 && isMockMode()) {
       const todayExpenses = mockStore.getExpenses().filter(e => (e.date || '').startsWith(todayStr));
       totalExpensesToday = todayExpenses.reduce((sum, e) => sum + Number(e.amount || 0), 0);
     }

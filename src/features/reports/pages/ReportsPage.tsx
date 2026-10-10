@@ -11,7 +11,7 @@ import { getPayments } from '@/features/payments/services/paymentService';
 import { getParties } from '@/features/parties/services/partyService';
 import { getExpenses, getRouteProfitability } from '@/features/expenses/services/expenseService';
 import { getMonthEndPurchaseMargin } from '@/features/expenses/services/monthEndProfitabilityService';
-import { supabase } from '@/lib/supabase';
+import { supabase, isMockMode } from '@/lib/supabase';
 import { mockStore } from '@/lib/mockStore';
 import * as XLSX from 'xlsx';
 import { formatCurrency, formatDate } from '@/shared/utils/format';
@@ -213,9 +213,9 @@ export function ReportsPage() {
         const { data, error } = await supabase
           .from('sap_purchase_import_items')
           .select('sku, received_qty, uom, unit_purchase_cost, total_purchase_cost, gr_status, status');
-        if (!error && data && data.length > 0) return data;
+        if (!error && data) return data;
       } catch {}
-      return mockStore.getSapPurchaseImportItems();
+      return isMockMode() ? mockStore.getSapPurchaseImportItems() : [];
     },
     enabled: reportType === 'products',
   });
@@ -264,9 +264,9 @@ export function ReportsPage() {
     queryFn: async () => {
       try {
         const { data, error } = await supabase.from('sap_sales_import_items').select('*');
-        if (!error && data && data.length > 0) return data;
+        if (!error && data) return data;
       } catch {}
-      return mockStore.getSapSalesImportItems();
+      return isMockMode() ? mockStore.getSapSalesImportItems() : [];
     },
   });
 
@@ -1472,7 +1472,7 @@ export function ReportsPage() {
                   Date: pl.date || pl.created_at,
                   'Invoice / Doc No': pl.picklist_number,
                   'Customer Code': '',
-                  'Customer Name': pl.route?.name || 'Main Route',
+                  'Customer Name': pl.route?.name || '—',
                   SKU: 'Multiple',
                   'Product Description': `${pl.total_items || 0} SKUs`,
                   Quantity: pl.total_items || 0,
@@ -1590,7 +1590,7 @@ export function ReportsPage() {
                             {formatDate(pl.date || pl.created_at)}
                           </td>
                           <td className="text-xs font-semibold text-surface-800 dark:text-surface-200">
-                            {pl.route?.name || 'Main Route'}
+                            {pl.route?.name || '—'}
                           </td>
                           <td className="text-xs text-surface-700 dark:text-surface-300">
                             {pl.worker?.name || '—'}

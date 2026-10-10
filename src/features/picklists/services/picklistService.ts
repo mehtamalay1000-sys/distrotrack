@@ -1,4 +1,4 @@
-import { supabase } from '@/lib/supabase';
+import { supabase, isMockMode } from '@/lib/supabase';
 import { mockStore } from '@/lib/mockStore';
 import type { Picklist, PicklistItem } from '@/lib/database.types';
 
@@ -9,11 +9,11 @@ export async function getPicklists(): Promise<Picklist[]> {
       .select('*, route:routes(id, name, code), worker:workers!picklists_worker_id_fkey(id, name)')
       .order('created_at', { ascending: false });
     if (error || !data) {
-      return mockStore.getPicklists();
+      return isMockMode() ? mockStore.getPicklists() : [];
     }
     return data as Picklist[];
   } catch {
-    return mockStore.getPicklists();
+    return isMockMode() ? mockStore.getPicklists() : [];
   }
 }
 
@@ -26,8 +26,10 @@ export async function getPicklist(id: string): Promise<Picklist> {
       .single();
 
     if (plErr || !picklist) {
-      const found = mockStore.getPicklists().find((pl) => pl.id === id);
-      if (found) return found;
+      if (isMockMode()) {
+        const found = mockStore.getPicklists().find((pl) => pl.id === id);
+        if (found) return found;
+      }
       throw new Error('Picklist not found');
     }
 
@@ -40,10 +42,12 @@ export async function getPicklist(id: string): Promise<Picklist> {
       ...(picklist as Picklist),
       items: (items ?? []) as PicklistItem[],
     };
-  } catch {
-    const found = mockStore.getPicklists().find((pl) => pl.id === id);
-    if (found) return found;
-    throw new Error('Picklist not found');
+  } catch (err) {
+    if (isMockMode()) {
+      const found = mockStore.getPicklists().find((pl) => pl.id === id);
+      if (found) return found;
+    }
+    throw err instanceof Error ? err : new Error('Picklist not found');
   }
 }
 
@@ -58,7 +62,9 @@ export async function assignPicklistWorker(id: string, workerId: string | null):
   } catch {
     // fallback
   }
-  mockStore.savePicklist({ id, worker_id: workerId, status: workerId ? 'assigned' : 'confirmed' });
+  if (isMockMode()) {
+    mockStore.savePicklist({ id, worker_id: workerId, status: workerId ? 'assigned' : 'confirmed' });
+  }
 }
 
 export async function updatePicklistStatus(id: string, status: Picklist['status'], workerId?: string): Promise<void> {
@@ -73,7 +79,9 @@ export async function updatePicklistStatus(id: string, status: Picklist['status'
   } catch {
     // fallback
   }
-  mockStore.savePicklist({ id, status, worker_id: workerId });
+  if (isMockMode()) {
+    mockStore.savePicklist({ id, status, worker_id: workerId });
+  }
 }
 
 export async function deletePicklist(id: string): Promise<void> {
@@ -107,7 +115,9 @@ export async function deletePicklist(id: string): Promise<void> {
     console.error('Error cascading picklist deletion:', err);
   }
 
-  mockStore.deletePicklist(id);
+  if (isMockMode()) {
+    mockStore.deletePicklist(id);
+  }
 }
 
 export async function adminAuthorizeRouteReconciliation(
@@ -125,8 +135,8 @@ export async function adminAuthorizeRouteReconciliation(
     throw new Error(`Reconciliation authorization failed: ${error.message}`);
   }
 
-  // Update mockStore
-  if (action === 'approve') {
+  // Update mockStore ONLY in mock mode
+  if (isMockMode() && action === 'approve') {
     const pl = mockStore.getPicklists().find((p) => p.id === picklistId);
     if (pl) {
       mockStore.savePicklist({

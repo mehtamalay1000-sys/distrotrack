@@ -1,7 +1,7 @@
 import { useAuth } from '@/app/AuthProvider';
 import { useQuery } from '@tanstack/react-query';
 import { CheckCircle2, Clock, Loader2, ChevronDown, ChevronUp, MapPin } from 'lucide-react';
-import { supabase } from '@/lib/supabase';
+import { supabase, isMockMode } from '@/lib/supabase';
 import { mockStore } from '@/lib/mockStore';
 import { formatCurrency } from '@/shared/utils/format';
 import type { Picklist, Delivery } from '@/lib/database.types';
@@ -22,6 +22,10 @@ async function getWorkerHistory(workerId: string): Promise<Picklist[]> {
     }
   } catch {
     // fallback
+  }
+
+  if (!isMockMode()) {
+    return dbPicklists;
   }
 
   const mockPicklists = mockStore.getPicklists().filter(

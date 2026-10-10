@@ -1,102 +1,115 @@
-import { supabase } from '@/lib/supabase';
+import { supabase, isMockMode } from '@/lib/supabase';
 import { mockStore } from '@/lib/mockStore';
 import type { Worker } from '@/lib/database.types';
 
 export async function getWorkers(): Promise<Worker[]> {
-  const mockWorkers = mockStore.getWorkers();
   try {
     const { data, error } = await supabase
       .from('workers')
       .select('*')
       .order('name');
-    if (error || !data || data.length === 0) {
-      return mockWorkers;
-    }
-    // Merge Supabase workers with local store targets to prevent null overwrites
-    return (data as Worker[]).map((supaW) => {
-      const localMatch = mockWorkers.find(
-        (mw) => mw.id === supaW.id || mw.name.trim().toLowerCase() === supaW.name.trim().toLowerCase()
-      );
-      return {
+    if (!error && data) {
+      return (data as Worker[]).map((supaW) => ({
         ...supaW,
         monthly_target: supaW.monthly_target !== null && supaW.monthly_target !== undefined
           ? Number(supaW.monthly_target)
-          : localMatch?.monthly_target ?? 50000,
-      };
-    });
-  } catch {
-    return mockWorkers;
+          : 50000,
+      }));
+    }
+  } catch (err) {
+    console.warn('[workerService] Supabase getWorkers failed:', err);
   }
+
+  if (isMockMode()) {
+    return mockStore.getWorkers();
+  }
+  return [];
 }
 
 export async function getWorker(id: string): Promise<Worker> {
-  const mockWorkers = mockStore.getWorkers();
   try {
     const { data, error } = await supabase
       .from('workers')
       .select('*')
       .eq('id', id)
       .single();
-    if (error || !data) {
-      const found = mockWorkers.find((w) => w.id === id);
-      if (found) return found;
-      throw new Error('Worker not found');
+    if (!error && data) {
+      return {
+        ...(data as Worker),
+        monthly_target: (data as Worker).monthly_target ?? 50000,
+      };
     }
-    const localMatch = mockWorkers.find((mw) => mw.id === id || mw.name.toLowerCase() === (data as Worker).name.toLowerCase());
-    return {
-      ...(data as Worker),
-      monthly_target: (data as Worker).monthly_target ?? localMatch?.monthly_target ?? 50000,
-    };
   } catch {
-    const found = mockWorkers.find((w) => w.id === id);
-    if (found) return found;
-    throw new Error('Worker not found');
+    // ignore
   }
+
+  if (isMockMode()) {
+    const found = mockStore.getWorkers().find((w) => w.id === id);
+    if (found) return found;
+  }
+  throw new Error(`Worker with id ${id} not found`);
 }
 
-export async function createWorker(input: { name: string; phone?: string; email?: string; notes?: string; monthly_target?: number }): Promise<Worker> {
-  const localSaved = mockStore.saveWorker(input);
-  try {
-    const { data, error } = await supabase
-      .from('workers')
-      .insert({ name: input.name, phone: input.phone ?? null, email: input.email ?? null, notes: input.notes ?? null, monthly_target: input.monthly_target ?? 50000, status: 'active' })
-      .select()
-      .single();
-    if (!error && data) {
-      mockStore.saveWorker(data as Worker);
-      return data as Worker;
-    }
-  } catch {
-    // fallback
+export async function createWorker(input: {
+  name: string;
+  phone?: string;
+  email?: string;
+  notes?: string;
+  monthly_target?: number;
+}): Promise<Worker> {
+  if (isMockMode()) {
+    return mockStore.saveWorker(input);
   }
-  return localSaved;
+
+  const { data, error } = await supabase
+    .from('workers')
+    .insert({
+      name: input.name,
+      phone: input.phone ?? null,
+      email: input.email ?? null,
+      notes: input.notes ?? null,
+      monthly_target: input.monthly_target ?? 50000,
+      status: 'active',
+    })
+    .select()
+    .single();
+
+  if (error || !data) {
+    throw new Error(`Failed to create worker: ${error?.message || 'Unknown database error'}`);
+  }
+  return data as Worker;
 }
 
 export async function updateWorker(id: string, input: Partial<Worker>): Promise<Worker> {
-  // Always update mockStore immediately
-  const mockUpdated = mockStore.saveWorker({ id, ...input });
-  try {
-    const { data, error } = await supabase
-      .from('workers')
-      .update(input)
-      .eq('id', id)
-      .select()
-      .single();
-    if (!error && data) {
-      mockStore.saveWorker(data as Worker);
-      return { ...mockUpdated, ...(data as Worker), monthly_target: input.monthly_target ?? (data as Worker).monthly_target ?? mockUpdated.monthly_target };
-    }
-  } catch {
-    // fallback to mockStore
+  if (isMockMode()) {
+    return mockStore.saveWorker({ id, ...input });
   }
-  return mockUpdated;
+
+  const { data, error } = await supabase
+    .from('workers')
+    .update(input)
+    .eq('id', id)
+    .select()
+    .single();
+
+  if (error || !data) {
+    throw new Error(`Failed to update worker: ${error?.message || 'Unknown database error'}`);
+  }
+  return {
+    ...(data as Worker),
+    monthly_target: input.monthly_target ?? (data as Worker).monthly_target ?? 50000,
+  };
 }
 
 export async function deleteWorker(id: string): Promise<void> {
-  try {
-    await supabase.from('workers').delete().eq('id', id);
-  } catch {
-    // fallback
+  if (isMockMode()) {
+    mockStore.deleteWorker(id);
+    return;
   }
-  mockStore.deleteWorker(id);
+
+  const { error } = await supabase.from('workers').delete().eq('id', id);
+  if (error) {
+    throw new Error(`Failed to delete worker: ${error.message}`);
+  }
 }
+

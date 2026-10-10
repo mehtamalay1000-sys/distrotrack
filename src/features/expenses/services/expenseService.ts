@@ -1,4 +1,4 @@
-import { supabase } from '@/lib/supabase';
+import { supabase, isMockMode } from '@/lib/supabase';
 import { mockStore } from '@/lib/mockStore';
 import type {
   Expense,
@@ -57,7 +57,11 @@ export async function getExpenses(filters?: ExpenseFilters): Promise<Expense[]> 
       return data as Expense[];
     }
   } catch {
-    // fallback
+    // query failed
+  }
+
+  if (!isMockMode()) {
+    return [];
   }
 
   let list = mockStore.getExpenses();
@@ -128,7 +132,9 @@ export async function createExpense(input: CreateExpenseInput): Promise<Expense>
         .single();
 
       if (savedRow) {
-        mockStore.saveExpense(savedRow as Expense);
+        if (isMockMode()) {
+          mockStore.saveExpense(savedRow as Expense);
+        }
         try {
           await supabase.rpc('log_system_event', {
             p_user_id: input.actor_id || input.worker_id || 'system',
@@ -152,7 +158,11 @@ export async function createExpense(input: CreateExpenseInput): Promise<Expense>
     console.warn('[ExpenseService] createExpense RPC failed:', err);
   }
 
-  // Fallback to mockStore
+  // Fallback to mockStore ONLY in mock mode
+  if (!isMockMode()) {
+    throw new Error('Expense creation failed on server');
+  }
+
   const fallback = mockStore.saveExpense({
     ...input,
     payment_method: input.payment_method || 'cash',
@@ -173,14 +183,16 @@ export async function approveExpense(expenseId: string, actorId?: string): Promi
     });
 
     if (!error && data) {
-      const exp = mockStore.getExpenses().find((e) => e.id === expenseId);
-      if (exp) {
-        mockStore.saveExpense({
-          ...exp,
-          status: 'approved',
-          approved_at: new Date().toISOString(),
-          approved_by: actorId || 'Admin',
-        });
+      if (isMockMode()) {
+        const exp = mockStore.getExpenses().find((e) => e.id === expenseId);
+        if (exp) {
+          mockStore.saveExpense({
+            ...exp,
+            status: 'approved',
+            approved_at: new Date().toISOString(),
+            approved_by: actorId || 'Admin',
+          });
+        }
       }
       try {
         await supabase.rpc('log_system_event', {
@@ -214,15 +226,17 @@ export async function rejectExpense(expenseId: string, reason?: string, actorId?
     });
 
     if (!error && data) {
-      const exp = mockStore.getExpenses().find((e) => e.id === expenseId);
-      if (exp) {
-        mockStore.saveExpense({
-          ...exp,
-          status: 'rejected',
-          rejected_at: new Date().toISOString(),
-          rejected_by: actorId || 'Admin',
-          rejection_reason: reason,
-        });
+      if (isMockMode()) {
+        const exp = mockStore.getExpenses().find((e) => e.id === expenseId);
+        if (exp) {
+          mockStore.saveExpense({
+            ...exp,
+            status: 'rejected',
+            rejected_at: new Date().toISOString(),
+            rejected_by: actorId || 'Admin',
+            rejection_reason: reason,
+          });
+        }
       }
       try {
         await supabase.rpc('log_system_event', {
@@ -256,15 +270,17 @@ export async function reverseExpense(expenseId: string, reason: string, actorId?
     });
 
     if (!error && data) {
-      const exp = mockStore.getExpenses().find((e) => e.id === expenseId);
-      if (exp) {
-        mockStore.saveExpense({
-          ...exp,
-          status: 'reversed',
-          reversed_at: new Date().toISOString(),
-          reversed_by: actorId || 'Admin',
-          reversal_reason: reason,
-        });
+      if (isMockMode()) {
+        const exp = mockStore.getExpenses().find((e) => e.id === expenseId);
+        if (exp) {
+          mockStore.saveExpense({
+            ...exp,
+            status: 'reversed',
+            reversed_at: new Date().toISOString(),
+            reversed_by: actorId || 'Admin',
+            reversal_reason: reason,
+          });
+        }
       }
       try {
         await supabase.rpc('log_system_event', {

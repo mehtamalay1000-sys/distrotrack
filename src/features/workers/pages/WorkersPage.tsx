@@ -281,8 +281,7 @@ export function WorkersPage() {
 
       const routeMarketSales =
         rPicklists.reduce((sum, pl) => sum + Number(pl.total_amount || 0), 0) ||
-        rDeliveries.reduce((sum, d) => sum + Number(d.delivered_amount || d.total_amount || 0), 0) ||
-        rParties.reduce((sum, p) => sum + Number(p.outstanding_amount || 0), 0);
+        rDeliveries.reduce((sum, d) => sum + Number(d.delivered_amount || d.total_amount || 0), 0);
 
       const routeCash =
         rPicklists.reduce((sum, pl) => sum + Number(pl.total_cash || 0), 0) ||
