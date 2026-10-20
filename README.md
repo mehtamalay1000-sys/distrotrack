@@ -27,7 +27,7 @@
 - [Project Directory Structure](#-project-directory-structure)
 - [Getting Started & Local Setup](#-getting-started--local-setup)
 - [Database Setup & Migrations](#-database-setup--migrations)
-- [Pre-configured Users & Demo Credentials](#-pre-configured-users--demo-credentials)
+- [User Onboarding & Secure Credential Setup](#-user-onboarding--secure-credential-setup)
 - [Deployment Guide](#-deployment-guide)
 - [Contributing & License](#-contributing--license)
 
@@ -262,10 +262,12 @@ npm install
 ```
 
 ### 2. Configure Environment Variables
-Create a `.env` file in the project root:
+Create a `.env` file in the project root (see `.env.example`):
 ```env
 VITE_SUPABASE_URL=https://your-project-id.supabase.co
 VITE_SUPABASE_ANON_KEY=your-supabase-anon-key-here
+VITE_UPI_ID=yourname@bank
+VITE_BUSINESS_NAME="Your Business Name"
 ```
 
 > **Note:** If `.env` credentials are left blank, DistroTrack will run seamlessly in **Demo Mode** using the integrated mock data store.
@@ -293,21 +295,39 @@ To set up a live Supabase backend:
 
 1. Open your **Supabase Project Dashboard**.
 2. Navigate to the **SQL Editor**.
-3. Run [supabase/schema.sql](file:///d:/DistroTrack%2010/supabase/schema.sql) to create all foundational tables, constraints, indexes, and initial seed records.
-4. Run [supabase/master_setup.sql](file:///d:/DistroTrack%2010/supabase/master_setup.sql) to initialize `pgcrypto`, create `master_config`, `master_audit_log`, and register secure verification stored procedures.
+3. Run [supabase/schema.sql](supabase/schema.sql) to create all foundational tables, constraints, indexes, and initial schema.
+4. Run [supabase/master_setup.sql](supabase/master_setup.sql) to initialize `pgcrypto`, create `master_config`, `master_audit_log`, and register secure verification stored procedures.
 
 ---
 
-## 🔑 Pre-configured Users & Demo Credentials
+## 🔑 User Onboarding & Secure Credential Setup
 
-DistroTrack comes pre-seeded with ready-to-use profiles for testing:
+For production security, default credentials are not hardcoded. Configure your initial accounts securely following these steps:
 
-| Portal | User / Name | Role | Default PIN | Route / Description |
-|---|---|---|---|---|
-| **👑 Master** | Super Admin | `master` | `9129` | Full Executive & Audit Access |
-| **🏢 Admin** | Amish Mehta | `owner` / `admin` | `1524` | Distribution Center Operations |
-| **📱 Worker** | Balu Murtadak | `worker` | `1234` | North Route (7972761898) |
-| **📱 Worker** | Mahindra Rashinkar | `worker` | `5678` | South Route (8208091610) |
+### 1. 👑 Master Super-Admin PIN
+- Execute `supabase/master_setup.sql` in your Supabase SQL editor.
+- Update the default hashed Master PIN using PostgreSQL's `crypt()` function with `bf` salt:
+  ```sql
+  UPDATE master_config
+  SET master_pin = extensions.crypt('YOUR_SECURE_MASTER_PIN', extensions.gen_salt('bf', 10))
+  WHERE id = 1;
+  ```
+
+### 2. 🏢 Admin / Business Owner Account
+- Insert your initial distribution center admin profile into `pin_users`:
+  ```sql
+  INSERT INTO pin_users (name, phone, pin, role, status)
+  VALUES ('Admin Name', 'YOUR_PHONE', 'YOUR_ADMIN_PIN', 'owner', 'active');
+  ```
+- Alternatively, administrators can be managed from within the Master Super-Admin portal.
+
+### 3. 📱 Delivery Workers & Field Salesmen
+- Add delivery workers either via the Admin Portal (**Admin > Workers > Add Salesman**) or directly in Supabase:
+  ```sql
+  INSERT INTO workers (name, phone, pin, status)
+  VALUES ('Worker Name', 'WORKER_PHONE', 'WORKER_PIN', 'active');
+  ```
+- Assign workers to routes in the **Admin > Routes** interface.
 
 ---
 
@@ -319,7 +339,9 @@ DistroTrack comes pre-seeded with ready-to-use profiles for testing:
 3. Under **Environment Variables**, add:
    - `VITE_SUPABASE_URL`
    - `VITE_SUPABASE_ANON_KEY`
-4. The project includes [vercel.json](file:///d:/DistroTrack%2010/vercel.json) pre-configured with SPA route rewriting (`/*` → `/index.html`).
+   - `VITE_UPI_ID`
+   - `VITE_BUSINESS_NAME`
+4. The project includes [vercel.json](vercel.json) pre-configured with SPA route rewriting (`/*` → `/index.html`).
 5. Click **Deploy**.
 
 ---

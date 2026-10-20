@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import QRCode from 'react-qr-code';
-import { CheckCircle2, Copy, Smartphone, X, RefreshCw } from 'lucide-react';
+import { CheckCircle2, Copy, Smartphone, X, RefreshCw, AlertCircle } from 'lucide-react';
 
 interface UPIQRPaymentProps {
   amount?: number;
@@ -9,9 +9,9 @@ interface UPIQRPaymentProps {
   onMarkDone: (referenceNumber?: string) => void;
 }
 
-// ── SANGHAVI TRADERS UPI CONFIG ────────────────────────────────────────────
-const UPI_ID = 'amish0044@icici';
-const MERCHANT_NAME = 'SANGHAVI TRADERS';
+// ── UPI CONFIGURATION (FROM ENVIRONMENT) ───────────────────────────────────
+const UPI_ID = (import.meta.env.VITE_UPI_ID || '').trim();
+const BUSINESS_NAME = (import.meta.env.VITE_BUSINESS_NAME || 'DistroTrack').trim();
 
 export function UPIQRPayment({ amount, partyName, onClose, onMarkDone }: UPIQRPaymentProps) {
   const [step, setStep] = useState<'qr' | 'confirm'>('qr');
@@ -20,10 +20,11 @@ export function UPIQRPayment({ amount, partyName, onClose, onMarkDone }: UPIQRPa
 
   // Build UPI deep-link string
   const upiString = amount
-    ? `upi://pay?pa=${UPI_ID}&pn=${encodeURIComponent(MERCHANT_NAME)}&am=${amount.toFixed(2)}&cu=INR&tn=${encodeURIComponent(partyName ? `Payment from ${partyName}` : 'DistroTrack Payment')}`
-    : `upi://pay?pa=${UPI_ID}&pn=${encodeURIComponent(MERCHANT_NAME)}&cu=INR`;
+    ? `upi://pay?pa=${UPI_ID}&pn=${encodeURIComponent(BUSINESS_NAME)}&am=${amount.toFixed(2)}&cu=INR&tn=${encodeURIComponent(partyName ? `Payment from ${partyName}` : 'DistroTrack Payment')}`
+    : `upi://pay?pa=${UPI_ID}&pn=${encodeURIComponent(BUSINESS_NAME)}&cu=INR`;
 
   function copyUPI() {
+    if (!UPI_ID) return;
     navigator.clipboard.writeText(UPI_ID).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
@@ -66,10 +67,14 @@ export function UPIQRPayment({ amount, partyName, onClose, onMarkDone }: UPIQRPa
           </div>
 
           <div className="text-white font-black text-2xl tracking-tight">
-            {MERCHANT_NAME}
+            {BUSINESS_NAME}
           </div>
           <div className="text-orange-100 text-xs mt-0.5 font-medium">
-            VPA ID: <span className="font-mono font-bold text-white">{UPI_ID}</span>
+            {UPI_ID ? (
+              <>VPA ID: <span className="font-mono font-bold text-white">{UPI_ID}</span></>
+            ) : (
+              <span>UPI Not Configured</span>
+            )}
           </div>
 
           {partyName && (
@@ -81,7 +86,27 @@ export function UPIQRPayment({ amount, partyName, onClose, onMarkDone }: UPIQRPa
           )}
         </div>
 
-        {step === 'qr' ? (
+        {!UPI_ID ? (
+          <div className="p-6 text-center space-y-4">
+            <div className="h-14 w-14 rounded-full bg-amber-100 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400 flex items-center justify-center mx-auto border-4 border-amber-200 dark:border-amber-800/40">
+              <AlertCircle className="h-7 w-7" />
+            </div>
+            <div>
+              <h3 className="font-black text-surface-900 dark:text-white text-base">
+                UPI Not Configured
+              </h3>
+              <p className="text-xs text-surface-500 dark:text-surface-400 mt-1 max-w-xs mx-auto leading-relaxed">
+                UPI QR generation requires a configured VPA. Please configure <code className="font-mono bg-surface-100 dark:bg-surface-800 px-1 py-0.5 rounded text-[11px] text-surface-700 dark:text-surface-300">VITE_UPI_ID</code> in your environment settings to enable UPI payments.
+              </p>
+            </div>
+            <button
+              onClick={onClose}
+              className="w-full py-2.5 rounded-xl bg-surface-200 dark:bg-surface-700 hover:bg-surface-300 dark:hover:bg-surface-600 text-surface-800 dark:text-surface-200 text-xs font-bold transition-colors cursor-pointer"
+            >
+              Close
+            </button>
+          </div>
+        ) : step === 'qr' ? (
           <div className="p-5 space-y-4">
             {/* Amount Display */}
             {amount && amount > 0 && (

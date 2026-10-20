@@ -51,10 +51,11 @@ VALUES
   ('Mahindra Rashinkar', '8208091610', '5678', 'active')
 ON CONFLICT DO NOTHING;
 
-INSERT INTO pin_users (name, phone, pin, role, status)
-VALUES
-  ('Amish Mehta', '', '1524', 'owner', 'active')
-ON CONFLICT DO NOTHING;
+-- NOTE: For security, the initial admin / owner account should be created manually after setup.
+-- Example:
+-- INSERT INTO pin_users (name, phone, pin, role, status)
+-- VALUES ('Admin User', '', 'YOUR_ADMIN_PIN', 'owner', 'active')
+-- ON CONFLICT DO NOTHING;
 
 -- ── Routes ──────────────────────────────────────────────────────────
 

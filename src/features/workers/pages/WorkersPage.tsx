@@ -1135,7 +1135,7 @@ export function WorkersPage() {
                   value={form.name}
                   onChange={(e) => setForm({ ...form, name: e.target.value })}
                   required
-                  placeholder="e.g. Ramesh Patil"
+                  placeholder="e.g. Test Worker"
                   className="w-full h-10 px-3.5 text-sm border border-surface-300 dark:border-surface-600 rounded-xl bg-white dark:bg-surface-900 text-surface-900 dark:text-surface-100 placeholder:text-surface-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
                 />
               </div>
@@ -1147,7 +1147,7 @@ export function WorkersPage() {
                   <input
                     value={form.phone}
                     onChange={(e) => setForm({ ...form, phone: e.target.value })}
-                    placeholder="e.g. 9876543210"
+                    placeholder="e.g. 9999999999"
                     className="w-full h-10 px-3.5 text-sm border border-surface-300 dark:border-surface-600 rounded-xl bg-white dark:bg-surface-900 text-surface-900 dark:text-surface-100 placeholder:text-surface-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
                   />
                 </div>

@@ -29,6 +29,9 @@ import type { PaymentMode } from '@/lib/database.types';
 
 type Step = 'products' | 'payment';
 
+const BUSINESS_NAME = (import.meta.env.VITE_BUSINESS_NAME || 'DistroTrack').trim();
+const UPI_ID = (import.meta.env.VITE_UPI_ID || '').trim();
+
 interface ItemDisposition {
   delivered_qty: number;
   delivered_free_qty: number;
@@ -847,7 +850,7 @@ export function WorkerPartyDeliveryPage() {
                 <div className="bg-orange-50 dark:bg-orange-950/30 border border-orange-200 dark:border-orange-800 rounded-xl p-3.5 space-y-2">
                   <div className="flex items-center gap-2 text-orange-700 dark:text-orange-300 font-bold text-xs">
                     <Smartphone className="h-4 w-4 text-orange-500" />
-                    <span>Sanghavi Traders UPI QR (amish0044@icici)</span>
+                    <span>{BUSINESS_NAME} UPI QR{UPI_ID ? ` (${UPI_ID})` : ''}</span>
                   </div>
                   <div>
                     <label className="text-xs text-orange-800 dark:text-orange-300 block mb-1 font-bold">

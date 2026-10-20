@@ -13,8 +13,8 @@ import { isMockMode } from '@/lib/supabase';
 const INITIAL_WORKERS: Worker[] = [
   {
     id: 'w-balu',
-    name: 'Balu Murtadak',
-    phone: '7972761898',
+    name: 'Test Worker 1',
+    phone: '9999999999',
     email: null,
     pin: '1234',
     status: 'active',
@@ -25,8 +25,8 @@ const INITIAL_WORKERS: Worker[] = [
   },
   {
     id: 'w-mahindra',
-    name: 'Mahindra Rashinkar',
-    phone: '8208091610',
+    name: 'Test Worker 2',
+    phone: '9999999999',
     email: null,
     pin: '5678',
     status: 'active',
